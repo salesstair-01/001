@@ -49,7 +49,7 @@ func (p *Partition) Commit(epoch uint64, id TxnID) (uint64, error) {
 		return 0, newErr(KindInternal, "transaction %s is already committing", id)
 	}
 	keys, writes := t.merged(0)
-	if len(keys) == 0 {
+	if len(keys) == 0 && len(t.autoinc) == 0 {
 		p.abortTxnLocked(t) // nothing to write: just free the locks
 		p.mu.Unlock()
 		return 0, nil
@@ -77,6 +77,10 @@ func (p *Partition) Commit(epoch uint64, id TxnID) (uint64, error) {
 	rec := wal.Record{TxnID: id, CommitTS: ts, WallMicros: time.Now().UnixMicro()}
 	for _, k := range keys {
 		v := writes[k].value
+		rec.Writes = append(rec.Writes, wal.Write{Key: []byte(k), Value: v})
+		p.pending[k] = pendingWrite{ts: ts, value: v}
+	}
+	for k, v := range p.autoIncWritesLocked(t) { // saved with the commit (D7)
 		rec.Writes = append(rec.Writes, wal.Write{Key: []byte(k), Value: v})
 		p.pending[k] = pendingWrite{ts: ts, value: v}
 	}

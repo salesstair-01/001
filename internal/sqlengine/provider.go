@@ -101,7 +101,7 @@ func (d *Database) GetTableInsensitive(ctx *sql.Context, name string) (sql.Table
 	if err != nil || info == nil {
 		return nil, false, err
 	}
-	t, err := newTable(ctx, d.p.store, info)
+	t, err := newTable(ctx, d.p.catalog, info)
 	if err != nil {
 		return nil, false, err
 	}
@@ -146,9 +146,6 @@ func (d *Database) CreateTable(ctx *sql.Context, name string, schema sql.Primary
 		ci, err := columnInfo(col, uint32(i+1))
 		if err != nil {
 			return err
-		}
-		if col.AutoIncrement {
-			return fmt.Errorf("AUTO_INCREMENT comes in a later version (slice 5)")
 		}
 		if types.IsGeometry(col.Type) {
 			return fmt.Errorf("column %s: spatial types are not supported in v1", col.Name)

@@ -25,6 +25,57 @@ type Session struct {
 
 	locksMu sync.Mutex
 	locks   stmtLocks // lock modes of the current statement
+
+	autoMu sync.Mutex
+	auto   map[uint32]*autoBatch // AUTO_INCREMENT reservations of the current statement
+
+	txnMu   sync.Mutex
+	current *Txn // the open transaction, until it commits or rolls back
+}
+
+// autoBatch is a reservation of consecutive AUTO_INCREMENT values. It doubles
+// with each refill within a statement, so a single-row INSERT reserves one
+// value and a bulk INSERT needs few round trips.
+type autoBatch struct {
+	stmt, next, end, size uint64
+}
+
+func (s *Session) nextAutoValue(table uint32, reserve func(count uint64) (uint64, error)) (uint64, error) {
+	s.autoMu.Lock()
+	defer s.autoMu.Unlock()
+	if s.auto == nil {
+		s.auto = map[uint32]*autoBatch{}
+	}
+	stmt := s.Stmt()
+	b := s.auto[table]
+	if b == nil || b.stmt != stmt {
+		b = &autoBatch{stmt: stmt}
+		s.auto[table] = b
+	}
+	if b.next >= b.end {
+		b.size *= 2
+		if b.size == 0 {
+			b.size = 1
+		}
+		if b.size > 1024 {
+			b.size = 1024
+		}
+		first, err := reserve(b.size)
+		if err != nil {
+			return 0, err
+		}
+		b.next, b.end = first, first+b.size
+	}
+	v := b.next
+	b.next++
+	return v, nil
+}
+
+// dropAutoBatch forgets the reservation after an explicit value raised the counter.
+func (s *Session) dropAutoBatch(table uint32) {
+	s.autoMu.Lock()
+	delete(s.auto, table)
+	s.autoMu.Unlock()
 }
 
 // stmtLocks says which tables a statement reads with locks (D5, D6).
@@ -52,13 +103,67 @@ func (s *Session) Stmt() uint64 { return s.stmt.Load() }
 
 // CommandBegin starts a new statement: its writes form one statement layer.
 func (s *Session) CommandBegin() error { s.stmt.Add(1); return nil }
-func (s *Session) CommandEnd()         {}
+
+// CommandEnd ends transactions go-mysql-server leaves behind. It clears a
+// failed autocommit statement's transaction without calling Rollback, and a
+// statement that fails while its rows stream keeps its transaction set, so
+// the next autocommit statement would join it. Either way the KV transaction
+// would hold its locks. MySQL rolls a failed autocommit statement back.
+func (s *Session) CommandEnd() {
+	if cur, ok := s.GetTransaction().(*Txn); ok && cur != nil && !s.GetIgnoreAutoCommit() && s.autocommit() {
+		s.SetTransaction(nil)
+		s.finished(cur)
+		_ = cur.Rollback(context.Background())
+	}
+	s.endOrphan()
+}
+
+func (s *Session) autocommit() bool {
+	v, err := s.GetSessionVariable(sql.NewEmptyContext(), "autocommit")
+	if err != nil {
+		return true
+	}
+	switch x := v.(type) {
+	case int8:
+		return x != 0
+	case int64:
+		return x != 0
+	case bool:
+		return x
+	}
+	return fmt.Sprint(v) != "0"
+}
 
 // SessionEnd rolls back an open transaction when the client goes away.
 func (s *Session) SessionEnd() {
-	if tx, ok := s.GetTransaction().(*Txn); ok && tx != nil {
-		_ = tx.Rollback(context.Background())
+	s.txnMu.Lock()
+	t := s.current
+	s.current = nil
+	s.txnMu.Unlock()
+	if t != nil {
+		_ = t.Rollback(context.Background())
 	}
+}
+
+// endOrphan rolls back a transaction the session no longer refers to.
+func (s *Session) endOrphan() {
+	s.txnMu.Lock()
+	t := s.current
+	if t == nil || s.GetTransaction() == sql.Transaction(t) {
+		s.txnMu.Unlock()
+		return
+	}
+	s.current = nil
+	s.txnMu.Unlock()
+	_ = t.Rollback(context.Background())
+}
+
+func (s *Session) finished(t *Txn) {
+	s.txnMu.Lock()
+	if s.current == t {
+		s.current = nil
+	}
+	s.txnMu.Unlock()
 }
 
 func (s *Session) isolation(ctx *sql.Context) (kv.Isolation, error) {
@@ -81,11 +186,19 @@ func (s *Session) isolation(ctx *sql.Context) (kv.Isolation, error) {
 
 // StartTransaction creates a transaction; the KV side begins on first use.
 func (s *Session) StartTransaction(ctx *sql.Context, tc sql.TransactionCharacteristic) (sql.Transaction, error) {
+	s.endOrphan()
 	iso, err := s.isolation(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return s.store.NewTxn(iso, tc == sql.ReadOnly), nil
+	t := s.store.NewTxn(iso, tc == sql.ReadOnly)
+	s.txnMu.Lock()
+	if old := s.current; old != nil && old != t {
+		defer func() { _ = old.Rollback(context.Background()) }()
+	}
+	s.current = t
+	s.txnMu.Unlock()
+	return t, nil
 }
 
 func (s *Session) CommitTransaction(ctx *sql.Context, tx sql.Transaction) error {
@@ -93,6 +206,7 @@ func (s *Session) CommitTransaction(ctx *sql.Context, tx sql.Transaction) error 
 	if !ok {
 		return nil
 	}
+	defer s.finished(t)
 	return mysqlError(t.Commit(ctx))
 }
 
@@ -101,6 +215,7 @@ func (s *Session) Rollback(ctx *sql.Context, tx sql.Transaction) error {
 	if !ok {
 		return nil
 	}
+	defer s.finished(t)
 	return mysqlError(t.Rollback(ctx))
 }
 

@@ -429,3 +429,33 @@ func TestGroupCommitConcurrent(t *testing.T) {
 }
 
 var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+func TestAutoIncrementSurvivesRestart(t *testing.T) {
+	s := objstore.NewMem()
+	p := open(t, s, "a")
+	id := txnID()
+	p.Begin(p.epoch, id, BeginOptions{})
+	first, _ := p.AutoIncrement(p.epoch, id, 2000, 3, 0)
+	if first != 1 {
+		t.Fatalf("first value %d", first)
+	}
+	// A rolled-back transaction's values are not handed out again.
+	rb := txnID()
+	p.Begin(p.epoch, rb, BeginOptions{})
+	if v, _ := p.AutoIncrement(p.epoch, rb, 2000, 1, 0); v != 4 {
+		t.Fatalf("second allocation %d", v)
+	}
+	p.Rollback(p.epoch, rb)
+	if v, _ := p.AutoIncrement(p.epoch, id, 2000, 0, 100); v != 100 {
+		t.Fatalf("explicit value raises the counter: %d", v)
+	}
+	p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpPut, Key: key(1), Value: []byte("x")}}, 0)
+	if _, err := p.Commit(p.epoch, id); err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+	q := open(t, s, "b")
+	if v, _ := q.AutoIncrement(q.epoch, TxnID{}, 2000, 0, 0); v != 100 {
+		t.Fatalf("counter after restart: %d", v)
+	}
+}

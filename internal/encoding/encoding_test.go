@@ -238,3 +238,28 @@ func TestDecimalOrder(t *testing.T) {
 		t.Fatal("1.5 and 1.50 must encode the same")
 	}
 }
+
+func TestSkipColumn(t *testing.T) {
+	for _, desc := range []bool{false, true} {
+		var k []byte
+		k = AppendInt(k, -7, desc)
+		k = AppendNull(k, desc)
+		k = AppendBytes(k, []byte{0, 1, 0xFF, 'x'}, desc)
+		k = AppendDecimal(k, -1, 2, "125", desc)
+		k = AppendDecimal(k, 0, 0, "", desc)
+		k = AppendDecimal(k, 1, -3, "9", desc)
+		k = AppendFloat(k, 2.5, desc)
+		kinds := []ColumnKind{KindFixed8, KindBytes, KindBytes, KindDecimal, KindDecimal, KindDecimal, KindFixed8}
+		rest := k
+		for i, kind := range kinds {
+			n, err := SkipColumn(rest, kind, desc)
+			if err != nil {
+				t.Fatalf("desc=%v col %d: %v", desc, i, err)
+			}
+			rest = rest[n:]
+		}
+		if len(rest) != 0 {
+			t.Fatalf("desc=%v: %d bytes left", desc, len(rest))
+		}
+	}
+}

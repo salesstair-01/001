@@ -20,29 +20,35 @@ const scanPage = 256
 // mutateBatch is the most row mutations one Mutate call carries (D7).
 const mutateBatch = 256
 
-// Table is a KV-backed table, clustered by its primary key.
+// Table is a KV-backed table, clustered by its primary key as in InnoDB.
 type Table struct {
-	store  *Store
-	info   *TableInfo
-	schema sql.PrimaryKeySchema
-	codecs []colCodec // by schema ordinal
-	pkOrd  []int      // schema ordinals of the primary-key columns, in key order
+	cat     *Catalog
+	store   *Store
+	info    *TableInfo
+	schema  sql.PrimaryKeySchema
+	codecs  []colCodec // by schema ordinal
+	pkOrd   []int      // schema ordinals of the primary-key columns, in key order
+	colOrd  map[uint32]int
+	indexes []*secIndex
+	autoOrd int // ordinal of the AUTO_INCREMENT column, or -1
 }
 
 var (
-	_ sql.Table            = (*Table)(nil)
-	_ sql.PrimaryKeyTable  = (*Table)(nil)
-	_ sql.CommentedTable   = (*Table)(nil)
-	_ sql.InsertableTable  = (*Table)(nil)
-	_ sql.UpdatableTable   = (*Table)(nil)
-	_ sql.DeletableTable   = (*Table)(nil)
-	_ sql.ReplaceableTable = (*Table)(nil)
-	_ sql.IndexAddressable = (*Table)(nil)
-	_ sql.Databaseable     = (*Table)(nil)
+	_ sql.Table               = (*Table)(nil)
+	_ sql.PrimaryKeyTable     = (*Table)(nil)
+	_ sql.CommentedTable      = (*Table)(nil)
+	_ sql.InsertableTable     = (*Table)(nil)
+	_ sql.UpdatableTable      = (*Table)(nil)
+	_ sql.DeletableTable      = (*Table)(nil)
+	_ sql.ReplaceableTable    = (*Table)(nil)
+	_ sql.IndexAddressable    = (*Table)(nil)
+	_ sql.IndexAlterableTable = (*Table)(nil)
+	_ sql.AutoIncrementTable  = (*Table)(nil)
+	_ sql.Databaseable        = (*Table)(nil)
 )
 
-func newTable(ctx *sql.Context, store *Store, info *TableInfo) (*Table, error) {
-	t := &Table{store: store, info: info}
+func newTable(ctx *sql.Context, cat *Catalog, info *TableInfo) (*Table, error) {
+	t := &Table{cat: cat, store: cat.store, info: info, colOrd: map[uint32]int{}, autoOrd: -1}
 	isPK := map[uint32]int{}
 	for i, id := range info.PK {
 		isPK[id] = i
@@ -58,11 +64,27 @@ func newTable(ctx *sql.Context, store *Store, info *TableInfo) (*Table, error) {
 		}
 		cols = append(cols, col)
 		t.codecs = append(t.codecs, colCodec{info: ci, typ: col.Type})
+		t.colOrd[ci.ID] = i
 		if pk {
 			t.pkOrd[isPK[ci.ID]] = i
 		}
+		if ci.AutoIncrement {
+			t.autoOrd = i
+		}
 	}
 	t.schema = sql.NewPrimaryKeySchema(cols, t.pkOrd...)
+	for i := range info.Indexes {
+		ix := &secIndex{t: t, info: &info.Indexes[i]}
+		for _, c := range ix.info.Columns {
+			ord, ok := t.colOrd[c.ColID]
+			if !ok {
+				return nil, fmt.Errorf("index %s: unknown column id %d", ix.info.Name, c.ColID)
+			}
+			ix.ords = append(ix.ords, ord)
+			ix.prefix = append(ix.prefix, c.Prefix)
+		}
+		t.indexes = append(t.indexes, ix)
+	}
 	return t, nil
 }
 
@@ -96,9 +118,9 @@ func (t *Table) pkKey(ctx context.Context, row sql.Row) ([]byte, error) {
 	return k, nil
 }
 
-func (t *Table) pkString(row sql.Row) string {
-	parts := make([]string, len(t.pkOrd))
-	for i, ord := range t.pkOrd {
+func keyString(row sql.Row, ords []int) string {
+	parts := make([]string, len(ords))
+	for i, ord := range ords {
 		parts[i] = fmt.Sprint(row[ord])
 	}
 	return "[" + strings.Join(parts, ",") + "]"
@@ -157,6 +179,76 @@ func (t *Table) decodeRow(ctx context.Context, b []byte) (sql.Row, error) {
 	return row, nil
 }
 
+// ---- secondary indexes (D2) ----------------------------------------------------
+
+// secIndex is one secondary index. Entries are
+//
+//	non-unique:                index cols + pk cols -> empty
+//	unique:                    index cols           -> encoded pk
+//	unique, any column NULL:   index cols + pk cols -> empty
+//
+// The NULL rule is there because MySQL allows several NULLs in a unique index.
+type secIndex struct {
+	t      *Table
+	info   *IndexInfo
+	ords   []int
+	prefix []int
+}
+
+func (ix *secIndex) keyPrefix() []byte {
+	return encoding.Prefix(ix.t.store.partition, ix.t.info.ID, ix.info.ID)
+}
+
+// entry returns the index entry for a row whose primary key is pk. unique
+// reports whether the entry enforces uniqueness (unique index, no NULLs).
+func (ix *secIndex) entry(ctx context.Context, row sql.Row, pk []byte) (key, value []byte, unique bool, err error) {
+	k := ix.keyPrefix()
+	hasNull := false
+	for i, ord := range ix.ords {
+		v := row[ord]
+		if v == nil {
+			hasNull = true
+			k = encoding.AppendNull(k, false)
+			continue
+		}
+		c := &ix.t.codecs[ord]
+		if k, err = c.appendKey(ctx, k, truncate(c.typ, v, ix.prefix[i])); err != nil {
+			return nil, nil, false, err
+		}
+	}
+	suffix := pk[encoding.PrefixLen:]
+	if ix.info.Unique && !hasNull {
+		return k, append([]byte(nil), suffix...), true, nil
+	}
+	return append(k, suffix...), []byte{}, false, nil
+}
+
+// pkOf recovers the primary key from an index entry.
+func (ix *secIndex) pkOf(key, value []byte) ([]byte, error) {
+	if len(value) > 0 {
+		return append(ix.t.prefix(), value...), nil
+	}
+	rest := key[encoding.PrefixLen:]
+	for _, ord := range ix.ords {
+		n, err := encoding.SkipColumn(rest, ix.t.codecs[ord].keyKind(), false)
+		if err != nil {
+			return nil, err
+		}
+		rest = rest[n:]
+	}
+	return append(ix.t.prefix(), rest...), nil
+}
+
+func (t *Table) uniqueIndexes() []*secIndex {
+	var out []*secIndex
+	for _, ix := range t.indexes {
+		if ix.info.Unique {
+			out = append(out, ix)
+		}
+	}
+	return out
+}
+
 // ---- reads ---------------------------------------------------------------------
 
 // keySpan is a range [start, end) of user keys, or one exact key.
@@ -167,6 +259,7 @@ type keySpan struct {
 
 type kvPartition struct {
 	spans []keySpan
+	index *secIndex // nil = primary key
 	key   []byte
 }
 
@@ -198,18 +291,21 @@ func (t *Table) PartitionRows(ctx *sql.Context, part sql.Partition) (sql.RowIter
 		return nil, fmt.Errorf("unexpected partition %T", part)
 	}
 	txn, done := sessionTxn(ctx, t.store)
-	return &rowIter{t: t, txn: txn, opts: readOpts(ctx, t.info.Name), done: done, spans: p.spans}, nil
+	return &rowIter{t: t, txn: txn, opts: readOpts(ctx, t.info.Name), done: done, spans: p.spans, index: p.index}, nil
 }
 
+// rowIter reads rows span by span: primary spans directly, secondary spans
+// as index entries followed by a batched Get of their rows.
 type rowIter struct {
 	t     *Table
 	txn   *Txn
 	opts  kvrpc.ReadOpts
 	done  func()
 	spans []keySpan
+	index *secIndex
 
-	page   [][]byte
-	next   []byte // resume key of the current span; nil = span not started
+	page   [][]byte // row values ready to decode
+	next   []byte   // resume key of the current span; nil = span not started
 	more   bool
 	closed bool
 }
@@ -257,9 +353,33 @@ func (it *rowIter) fetch(ctx *sql.Context, sp keySpan) error {
 	if err != nil {
 		return mysqlError(err)
 	}
-	it.page, it.more = resp.Values, len(resp.Resume) > 0
+	it.more = len(resp.Resume) > 0
 	if it.more {
 		it.next = resp.Resume
+	}
+	if it.index == nil {
+		it.page = resp.Values
+		return nil
+	}
+	if len(resp.Keys) == 0 {
+		it.page = nil
+		return nil
+	}
+	pks := make([][]byte, len(resp.Keys))
+	for i := range resp.Keys {
+		if pks[i], err = it.index.pkOf(resp.Keys[i], resp.Values[i]); err != nil {
+			return err
+		}
+	}
+	rows, err := it.txn.Get(ctx, pks, it.opts)
+	if err != nil {
+		return mysqlError(err)
+	}
+	it.page = it.page[:0]
+	for _, r := range rows {
+		if r != nil {
+			it.page = append(it.page, r)
+		}
 	}
 	return nil
 }
@@ -283,7 +403,7 @@ func (t *Table) editor(*sql.Context) *editor {
 	return &editor{t: t, pending: map[string]int{}}
 }
 
-// editor buffers one statement's row mutations and sends them in batches.
+// editor buffers one statement's row and index mutations and sends them in batches.
 type editor struct {
 	t       *Table
 	buf     []kv.Mutation
@@ -341,7 +461,7 @@ func (e *editor) add(ctx *sql.Context, m kv.Mutation) error {
 		prev := e.buf[i]
 		switch {
 		case prev.Op == kv.OpDelete && m.Op == kv.OpInsertOnly:
-			m.Op = kv.OpPut // re-insert of a row deleted in this statement
+			m.Op = kv.OpPut // re-insert of a key deleted in this statement
 		case prev.Op == kv.OpInsertOnly && m.Op == kv.OpPut:
 			m.Op = kv.OpInsertOnly // still must not exist outside this statement
 		}
@@ -356,82 +476,255 @@ func (e *editor) add(ctx *sql.Context, m kv.Mutation) error {
 	return nil
 }
 
-// existing returns the live row at key as this statement sees it, if any.
-func (e *editor) existing(ctx *sql.Context, key []byte) (sql.Row, error) {
+// lookup returns the live value at key as this statement sees it: from the
+// buffer, or a locking read of the latest version, whose lock keeps the
+// answer true until commit (D5). nil = absent.
+func (e *editor) lookup(ctx *sql.Context, key []byte) ([]byte, error) {
 	if i, ok := e.pending[string(key)]; ok {
-		m := e.buf[i]
-		if m.Op == kv.OpDelete {
-			return nil, nil
+		if m := e.buf[i]; m.Op != kv.OpDelete {
+			return m.Value, nil
 		}
-		return e.t.decodeRow(ctx, m.Value)
+		return nil, nil
 	}
 	txn, stmt, err := e.txn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// A locking read of the key: holding its lock keeps the duplicate check
-	// true until commit (D5).
 	vs, err := txn.Get(ctx, [][]byte{key}, kvrpc.ReadOpts{Stmt: stmt, IncludeStmt: true, Lock: kv.LockExclusive, LockWaitMs: lockWait(ctx).Milliseconds()})
 	if err != nil {
 		return nil, mysqlError(err)
 	}
-	if vs[0] == nil {
-		return nil, nil
+	return vs[0], nil
+}
+
+// existing returns the live row with primary key pk, if any.
+func (e *editor) existing(ctx *sql.Context, pk []byte) (sql.Row, error) {
+	v, err := e.lookup(ctx, pk)
+	if err != nil || v == nil {
+		return nil, err
 	}
-	return e.t.decodeRow(ctx, vs[0])
+	return e.t.decodeRow(ctx, v)
+}
+
+// uniqueOwner returns the row that holds a unique index entry, if any.
+func (e *editor) uniqueOwner(ctx *sql.Context, ix *secIndex, key []byte) (sql.Row, error) {
+	v, err := e.lookup(ctx, key)
+	if err != nil || v == nil {
+		return nil, err
+	}
+	pk, err := ix.pkOf(key, v)
+	if err != nil {
+		return nil, err
+	}
+	return e.existing(ctx, pk)
+}
+
+func (e *editor) uniqueErr(ix *secIndex, row, existing sql.Row) error {
+	return sql.NewUniqueKeyErr(fmt.Sprintf("%s for key '%s.%s'", keyString(row, ix.ords), e.t.info.Name, ix.info.Name), false, existing)
+}
+
+func entryOp(unique bool) kv.MutationOp {
+	if unique {
+		return kv.OpInsertOnly
+	}
+	return kv.OpPut
 }
 
 func (e *editor) Insert(ctx *sql.Context, row sql.Row) error {
-	key, err := e.t.pkKey(ctx, row)
+	pk, err := e.t.pkKey(ctx, row)
 	if err != nil {
 		return err
 	}
-	old, err := e.existing(ctx, key)
-	if err != nil {
+	if old, err := e.existing(ctx, pk); err != nil {
 		return err
+	} else if old != nil {
+		return sql.NewUniqueKeyErr(keyString(row, e.t.pkOrd), true, old)
 	}
-	if old != nil {
-		return sql.NewUniqueKeyErr(e.t.pkString(row), true, old)
+	type ent struct {
+		key, value []byte
+		unique     bool
+	}
+	ents := make([]ent, 0, len(e.t.indexes))
+	for _, ix := range e.t.indexes {
+		k, v, uniq, err := ix.entry(ctx, row, pk)
+		if err != nil {
+			return err
+		}
+		if uniq {
+			if other, err := e.uniqueOwner(ctx, ix, k); err != nil {
+				return err
+			} else if other != nil {
+				return e.uniqueErr(ix, row, other)
+			}
+		}
+		ents = append(ents, ent{k, v, uniq})
 	}
 	v, err := e.t.encodeRow(ctx, row)
 	if err != nil {
 		return err
 	}
-	return e.add(ctx, kv.Mutation{Op: kv.OpInsertOnly, Key: key, Value: v})
+	if err := e.add(ctx, kv.Mutation{Op: kv.OpInsertOnly, Key: pk, Value: v}); err != nil {
+		return err
+	}
+	for _, en := range ents {
+		if err := e.add(ctx, kv.Mutation{Op: entryOp(en.unique), Key: en.key, Value: en.value}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *editor) Update(ctx *sql.Context, old, new sql.Row) error {
-	oldKey, err := e.t.pkKey(ctx, old)
+	oldPK, err := e.t.pkKey(ctx, old)
 	if err != nil {
 		return err
 	}
-	newKey, err := e.t.pkKey(ctx, new)
+	newPK, err := e.t.pkKey(ctx, new)
 	if err != nil {
 		return err
+	}
+	pkMoved := !bytes.Equal(oldPK, newPK)
+	if pkMoved {
+		if other, err := e.existing(ctx, newPK); err != nil {
+			return err
+		} else if other != nil {
+			return sql.NewUniqueKeyErr(keyString(new, e.t.pkOrd), true, other)
+		}
+	}
+	type change struct {
+		oldKey, newKey, newValue []byte
+		unique                   bool
+	}
+	var changes []change
+	for _, ix := range e.t.indexes {
+		ok, ov, _, err := ix.entry(ctx, old, oldPK)
+		if err != nil {
+			return err
+		}
+		nk, nv, uniq, err := ix.entry(ctx, new, newPK)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(ok, nk) && bytes.Equal(ov, nv) {
+			continue
+		}
+		if uniq && !bytes.Equal(ok, nk) {
+			if other, err := e.uniqueOwner(ctx, ix, nk); err != nil {
+				return err
+			} else if other != nil {
+				return e.uniqueErr(ix, new, other)
+			}
+		}
+		changes = append(changes, change{ok, nk, nv, uniq})
 	}
 	v, err := e.t.encodeRow(ctx, new)
 	if err != nil {
 		return err
 	}
-	if bytes.Equal(oldKey, newKey) {
-		return e.add(ctx, kv.Mutation{Op: kv.OpPut, Key: newKey, Value: v})
-	}
-	// The primary key changed: delete the old row, insert the new one.
-	if other, err := e.existing(ctx, newKey); err != nil {
-		return err
-	} else if other != nil {
-		return sql.NewUniqueKeyErr(e.t.pkString(new), true, other)
-	}
-	if err := e.add(ctx, kv.Mutation{Op: kv.OpDelete, Key: oldKey}); err != nil {
+	if pkMoved {
+		if err := e.add(ctx, kv.Mutation{Op: kv.OpDelete, Key: oldPK}); err != nil {
+			return err
+		}
+		if err := e.add(ctx, kv.Mutation{Op: kv.OpInsertOnly, Key: newPK, Value: v}); err != nil {
+			return err
+		}
+	} else if err := e.add(ctx, kv.Mutation{Op: kv.OpPut, Key: newPK, Value: v}); err != nil {
 		return err
 	}
-	return e.add(ctx, kv.Mutation{Op: kv.OpInsertOnly, Key: newKey, Value: v})
+	for _, c := range changes {
+		op := kv.OpPut // same key, new primary key: rewrite this row's own entry
+		if !bytes.Equal(c.oldKey, c.newKey) {
+			if err := e.add(ctx, kv.Mutation{Op: kv.OpDelete, Key: c.oldKey}); err != nil {
+				return err
+			}
+			op = entryOp(c.unique)
+		}
+		if err := e.add(ctx, kv.Mutation{Op: op, Key: c.newKey, Value: c.newValue}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *editor) Delete(ctx *sql.Context, row sql.Row) error {
-	key, err := e.t.pkKey(ctx, row)
+	pk, err := e.t.pkKey(ctx, row)
 	if err != nil {
 		return err
 	}
-	return e.add(ctx, kv.Mutation{Op: kv.OpDelete, Key: key})
+	if err := e.add(ctx, kv.Mutation{Op: kv.OpDelete, Key: pk}); err != nil {
+		return err
+	}
+	for _, ix := range e.t.indexes {
+		k, _, _, err := ix.entry(ctx, row, pk)
+		if err != nil {
+			return err
+		}
+		if err := e.add(ctx, kv.Mutation{Op: kv.OpDelete, Key: k}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
+
+// ---- AUTO_INCREMENT (D7) ------------------------------------------------------------
+
+func (t *Table) PeekNextAutoIncrementValue(ctx *sql.Context) (uint64, error) {
+	h, err := t.store.header(ctx)
+	if err != nil {
+		return 0, mysqlError(err)
+	}
+	n, err := t.store.client.AutoIncrement(ctx, &kvrpc.AutoIncReq{H: h, Table: t.info.ID})
+	return n, mysqlError(err)
+}
+
+// GetNextAutoIncrementValue hands out the next value, or raises the counter
+// past an explicitly inserted one. Values within a statement come from one
+// growing reservation, so they are consecutive.
+func (t *Table) GetNextAutoIncrementValue(ctx *sql.Context, insertVal interface{}) (uint64, error) {
+	txn, ok := ctx.GetTransaction().(*Txn)
+	if !ok || txn == nil {
+		return 0, fmt.Errorf("AUTO_INCREMENT outside a transaction")
+	}
+	s, _ := ctx.Session.(*Session)
+	if insertVal != nil {
+		n, err := toUint64(ctx, t.codecs[t.autoOrd].typ, insertVal)
+		if err != nil {
+			return 0, err
+		}
+		if s != nil {
+			s.dropAutoBatch(t.info.ID)
+		}
+		_, err = txn.AutoIncrement(ctx, t.info.ID, 0, n+1)
+		return n, mysqlError(err)
+	}
+	if s == nil {
+		n, err := txn.AutoIncrement(ctx, t.info.ID, 1, 0)
+		return n, mysqlError(err)
+	}
+	return s.nextAutoValue(t.info.ID, func(count uint64) (uint64, error) {
+		n, err := txn.AutoIncrement(ctx, t.info.ID, count, 0)
+		return n, mysqlError(err)
+	})
+}
+
+func (t *Table) AutoIncrementSetter(*sql.Context) sql.AutoIncrementSetter {
+	return &autoIncSetter{t: t}
+}
+
+type autoIncSetter struct{ t *Table }
+
+// SetAutoIncrementValue is ALTER TABLE ... AUTO_INCREMENT = v; the counter never goes down.
+func (a *autoIncSetter) SetAutoIncrementValue(ctx *sql.Context, v uint64) error {
+	txn := a.t.store.NewTxn(kv.RepeatableRead, false)
+	if _, err := txn.AutoIncrement(ctx, a.t.info.ID, 0, v); err != nil {
+		_ = txn.Rollback(ctx)
+		return mysqlError(err)
+	}
+	return mysqlError(txn.Commit(ctx))
+}
+
+func (a *autoIncSetter) AcquireAutoIncrementLock(*sql.Context) (func(), error) {
+	return func() {}, nil
+}
+
+func (a *autoIncSetter) Close(*sql.Context) error { return nil }

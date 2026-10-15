@@ -96,11 +96,30 @@ type (
 		CommitTS uint64
 	}
 
+	AutoIncReq struct {
+		H       Header
+		Txn     kv.TxnID // zero = peek
+		Table   uint32
+		Count   uint64
+		AtLeast uint64
+	}
+	AutoIncResp struct{ First uint64 }
+
 	HeartbeatReq struct {
 		H    Header
 		Txns []kv.TxnID
 	}
 )
+
+func lockWaitOf(o ReadOpts) int64 {
+	if o.Lock == kv.LockNone {
+		return 0
+	}
+	if o.LockWaitMs <= 0 {
+		return kv.DefaultLockWait.Milliseconds()
+	}
+	return o.LockWaitMs
+}
 
 func (o ReadOpts) kv() kv.ReadOptions {
 	return kv.ReadOptions{Stmt: o.Stmt, IncludeStmt: o.IncludeStmt, Lock: o.Lock, LockWait: time.Duration(o.LockWaitMs) * time.Millisecond}
@@ -300,6 +319,14 @@ var methods = map[string]handler{
 		st, ts, err := p.TxnStatus(r.H.Epoch, r.Txn)
 		return &TxnStatusResp{State: st, CommitTS: ts}, err
 	}),
+	"AutoIncrement": unary(func(s *Server, _ context.Context, r *AutoIncReq) (*AutoIncResp, error) {
+		p, err := s.part(r.H)
+		if err != nil {
+			return nil, err
+		}
+		first, err := p.AutoIncrement(r.H.Epoch, r.Txn, r.Table, r.Count, r.AtLeast)
+		return &AutoIncResp{First: first}, err
+	}),
 	"Heartbeat": unary(func(s *Server, _ context.Context, r *HeartbeatReq) (*Empty, error) {
 		p, err := s.part(r.H)
 		if err != nil {
@@ -334,9 +361,14 @@ type Client struct {
 func NewClient(cc *grpc.ClientConn) *Client { return &Client{cc: cc} }
 
 func (c *Client) call(ctx context.Context, method string, req, resp any) error {
+	return c.callWait(ctx, method, req, resp, 0)
+}
+
+// callWait is call for requests that may wait up to lockWaitMs for locks.
+func (c *Client) callWait(ctx context.Context, method string, req, resp any, lockWaitMs int64) error {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, CallTimeout)
+		ctx, cancel = context.WithTimeout(ctx, CallTimeout+time.Duration(lockWaitMs)*time.Millisecond)
 		defer cancel()
 	}
 	return FromStatus(c.cc.Invoke(ctx, "/"+serviceName+"/"+method, req, resp))
@@ -354,7 +386,7 @@ func (c *Client) Begin(ctx context.Context, r *BeginReq) error {
 
 func (c *Client) Get(ctx context.Context, r *GetReq) ([][]byte, error) {
 	var resp GetResp
-	if err := c.call(ctx, "Get", r, &resp); err != nil {
+	if err := c.callWait(ctx, "Get", r, &resp, lockWaitOf(r.Opts)); err != nil {
 		return nil, err
 	}
 	out := make([][]byte, len(r.Keys))
@@ -371,12 +403,16 @@ func (c *Client) Get(ctx context.Context, r *GetReq) ([][]byte, error) {
 
 func (c *Client) Scan(ctx context.Context, r *ScanReq) (*ScanResp, error) {
 	var resp ScanResp
-	err := c.call(ctx, "Scan", r, &resp)
+	err := c.callWait(ctx, "Scan", r, &resp, lockWaitOf(r.Opts))
 	return &resp, err
 }
 
 func (c *Client) Mutate(ctx context.Context, r *MutateReq) error {
-	return c.call(ctx, "Mutate", r, &Empty{})
+	wait := r.LockWaitMs
+	if wait <= 0 {
+		wait = kv.DefaultLockWait.Milliseconds()
+	}
+	return c.callWait(ctx, "Mutate", r, &Empty{}, wait)
 }
 
 func (c *Client) RollbackStatement(ctx context.Context, r *StmtReq) error {
@@ -397,6 +433,12 @@ func (c *Client) TxnStatus(ctx context.Context, r *TxnReq) (*TxnStatusResp, erro
 	var resp TxnStatusResp
 	err := c.call(ctx, "TxnStatus", r, &resp)
 	return &resp, err
+}
+
+func (c *Client) AutoIncrement(ctx context.Context, r *AutoIncReq) (uint64, error) {
+	var resp AutoIncResp
+	err := c.call(ctx, "AutoIncrement", r, &resp)
+	return resp.First, err
 }
 
 func (c *Client) Heartbeat(ctx context.Context, r *HeartbeatReq) error {

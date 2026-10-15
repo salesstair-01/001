@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -579,4 +580,191 @@ func connStrings(t *testing.T, c *sql.Conn, q string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+func TestAutoIncrement(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	mustExec(t, db, "CREATE TABLE ai (id BIGINT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(10))")
+	r := mustExec(t, db, "INSERT INTO ai (v) VALUES ('a')")
+	if id, _ := r.LastInsertId(); id != 1 {
+		t.Fatalf("first id %d", id)
+	}
+	mustExec(t, db, "INSERT INTO ai (v) VALUES ('b'), ('c'), ('d')")
+	mustExec(t, db, "INSERT INTO ai VALUES (100, 'explicit')")
+	r = mustExec(t, db, "INSERT INTO ai (v) VALUES ('after')")
+	if id, _ := r.LastInsertId(); id != 101 {
+		t.Fatalf("after an explicit value: %d", id)
+	}
+	// A rolled-back insert doesn't hand its value out again.
+	tx, _ := db.Begin()
+	tx.Exec("INSERT INTO ai (v) VALUES ('rolled back')")
+	tx.Rollback()
+	r = mustExec(t, db, "INSERT INTO ai (v) VALUES ('next')")
+	if id, _ := r.LastInsertId(); id != 103 {
+		t.Fatalf("after rollback: %d", id)
+	}
+	// The counter survives a KV restart.
+	c.restartKV()
+	r = mustExec(t, db, "INSERT INTO ai (v) VALUES ('restart')")
+	if id, _ := r.LastInsertId(); id != 104 {
+		t.Fatalf("after restart: %d", id)
+	}
+	if got := queryStrings(t, db, "SELECT id FROM ai ORDER BY id"); fmt.Sprint(got) != "[1 2 3 4 100 101 103 104]" {
+		t.Fatalf("ids: %v", got)
+	}
+	// Concurrent inserts never collide.
+	var wg sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				if _, err := db.Exec("INSERT INTO ai (v) VALUES ('c')"); err != nil {
+					t.Error(err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if got := queryStrings(t, db, "SELECT COUNT(*), COUNT(DISTINCT id) FROM ai"); fmt.Sprint(got) != "[88,88]" {
+		t.Fatalf("concurrent ids: %v", got)
+	}
+	mustExec(t, db, "ALTER TABLE ai AUTO_INCREMENT = 1000")
+	r = mustExec(t, db, "INSERT INTO ai (v) VALUES ('altered')")
+	if id, _ := r.LastInsertId(); id != 1000 {
+		t.Fatalf("after ALTER TABLE AUTO_INCREMENT: %d", id)
+	}
+}
+
+func TestSecondaryIndexes(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	mustExec(t, db, `CREATE TABLE people (
+		id INT PRIMARY KEY,
+		email VARCHAR(100) COLLATE utf8mb4_0900_ai_ci,
+		city VARCHAR(50),
+		age INT,
+		UNIQUE KEY email_uq (email),
+		KEY city_age (city, age))`)
+	mustExec(t, db, `INSERT INTO people VALUES
+		(1, 'ada@x.org', 'London', 36), (2, 'grace@x.org', 'NYC', 85),
+		(3, 'alan@x.org', 'London', 41), (4, NULL, 'Paris', 30), (5, NULL, 'Paris', 31)`)
+
+	// Unique: case-insensitive duplicates are rejected; several NULLs are fine.
+	if _, err := db.Exec("INSERT INTO people VALUES (6, 'ADA@x.org', 'Oslo', 1)"); mysqlCode(err) != 1062 {
+		t.Fatalf("unique violation: %v", err)
+	}
+	mustExec(t, db, "INSERT INTO people VALUES (6, NULL, 'Oslo', 1)")
+	if _, err := db.Exec("UPDATE people SET email = 'grace@x.org' WHERE id = 1"); mysqlCode(err) != 1062 {
+		t.Fatalf("unique violation on update: %v", err)
+	}
+
+	// Lookups through the indexes.
+	if got := queryStrings(t, db, "SELECT id FROM people WHERE email = 'GRACE@X.ORG'"); fmt.Sprint(got) != "[2]" {
+		t.Fatalf("unique lookup: %v", got)
+	}
+	if got := queryStrings(t, db, "SELECT id FROM people WHERE city = 'London' ORDER BY id"); fmt.Sprint(got) != "[1 3]" {
+		t.Fatalf("prefix lookup: %v", got)
+	}
+	if got := queryStrings(t, db, "SELECT id FROM people WHERE city = 'Paris' AND age > 30"); fmt.Sprint(got) != "[5]" {
+		t.Fatalf("range on second column: %v", got)
+	}
+	if got := queryStrings(t, db, "SELECT id FROM people WHERE email IS NULL ORDER BY id"); fmt.Sprint(got) != "[4 5 6]" {
+		t.Fatalf("IS NULL on unique index: %v", got)
+	}
+	if plan := strings.Join(queryStrings(t, db, "EXPLAIN FORMAT=TREE SELECT id FROM people WHERE city = 'London'"), "\n"); !strings.Contains(plan, "index: [people.city,people.age]") {
+		t.Fatalf("the planner should use city_age:\n%s", plan)
+	}
+
+	// Updates and deletes keep the indexes in step.
+	mustExec(t, db, "UPDATE people SET city = 'Berlin' WHERE id = 3")
+	mustExec(t, db, "UPDATE people SET email = 'ada@new.org' WHERE id = 1")
+	mustExec(t, db, "DELETE FROM people WHERE id = 2")
+	if got := queryStrings(t, db, "SELECT id FROM people WHERE city = 'London'"); fmt.Sprint(got) != "[1]" {
+		t.Fatalf("after update: %v", got)
+	}
+	if got := queryStrings(t, db, "SELECT id FROM people WHERE email = 'ada@x.org'"); len(got) != 0 {
+		t.Fatalf("stale unique entry: %v", got)
+	}
+	mustExec(t, db, "INSERT INTO people VALUES (7, 'ada@x.org', 'Rome', 2)") // the old email is free again
+	if got := queryStrings(t, db, "SELECT id FROM people WHERE email = 'grace@x.org'"); len(got) != 0 {
+		t.Fatalf("deleted row still indexed: %v", got)
+	}
+	// Moving a primary key moves its index entries.
+	mustExec(t, db, "UPDATE people SET id = 70 WHERE id = 7")
+	if got := queryStrings(t, db, "SELECT id FROM people WHERE email = 'ada@x.org'"); fmt.Sprint(got) != "[70]" {
+		t.Fatalf("after moving the primary key: %v", got)
+	}
+
+	// ON DUPLICATE KEY UPDATE through a unique secondary key.
+	mustExec(t, db, "INSERT INTO people VALUES (8, 'ada@x.org', 'X', 0) ON DUPLICATE KEY UPDATE age = age + 100")
+	if got := queryStrings(t, db, "SELECT id, age FROM people WHERE email = 'ada@x.org'"); fmt.Sprint(got) != "[70,102]" {
+		t.Fatalf("on duplicate key update: %v", got)
+	}
+
+	// CREATE INDEX backfills, and rejects existing duplicates for UNIQUE.
+	mustExec(t, db, "CREATE INDEX age_idx ON people (age)")
+	if got := queryStrings(t, db, "SELECT id FROM people WHERE age BETWEEN 30 AND 40 ORDER BY id"); fmt.Sprint(got) != "[1 4 5]" {
+		t.Fatalf("backfilled index: %v", got)
+	}
+	if _, err := db.Exec("CREATE UNIQUE INDEX city_uq ON people (city)"); err == nil {
+		t.Fatal("unique index over duplicate cities must fail")
+	}
+	mustExec(t, db, "CREATE INDEX city_prefix ON people (city(2))")
+	if got := queryStrings(t, db, "SELECT id FROM people WHERE city = 'Paris' ORDER BY id"); fmt.Sprint(got) != "[4 5]" {
+		t.Fatalf("prefix index: %v", got)
+	}
+	mustExec(t, db, "ALTER TABLE people RENAME INDEX age_idx TO age_i")
+	mustExec(t, db, "DROP INDEX city_prefix ON people")
+	got := strings.Join(queryStrings(t, db, "SHOW INDEX FROM people"), "\n")
+	for _, want := range []string{"email_uq", "city_age", "age_i"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("SHOW INDEX missing %s:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "city_prefix") {
+		t.Fatal("dropped index still listed")
+	}
+	// Indexes survive a KV restart.
+	c.restartKV()
+	if got := queryStrings(t, db, "SELECT id FROM people WHERE city = 'Paris' AND age = 31"); fmt.Sprint(got) != "[5]" {
+		t.Fatalf("after restart: %v", got)
+	}
+}
+
+// Unique-key locks make concurrent inserts of one value race-free.
+func TestUniqueIndexConcurrentInserts(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	mustExec(t, db, "CREATE TABLE u (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20), UNIQUE KEY (name))")
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok, dup := 0, 0
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				_, err := db.Exec("INSERT INTO u (name) VALUES (?)", fmt.Sprint("n", i))
+				mu.Lock()
+				switch {
+				case err == nil:
+					ok++
+				case mysqlCode(err) == 1062 || mysqlCode(err) == 1213:
+					dup++
+				default:
+					t.Error(err)
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if ok != 10 {
+		t.Fatalf("exactly one insert per name must win: %d won, %d lost", ok, dup)
+	}
+	if got := queryStrings(t, db, "SELECT COUNT(DISTINCT name), COUNT(*) FROM u"); fmt.Sprint(got) != "[10,10]" {
+		t.Fatalf("got %v", got)
+	}
 }

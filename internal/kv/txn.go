@@ -108,6 +108,7 @@ type Txn struct {
 	lastSeen   time.Time
 	committing bool
 	aborted    bool
+	autoinc    map[uint32]bool // tables whose AUTO_INCREMENT counter this transaction used
 }
 
 func (t *Txn) abortLocked() { t.aborted = true }

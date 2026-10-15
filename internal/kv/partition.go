@@ -127,6 +127,7 @@ type Partition struct {
 	pending     map[string]pendingWrite // in-flight commits not yet applied to Pebble
 	recent      map[TxnID]committedTxn  // committed ids from the last TxnIDWindow
 	queue       []*commitReq            // commits waiting for the group flusher
+	autoinc     map[uint32]uint64       // next AUTO_INCREMENT value per table, loaded on first use
 	stopErr     error                   // set once the partition stops serving
 
 	visibleTS atomic.Uint64 // highest commit_ts applied and readable
@@ -192,6 +193,7 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	p := &Partition{
 		id: pid, epoch: next.Epoch, cfg: cfg, store: s, log: log.With("epoch", next.Epoch),
 		txns: map[TxnID]*Txn{}, pending: map[string]pendingWrite{}, recent: map[TxnID]committedTxn{},
+		autoinc:   map[uint32]uint64{},
 		manifestN: n + 1, manifest: next, uploaded: map[string]FileRef{},
 		queueSignal: make(chan struct{}, 1), stopCh: make(chan struct{}),
 	}

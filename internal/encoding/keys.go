@@ -194,6 +194,72 @@ func AppendDecimal(b []byte, sign int, exp int32, digits string, desc bool) []by
 	})
 }
 
+// ColumnKind says how to skip over an encoded key column.
+type ColumnKind int
+
+const (
+	KindFixed8  ColumnKind = iota // integers, floats, temporal values
+	KindBytes                     // escaped strings and weights
+	KindDecimal                   // AppendDecimal
+)
+
+// SkipColumn returns the encoded length of the key column at the start of b.
+func SkipColumn(b []byte, kind ColumnKind, desc bool) (int, error) {
+	x := func(c byte) byte {
+		if desc {
+			return ^c
+		}
+		return c
+	}
+	if len(b) == 0 {
+		return 0, ErrCorrupt
+	}
+	if x(b[0]) == MarkerNull {
+		return 1, nil
+	}
+	switch kind {
+	case KindFixed8:
+		if len(b) < 9 {
+			return 0, ErrCorrupt
+		}
+		return 9, nil
+	case KindBytes:
+		for i := 1; i+1 < len(b); i++ {
+			if x(b[i]) != escByte {
+				continue
+			}
+			switch x(b[i+1]) {
+			case escEscape:
+				i++
+			case escTerm:
+				return i + 2, nil
+			default:
+				return 0, ErrCorrupt
+			}
+		}
+		return 0, ErrCorrupt
+	case KindDecimal:
+		if len(b) < 2 {
+			return 0, ErrCorrupt
+		}
+		class := x(b[1])
+		if class == 0x01 {
+			return 2, nil
+		}
+		term := byte(0x00)
+		if class == 0x00 { // negative: the body is inverted
+			term = 0xFF
+		}
+		for i := 6; i < len(b); i++ {
+			if x(b[i]) == term {
+				return i + 1, nil
+			}
+		}
+		return 0, ErrCorrupt
+	}
+	return 0, ErrCorrupt
+}
+
 // ---- decoding (used for tests, debugging and binary columns) ---------------
 
 func invert(b []byte, desc bool) []byte {

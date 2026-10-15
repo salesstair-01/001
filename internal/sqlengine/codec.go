@@ -197,6 +197,47 @@ func sortKey(t sql.Type, raw []byte) ([]byte, error) {
 	return out, nil
 }
 
+// keyKind says how to skip over this column in a key.
+func (c *colCodec) keyKind() encoding.ColumnKind {
+	switch {
+	case types.IsDecimal(c.typ):
+		return encoding.KindDecimal
+	case types.IsText(c.typ) || types.IsBinaryType(c.typ):
+		return encoding.KindBytes
+	}
+	return encoding.KindFixed8
+}
+
+// truncate applies an index prefix length col(N): N characters for text,
+// N bytes for binary strings (MySQL checks prefix uniqueness the same way).
+func truncate(t sql.Type, v any, n int) any {
+	if n <= 0 || v == nil {
+		return v
+	}
+	switch x := v.(type) {
+	case string:
+		if types.IsBinaryType(t) {
+			if len(x) > n {
+				return x[:n]
+			}
+			return x
+		}
+		i := 0
+		for pos := range x {
+			if i == n {
+				return x[:pos]
+			}
+			i++
+		}
+		return x
+	case []byte:
+		if len(x) > n {
+			return x[:n]
+		}
+	}
+	return v
+}
+
 // keyable reports whether a type can be part of a primary key in v1.
 func keyable(t sql.Type) bool {
 	return !(types.IsJSON(t) || types.IsGeometry(t))

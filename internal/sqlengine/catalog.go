@@ -42,6 +42,22 @@ type ColumnInfo struct {
 	OriginalDefault []byte `json:"original_default,omitempty"`
 }
 
+// IndexColumn is one column of a secondary index; Prefix > 0 is col(N).
+type IndexColumn struct {
+	ColID  uint32 `json:"col"`
+	Prefix int    `json:"prefix,omitempty"`
+}
+
+// IndexInfo is a secondary index. Its id (1, 2, ...) is the index field of
+// its keys' prefix and is never reused within the table.
+type IndexInfo struct {
+	ID      uint32        `json:"id"`
+	Name    string        `json:"name"`
+	Columns []IndexColumn `json:"columns"`
+	Unique  bool          `json:"unique,omitempty"`
+	Comment string        `json:"comment,omitempty"`
+}
+
 // TableInfo is one table.
 type TableInfo struct {
 	ID           uint32       `json:"id"`
@@ -50,8 +66,18 @@ type TableInfo struct {
 	Columns      []ColumnInfo `json:"columns"`
 	PK           []uint32     `json:"pk"` // column ids, in key order
 	NextColumnID uint32       `json:"next_column_id"`
+	Indexes      []IndexInfo  `json:"indexes,omitempty"`
+	NextIndexID  uint32       `json:"next_index_id,omitempty"`
 	Collation    string       `json:"collation,omitempty"`
 	Comment      string       `json:"comment,omitempty"`
+}
+
+// clone deep-copies a table so the cached original is never mutated.
+func (t *TableInfo) clone() *TableInfo {
+	b, _ := json.Marshal(t)
+	var out TableInfo
+	_ = json.Unmarshal(b, &out)
+	return &out
 }
 
 // The five collations v1 supports; all others are rejected (D2).
@@ -342,6 +368,31 @@ func (c *Catalog) RenameTable(ctx context.Context, t *TableInfo, newName string)
 func (c *Catalog) UpdateTable(ctx context.Context, t *TableInfo) error {
 	return c.ddl(ctx, func(txn *Txn) error {
 		return put(txn, ctx, kv.OpPut, c.store.tableKey(t.ID), t)
+	})
+}
+
+// AlterTable rewrites a table's catalog row in one DDL transaction; f
+// changes the copy it is given and may write other rows (an index backfill).
+func (c *Catalog) AlterTable(ctx context.Context, t *TableInfo, f func(txn *Txn, t *TableInfo) error) error {
+	return c.ddl(ctx, func(txn *Txn) error {
+		// Start from the latest row, read under an exclusive lock: the caller's
+		// copy may be stale (go-mysql-server creates a new table's indexes one
+		// by one on the same table object).
+		vs, err := txn.Get(ctx, [][]byte{c.store.tableKey(t.ID)}, kvrpc.ReadOpts{Stmt: 1, IncludeStmt: true, Lock: kv.LockExclusive})
+		if err != nil {
+			return err
+		}
+		if vs[0] == nil {
+			return sql.ErrTableNotFound.New(t.Name)
+		}
+		var updated TableInfo
+		if err := json.Unmarshal(vs[0], &updated); err != nil {
+			return err
+		}
+		if err := f(txn, &updated); err != nil {
+			return err
+		}
+		return put(txn, ctx, kv.OpPut, c.store.tableKey(t.ID), &updated)
 	})
 }
 

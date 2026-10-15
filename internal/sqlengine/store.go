@@ -240,6 +240,24 @@ func (t *Txn) Mutate(ctx context.Context, stmt uint64, muts []kv.Mutation, lockW
 	return err
 }
 
+// AutoIncrement reserves count values of table's counter after raising it to
+// atLeast, and returns the first (D7). The counter is saved when this
+// transaction commits.
+func (t *Txn) AutoIncrement(ctx context.Context, table uint32, count, atLeast uint64) (uint64, error) {
+	var first uint64
+	err := t.retryable(ctx, func(h kvrpc.Header) error {
+		var err error
+		first, err = t.store.client.AutoIncrement(ctx, &kvrpc.AutoIncReq{H: h, Txn: t.id, Table: table, Count: count, AtLeast: atLeast})
+		return err
+	})
+	if err == nil {
+		t.mu.Lock()
+		t.wrote = true // the commit carries the counter
+		t.mu.Unlock()
+	}
+	return first, err
+}
+
 // RollbackStatement undoes the writes of statement stmt.
 func (t *Txn) RollbackStatement(ctx context.Context, stmt uint64) error {
 	t.mu.Lock()

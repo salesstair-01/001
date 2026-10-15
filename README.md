@@ -18,7 +18,8 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | 4 | Locks | done — X/S row locks in owner memory, locking reads of the latest version for UPDATE/DELETE/`FOR UPDATE`/`LOCK IN SHARE MODE`, FIFO wait queue with `innodb_lock_wait_timeout` (1205), wait-for-graph deadlock detection with the youngest victim (1213), 2 s heartbeat / 10 s lease; the slice-3 stopgap is gone |
 | 5 | Indexes, types, collations | mostly — secondary indexes (non-unique, unique, the NULL rule, unique-key locks, prefix `col(N)`, CREATE/DROP/RENAME INDEX with backfill), AUTO_INCREMENT counters in system table 3, every type round-trips, memcomparable keys incl. DECIMAL and collation weights. Not yet: hidden `_rowid`, DESC index columns, the MySQL 8 property-test harness, the ORM suite |
 | 6 | KV scale-to-zero | done — directory service (`dird`, SQLite partition table, node heartbeats), idle suspend (checkpoint → release → exit), wake on demand by spawning a per-tenant `kvd` or placing on a pooled node, query engines route through the directory and re-resolve on EpochChanged, local SST cache across restarts; wake time measured below |
-| 7–9 | Proxy, schema changes, multi-tenant | not started |
+| 7 | Proxy and query-engine scale-to-zero | done — `proxyd`: TLS, `caching_sha2_password` (and native) auth, tenant from `user@tenant` or the TLS hostname `<tenant>.<domain>`; holds client sockets while compute starts; pings and `SELECT 1` answered locally; `USE`/`SET` tracked and replayed onto a new query engine; prepared statements kept at the proxy, so nothing needs re-preparing; transactions, temp tables, `GET_LOCK`, `LOCK TABLES` pin the session; idle backends released; generic `sqld -generic` engines started on demand with a pre-warmed pool; cold starts measured below |
+| 8–9 | Schema changes, multi-tenant | not started |
 
 ## Layout
 
@@ -33,7 +34,10 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | `internal/directory` | the directory service, its client, the engine's `Router`, and the node `Agent` |
 | `cmd/kvd`, `cmd/sqld`, `cmd/dird` | the KV owner, query engine and directory binaries |
 | `cmd/crashtest` | the slice-1 crash script driver |
+| `internal/proxy` | the MySQL proxy: auth, session tracking and replay, the query-engine pool |
+| `cmd/proxyd` | the proxy binary |
 | `cmd/wakedemo`, `cmd/waketime` | the slice-6 sleep/wake demo and wake-time benchmark |
+| `cmd/coldstart` | the slice-7 cold-start benchmark (every layer at zero, pooled app) |
 
 Object layout per partition: `p/<id>/manifest/<N>`, `p/<id>/wal/<seq>`,
 `p/<id>/sst/<uuid>.sst`, `p/<id>/meta/<checkpoint>/<pebble file>`.
@@ -69,6 +73,35 @@ is replaced on the next query.
 
 `./bin/wakedemo -idle 3s` runs that loop with real processes.
 
+### Proxy and query-engine scale-to-zero (slice 7)
+
+```sh
+echo '[{"name":"acme","partition":42,"users":{"app":"s3cret"}}]' > tenants.json
+./bin/dird   -listen 127.0.0.1:7000 -spawn-kvd ./bin/kvd -spawn-args "-idle-suspend 5m"
+./bin/proxyd -listen 127.0.0.1:3306 -tenants tenants.json -domain db.example.com \
+  -spawn-sqld ./bin/sqld -directory 127.0.0.1:7000 -warm 1
+mysql -h 127.0.0.1 -P 3306 -u app@acme -ps3cret
+```
+
+Apps connect only to `proxyd`. A session gets a connection to a generic
+query engine (`sqld -generic`, any tenant, picked by the backend user
+`s2z_p<partition>`) when it first runs a statement that needs one. The
+connection is released after `-backend-idle` (30 s) unless the session is in
+a transaction or pinned. Query engines with no sessions stop after
+`-engine-idle` (5 min), beyond the `-warm` ones kept ready.
+
+Cold start of the first query from an app's open connection pool, with every
+KV owner (and with `-warm 0`, every query engine) at zero
+(`./bin/coldstart -rounds 20 -warm N`; real processes, local MinIO, small tenant):
+
+| query engines kept warm | p50 | p99 |
+|---|---|---|
+| 0 (every compute layer at zero) | 416 ms | 455 ms |
+| 1 | 44 ms | 55 ms |
+
+With no warm engine, most of the time is starting a `sqld` process; the KV
+wake is the rest (see the wake-time table above for larger tenants).
+
 Wake time (`./bin/waketime -sizes 100,1024,5120`; local MinIO, rows of 1 KiB
 about 2:1 compressible). Cold means every SST is downloaded; warm means the
 host's SST cache still has them, as when a tenant wakes on the host it last ran on:
@@ -95,6 +128,7 @@ make test-minio           # also runs the MinIO tests (MINIO_ENDPOINT, default 1
 make fault-1000           # slice 2 bar: 1,000 seeded fault-injection runs
 make crash-test           # slice 1: write loop, kill -9 kvd 5 times, verify every acknowledged row
 make wake-demo            # slice 6: tenant kvd exits when idle, next query wakes it
+make cold-start           # slice 7: pooled app through proxyd, p50/p99 from all-zero
 ```
 
 Replay a failing fault seed with `go test ./internal/kv -run TestFaultInjection -fault-seed=N`.
@@ -124,7 +158,12 @@ replay even when goroutines interleave differently.
 - DROP TABLE / DROP DATABASE remove catalog rows only; the data is left behind
   (ids are never reused) until a background cleanup exists.
 - One query engine per tenant: the catalog cache is not shared across engines until slice 8.
-- No authentication beyond go-mysql-server's defaults until the proxy (slice 7).
+- Authentication is at `proxyd` (tenants file); `sqld` and `kvd` trust their network and must
+  not be exposed directly.
+- The proxy runs prepared statements as text on the query engine, and buffers each result in
+  memory before sending it (no row streaming yet).
+- User variables assigned inside a query (`SELECT @x := ...`) pin the session rather than being
+  tracked; a `SET` sent before any statement needs compute is checked only when it is replayed.
 - A query arriving while its tenant is waking waits for the wake. A transaction whose owner goes
   away after it has done something (owner crash) is aborted with 1213; idle suspend never cuts
   one off, because a partition with an open transaction is not suspended.

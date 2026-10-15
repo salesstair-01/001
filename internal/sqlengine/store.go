@@ -42,7 +42,8 @@ type Store struct {
 	stale  uint64 // last epoch found gone
 	open   map[*Txn]struct{}
 
-	stop chan struct{}
+	catalog *Catalog
+	stop    chan struct{}
 }
 
 // NewStore creates a store that talks to one KV node directly.
@@ -54,12 +55,16 @@ func NewStore(client *kvrpc.Client, partition uint64) *Store {
 // router (the directory), and starts its heartbeat loop.
 func NewRoutedStore(r Router, partition uint64) *Store {
 	s := &Store{router: r, partition: partition, open: map[*Txn]struct{}{}, stop: make(chan struct{})}
+	s.catalog = NewCatalog(s)
 	go s.heartbeats()
 	return s
 }
 
 // Close stops the heartbeat loop.
 func (s *Store) Close() { close(s.stop) }
+
+// Catalog returns the tenant's catalog cache.
+func (s *Store) Catalog() *Catalog { return s.catalog }
 
 // Partition returns the partition id.
 func (s *Store) Partition() uint64 { return s.partition }

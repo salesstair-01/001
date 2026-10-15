@@ -30,6 +30,7 @@ func main() {
 	kvAddr := flag.String("kv", env("SQLD_KV", "127.0.0.1:7070"), "KV owner gRPC address")
 	partition := flag.Uint64("partition", 1, "tenant partition id")
 	dirAddr := flag.String("directory", env("SQLD_DIRECTORY", ""), "directory service address; routes to the partition's owner and wakes it (overrides -kv)")
+	generic := flag.Bool("generic", false, "serve any tenant: the connecting user s2z_p<partition> picks it (used behind proxyd; needs -directory)")
 	createDB := flag.String("create-db", "app", "create this database at startup if it does not exist (empty = none)")
 	flag.Parse()
 
@@ -51,8 +52,18 @@ func main() {
 		}
 		store = sqlengine.NewRoutedStore(&directory.Router{Dir: directory.NewClient(dcc), Dial: kvrpc.Dial}, *partition)
 	}
-	engine := sqlengine.NewEngine(store)
-	if *createDB != "" {
+	var engine *sqlengine.Engine
+	if *generic {
+		if *dirAddr == "" {
+			log.Error("-generic needs -directory")
+			os.Exit(1)
+		}
+		dcc, _ := grpc.NewClient(*dirAddr, append(kvrpc.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)
+		engine = sqlengine.NewGenericEngine(&directory.Router{Dir: directory.NewClient(dcc), Dial: kvrpc.Dial}, *createDB)
+	} else {
+		engine = sqlengine.NewEngine(store)
+	}
+	if *createDB != "" && !*generic {
 		if err := engine.EnsureDatabase(ctx, *createDB); err != nil {
 			log.Error("create database", "db", *createDB, "err", err)
 			os.Exit(1)
@@ -67,7 +78,7 @@ func main() {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
-	log.Info("sqld listening", "addr", *listen, "kv", *kvAddr, "partition", *partition)
+	log.Info("sqld listening", "addr", *listen, "kv", *kvAddr, "partition", *partition, "generic", *generic)
 	if err := srv.Start(); err != nil && ctx.Err() == nil {
 		log.Error("serve", "err", err)
 		os.Exit(1)

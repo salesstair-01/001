@@ -7,11 +7,11 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
-// Provider is the go-mysql-server database provider for one tenant: every
-// database the tenant sees lives in its one partition (D1).
+// Provider is the go-mysql-server database provider. Every database a tenant
+// sees lives in its one partition (D1); the tenant is the session's store,
+// so one query engine can serve many tenants (slice 7's generic engines).
 type Provider struct {
-	store   *Store
-	catalog *Catalog
+	def *Store // tenant for contexts without a Session (single-tenant engines); may be nil
 }
 
 var (
@@ -20,30 +20,42 @@ var (
 )
 
 func NewProvider(store *Store) *Provider {
-	return &Provider{store: store, catalog: NewCatalog(store)}
+	return &Provider{def: store}
 }
 
-// Catalog returns the provider's catalog.
-func (p *Provider) Catalog() *Catalog { return p.catalog }
+// catalogOf returns the catalog of the context's tenant.
+func (p *Provider) catalogOf(ctx *sql.Context) (*Catalog, error) {
+	if s, ok := ctx.Session.(*Session); ok && s.store != nil {
+		return s.store.catalog, nil
+	}
+	if p.def != nil {
+		return p.def.catalog, nil
+	}
+	return nil, fmt.Errorf("no tenant for this session")
+}
 
 func (p *Provider) Database(ctx *sql.Context, name string) (sql.Database, error) {
-	d, err := p.catalog.Database(ctx, name)
+	cat, err := p.catalogOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	d, err := cat.Database(ctx, name)
 	if err != nil {
 		return nil, err
 	}
 	if d == nil {
 		// Another query engine may have created it; reload once.
-		if err := p.catalog.load(ctx); err != nil {
+		if err := cat.load(ctx); err != nil {
 			return nil, err
 		}
-		if d, err = p.catalog.Database(ctx, name); err != nil {
+		if d, err = cat.Database(ctx, name); err != nil {
 			return nil, err
 		}
 		if d == nil {
 			return nil, sql.ErrDatabaseNotFound.New(name)
 		}
 	}
-	return &Database{p: p, name: d.Name, collation: d.Collation}, nil
+	return &Database{cat: cat, name: d.Name, collation: d.Collation}, nil
 }
 
 func (p *Provider) HasDatabase(ctx *sql.Context, name string) bool {
@@ -52,14 +64,18 @@ func (p *Provider) HasDatabase(ctx *sql.Context, name string) bool {
 }
 
 func (p *Provider) AllDatabases(ctx *sql.Context) []sql.Database {
-	dbs, err := p.catalog.Databases(ctx)
+	cat, err := p.catalogOf(ctx)
+	if err != nil {
+		return nil
+	}
+	dbs, err := cat.Databases(ctx)
 	if err != nil {
 		ctx.GetLogger().Warnf("list databases: %v", err)
 		return nil
 	}
 	out := make([]sql.Database, 0, len(dbs))
 	for _, d := range dbs {
-		out = append(out, &Database{p: p, name: d.Name, collation: d.Collation})
+		out = append(out, &Database{cat: cat, name: d.Name, collation: d.Collation})
 	}
 	return out
 }
@@ -72,16 +88,24 @@ func (p *Provider) CreateCollatedDatabase(ctx *sql.Context, name string, collati
 	if !supportedCollations[collation] {
 		return fmt.Errorf("collation %s is not supported in v1", collation.Name())
 	}
-	return p.catalog.CreateDatabase(ctx, name, collation)
+	cat, err := p.catalogOf(ctx)
+	if err != nil {
+		return err
+	}
+	return cat.CreateDatabase(ctx, name, collation)
 }
 
 func (p *Provider) DropDatabase(ctx *sql.Context, name string) error {
-	return p.catalog.DropDatabase(ctx, name)
+	cat, err := p.catalogOf(ctx)
+	if err != nil {
+		return err
+	}
+	return cat.DropDatabase(ctx, name)
 }
 
 // Database is one MySQL database of the tenant.
 type Database struct {
-	p         *Provider
+	cat       *Catalog
 	name      string
 	collation string
 }
@@ -97,11 +121,11 @@ var (
 func (d *Database) Name() string { return d.name }
 
 func (d *Database) GetTableInsensitive(ctx *sql.Context, name string) (sql.Table, bool, error) {
-	info, err := d.p.catalog.Table(ctx, d.name, name)
+	info, err := d.cat.Table(ctx, d.name, name)
 	if err != nil || info == nil {
 		return nil, false, err
 	}
-	t, err := newTable(ctx, d.p.catalog, info)
+	t, err := newTable(ctx, d.cat, info)
 	if err != nil {
 		return nil, false, err
 	}
@@ -109,7 +133,7 @@ func (d *Database) GetTableInsensitive(ctx *sql.Context, name string) (sql.Table
 }
 
 func (d *Database) GetTableNames(ctx *sql.Context) ([]string, error) {
-	ts, err := d.p.catalog.Tables(ctx, d.name)
+	ts, err := d.cat.Tables(ctx, d.name)
 	if err != nil {
 		return nil, err
 	}
@@ -160,27 +184,27 @@ func (d *Database) CreateTable(ctx *sql.Context, name string, schema sql.Primary
 		info.PK = append(info.PK, uint32(ord+1))
 	}
 	info.NextColumnID = uint32(len(schema.Schema) + 1)
-	return d.p.catalog.CreateTable(ctx, info)
+	return d.cat.CreateTable(ctx, info)
 }
 
 func (d *Database) DropTable(ctx *sql.Context, name string) error {
-	info, err := d.p.catalog.Table(ctx, d.name, name)
+	info, err := d.cat.Table(ctx, d.name, name)
 	if err != nil {
 		return err
 	}
 	if info == nil {
 		return sql.ErrTableNotFound.New(name)
 	}
-	return d.p.catalog.DropTable(ctx, info)
+	return d.cat.DropTable(ctx, info)
 }
 
 func (d *Database) RenameTable(ctx *sql.Context, oldName, newName string) error {
-	info, err := d.p.catalog.Table(ctx, d.name, oldName)
+	info, err := d.cat.Table(ctx, d.name, oldName)
 	if err != nil {
 		return err
 	}
 	if info == nil {
 		return sql.ErrTableNotFound.New(oldName)
 	}
-	return d.p.catalog.RenameTable(ctx, info, newName)
+	return d.cat.RenameTable(ctx, info, newName)
 }

@@ -1,4 +1,4 @@
-.PHONY: build test test-minio fault-1000 crash-test wake-demo wake-time
+.PHONY: build test test-minio fault-1000 crash-test wake-demo wake-time cold-start
 
 build:
 	go build -o bin/ ./cmd/...
@@ -22,3 +22,7 @@ wake-demo: build
 
 wake-time: build
 	./bin/waketime -sizes 100,1024,5120
+
+cold-start: build
+	./bin/coldstart -rounds 20 -warm 0
+	./bin/coldstart -rounds 20 -warm 1

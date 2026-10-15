@@ -36,6 +36,18 @@ type Config struct {
 	MVCCGCInterval     time.Duration // how often old versions are collected (1 min)
 	TxnLease           time.Duration // abort transactions without a heartbeat for this long (10 s)
 
+	// IdleSuspend suspends a partition with no open transactions and no
+	// requests for this long (0 = never). OnSuspend runs after each suspend,
+	// and OnEmpty when the node no longer serves any partition (slice 6).
+	IdleSuspend time.Duration
+	OnSuspend   func(partition, epoch uint64)
+	OnEmpty     func()
+
+	// CacheDir keeps downloaded and uploaded SSTs across restarts on this host
+	// (default DataDir/cache); CacheMaxBytes caps it (default 10 GiB, <0 disables).
+	CacheDir      string
+	CacheMaxBytes int64
+
 	Logger *slog.Logger
 }
 
@@ -73,6 +85,12 @@ func (c *Config) withDefaults() Config {
 	}
 	if d.Logger == nil {
 		d.Logger = slog.Default()
+	}
+	if d.CacheDir == "" && d.DataDir != "" {
+		d.CacheDir = filepath.Join(d.DataDir, "cache")
+	}
+	if d.CacheMaxBytes == 0 {
+		d.CacheMaxBytes = 10 << 30
 	}
 	return d
 }
@@ -130,7 +148,9 @@ type Partition struct {
 	autoinc     map[uint32]uint64       // next AUTO_INCREMENT value per table, loaded on first use
 	stopErr     error                   // set once the partition stops serving
 
-	visibleTS atomic.Uint64 // highest commit_ts applied and readable
+	visibleTS  atomic.Uint64 // highest commit_ts applied and readable
+	lastActive atomic.Int64  // unix nanos of the last request, for idle detection
+	suspending bool          // guarded by mu: refusing new transactions while suspending
 
 	locks *lockTable // row locks; take p.mu before locks.mu, never the reverse
 
@@ -146,6 +166,8 @@ type Partition struct {
 	manifestN uint64
 	manifest  Manifest
 	uploaded  map[string]FileRef // local SST name -> uploaded object
+	cache     *fileCache         // local copies of checkpoint files; may be nil
+	cacheHits int                // files the takeover found in the cache
 	garbage   []garbageItem
 
 	queueSignal chan struct{}
@@ -207,15 +229,15 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	if err := os.MkdirAll(p.dir, 0o755); err != nil {
 		return nil, err
 	}
-	for _, f := range next.Files {
-		b, err := s.Get(ctx, f.Object)
-		if err != nil {
-			return nil, fmt.Errorf("takeover: download %s: %w", f.Object, err)
-		}
-		if err := os.WriteFile(filepath.Join(p.dir, f.Name), b, 0o644); err != nil {
-			return nil, err
-		}
+	p.cache = newFileCache(cfg.CacheDir, cfg.CacheMaxBytes)
+	start := time.Now()
+	hits, err := p.installFiles(ctx, next.Files)
+	if err != nil {
+		return nil, err
 	}
+	downloaded := time.Since(start)
+	p.cacheHits = hits
+	p.cache.evict()
 	p.db, err = pebble.Open(p.dir, pebbleOptions())
 	if err != nil {
 		return nil, fmt.Errorf("takeover: open pebble: %w", err)
@@ -274,11 +296,48 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	p.visibleTS.Store(p.maxCommitTS)
 	p.dirty = seq > next.ReplayAfterWALSeq+1 // anything replayed is worth a checkpoint
 
+	p.lastActive.Store(time.Now().UnixNano())
 	p.wg.Add(2)
 	go p.flusher()
 	go p.background()
-	p.log.Info("took over partition", "manifest", p.manifestN, "replayed_through", seq-1, "max_commit_ts", p.maxCommitTS)
+	p.log.Info("took over partition", "manifest", p.manifestN, "replayed_through", seq-1, "max_commit_ts", p.maxCommitTS,
+		"files", len(next.Files), "cache_hits", hits, "download", downloaded.Round(time.Millisecond))
 	return p, nil
+}
+
+// installFiles puts a checkpoint's files into the Pebble directory, from the
+// local cache or object storage, several at a time.
+func (p *Partition) installFiles(ctx context.Context, files []FileRef) (int, error) {
+	var (
+		mu    sync.Mutex
+		hits  int
+		first error
+		wg    sync.WaitGroup
+	)
+	work := make(chan FileRef)
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range work {
+				hit, err := p.cache.install(ctx, p.store, f.Object, filepath.Join(p.dir, f.Name))
+				mu.Lock()
+				if hit {
+					hits++
+				}
+				if err != nil && first == nil {
+					first = fmt.Errorf("takeover: download %s: %w", f.Object, err)
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, f := range files {
+		work <- f
+	}
+	close(work)
+	wg.Wait()
+	return hits, first
 }
 
 // replaySegment applies one WAL segment to Pebble during takeover.
@@ -354,19 +413,60 @@ func (p *Partition) Close() error {
 	return p.closeErr
 }
 
-// Suspend waits for open transactions to finish, writes a checkpoint and
-// stops serving, so the next wake has almost no WAL to replay (D4).
+// Suspend checkpoints and stops serving, so the next wake has almost no WAL
+// to replay (D4). It fails if transactions are open.
 func (p *Partition) Suspend(ctx context.Context) error {
+	ok, err := p.suspend(ctx, 0)
+	if err == nil && !ok {
+		err = fmt.Errorf("kv: partition %d has open transactions", p.id)
+	}
+	return err
+}
+
+// TrySuspend suspends the partition if it has had no open transactions and
+// no requests for idle. It reports whether it suspended.
+func (p *Partition) TrySuspend(ctx context.Context, idle time.Duration) (bool, error) {
+	return p.suspend(ctx, idle)
+}
+
+func (p *Partition) suspend(ctx context.Context, idle time.Duration) (bool, error) {
 	p.mu.Lock()
-	open := len(p.txns)
+	switch {
+	case p.stopErr != nil:
+		p.mu.Unlock()
+		return false, p.stopErr
+	case len(p.txns) > 0, idle > 0 && p.IdleFor() < idle:
+		p.mu.Unlock()
+		return false, nil
+	}
+	// From here on new transactions are refused, so none can be cut off by
+	// the stop below; their Begin fails with EpochChanged and is retried
+	// once the directory has woken the partition again.
+	p.suspending = true
 	p.mu.Unlock()
-	if open > 0 {
-		return fmt.Errorf("kv: %d open transactions", open)
-	}
 	if err := p.Checkpoint(ctx); err != nil {
-		return err
+		p.mu.Lock()
+		p.suspending = false
+		p.mu.Unlock()
+		return false, err
 	}
-	return p.Close()
+	p.stop(errSuspended)
+	return true, p.Close()
+}
+
+// FileCount returns how many files the partition's manifest lists.
+func (p *Partition) FileCount() int {
+	p.ckptMu.Lock()
+	defer p.ckptMu.Unlock()
+	return len(p.manifest.Files)
+}
+
+// CacheHits returns how many checkpoint files the takeover took from the local cache.
+func (p *Partition) CacheHits() int { return p.cacheHits }
+
+// IdleFor returns how long the partition has gone without a request.
+func (p *Partition) IdleFor() time.Duration {
+	return time.Since(time.Unix(0, p.lastActive.Load()))
 }
 
 // Stopped reports whether the partition has stopped serving and why.
@@ -377,6 +477,7 @@ func (p *Partition) Stopped() error {
 }
 
 func (p *Partition) checkEpoch(epoch uint64) error {
+	p.lastActive.Store(time.Now().UnixNano())
 	if epoch != 0 && epoch != p.epoch {
 		return newErr(KindEpochChanged, "epoch %d requested, owner serves %d", epoch, p.epoch)
 	}

@@ -10,9 +10,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/salesstair-01/001/internal/directory"
 	"github.com/salesstair-01/001/internal/kv"
 	"github.com/salesstair-01/001/internal/kvrpc"
 	"github.com/salesstair-01/001/internal/objstore"
@@ -36,6 +39,12 @@ func main() {
 	useSSL := flag.Bool("minio-ssl", false, "use TLS to MinIO")
 	partition := flag.Uint64("partition", 0, "take this partition over at startup (0 = none)")
 	autoOpen := flag.Bool("auto-open", true, "take a partition over when a query engine opens it")
+	dirAddr := flag.String("directory", env("KVD_DIRECTORY", ""), "directory service address (empty = run standalone)")
+	nodeID := flag.String("node-id", env("KVD_NODE_ID", ""), "node id in the directory (default: the owner id)")
+	advertise := flag.String("advertise", "", "address query engines reach this node at (default: the listen address)")
+	idleSuspend := flag.Duration("idle-suspend", 0, "suspend a partition idle this long (0 = never; 5m is the v1 default with a directory)")
+	cacheDir := flag.String("cache-dir", env("KVD_CACHE_DIR", ""), "local SST cache kept across restarts (default: <data>/cache)")
+	exitWhenIdle := flag.Bool("exit-when-idle", false, "exit once no partition is served (a dedicated per-tenant process)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -50,7 +59,40 @@ func main() {
 		log.Error("connect to MinIO", "err", err)
 		os.Exit(1)
 	}
-	node := kv.NewNode(kv.Config{Store: store, DataDir: *dataDir, OwnerID: *owner, Logger: log})
+	lis, err := net.Listen("tcp", *listen)
+	if err != nil {
+		log.Error("listen", "err", err)
+		os.Exit(1)
+	}
+	addr := lis.Addr().String()
+	if *advertise != "" {
+		addr = *advertise
+	}
+
+	cfg := kv.Config{Store: store, DataDir: *dataDir, CacheDir: *cacheDir, OwnerID: *owner, Logger: log, IdleSuspend: *idleSuspend}
+	var agent *directory.Agent
+	if *dirAddr != "" {
+		cc, err := grpc.NewClient(*dirAddr, append(kvrpc.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)
+		if err != nil {
+			log.Error("dial directory", "err", err)
+			os.Exit(1)
+		}
+		agent = &directory.Agent{Dir: directory.NewClient(cc), Addr: addr, ExitWhenIdle: *exitWhenIdle, Exit: stop, Logger: log}
+		cfg.OnSuspend, cfg.OnEmpty = agent.OnSuspend, agent.OnEmpty
+	}
+	node := kv.NewNode(cfg)
+	if agent != nil {
+		agent.NodeID = *nodeID
+		if agent.NodeID == "" {
+			agent.NodeID = node.OwnerID()
+		}
+		agent.Attach(node)
+		idleExit := time.Duration(0)
+		if *exitWhenIdle {
+			idleExit = *idleSuspend + 30*time.Second
+		}
+		go agent.Run(ctx, idleExit)
+	}
 	if *partition != 0 {
 		p, err := node.Open(ctx, *partition)
 		if err != nil {
@@ -60,11 +102,6 @@ func main() {
 		log.Info("serving partition", "partition", *partition, "epoch", p.Epoch())
 	}
 
-	lis, err := net.Listen("tcp", *listen)
-	if err != nil {
-		log.Error("listen", "err", err)
-		os.Exit(1)
-	}
 	g := grpc.NewServer(kvrpc.ServerOption())
 	kvrpc.Register(g, &kvrpc.Server{Node: node, AutoOpen: *autoOpen})
 	go func() {
@@ -72,7 +109,7 @@ func main() {
 		log.Info("shutting down")
 		g.GracefulStop()
 	}()
-	log.Info("kvd listening", "addr", lis.Addr().String(), "owner", node.OwnerID(), "bucket", *bucket)
+	log.Info("kvd listening", "addr", addr, "owner", node.OwnerID(), "bucket", *bucket, "directory", *dirAddr)
 	if err := g.Serve(lis); err != nil {
 		log.Error("serve", "err", err)
 	}

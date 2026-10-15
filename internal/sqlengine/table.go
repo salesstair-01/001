@@ -669,11 +669,11 @@ func (e *editor) Delete(ctx *sql.Context, row sql.Row) error {
 // ---- AUTO_INCREMENT (D7) ------------------------------------------------------------
 
 func (t *Table) PeekNextAutoIncrementValue(ctx *sql.Context) (uint64, error) {
-	h, err := t.store.header(ctx)
+	h, c, err := t.store.header(ctx)
 	if err != nil {
 		return 0, mysqlError(err)
 	}
-	n, err := t.store.client.AutoIncrement(ctx, &kvrpc.AutoIncReq{H: h, Table: t.info.ID})
+	n, err := c.AutoIncrement(ctx, &kvrpc.AutoIncReq{H: h, Table: t.info.ID})
 	return n, mysqlError(err)
 }
 

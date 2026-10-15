@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/salesstair-01/001/internal/directory"
 	"github.com/salesstair-01/001/internal/kvrpc"
 	"github.com/salesstair-01/001/internal/sqlengine"
 )
@@ -28,6 +29,7 @@ func main() {
 	listen := flag.String("listen", env("SQLD_LISTEN", "127.0.0.1:3306"), "MySQL protocol listen address")
 	kvAddr := flag.String("kv", env("SQLD_KV", "127.0.0.1:7070"), "KV owner gRPC address")
 	partition := flag.Uint64("partition", 1, "tenant partition id")
+	dirAddr := flag.String("directory", env("SQLD_DIRECTORY", ""), "directory service address; routes to the partition's owner and wakes it (overrides -kv)")
 	createDB := flag.String("create-db", "app", "create this database at startup if it does not exist (empty = none)")
 	flag.Parse()
 
@@ -41,6 +43,14 @@ func main() {
 		os.Exit(1)
 	}
 	store := sqlengine.NewStore(kvrpc.NewClient(cc), *partition)
+	if *dirAddr != "" {
+		dcc, err := grpc.NewClient(*dirAddr, append(kvrpc.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)
+		if err != nil {
+			log.Error("dial directory", "err", err)
+			os.Exit(1)
+		}
+		store = sqlengine.NewRoutedStore(&directory.Router{Dir: directory.NewClient(dcc), Dial: kvrpc.Dial}, *partition)
+	}
 	engine := sqlengine.NewEngine(store)
 	if *createDB != "" {
 		if err := engine.EnsureDatabase(ctx, *createDB); err != nil {

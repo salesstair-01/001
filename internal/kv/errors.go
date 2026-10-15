@@ -71,6 +71,7 @@ func KindOf(err error) ErrKind {
 var (
 	errFenced          = newErr(KindEpochChanged, "partition fenced by a newer owner")
 	errStopped         = newErr(KindEpochChanged, "partition no longer served by this owner")
+	errSuspended       = newErr(KindEpochChanged, "partition suspended; resolve the owner again")
 	errTakeoverLost    = errors.New("kv: another node won the takeover")
 	errCommitAbandoned = newErr(KindUnavailable, "object store unreachable; commit outcome unknown")
 )

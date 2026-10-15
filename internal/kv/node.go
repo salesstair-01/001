@@ -16,15 +16,112 @@ type Node struct {
 	mu         sync.Mutex
 	partitions map[uint64]*Partition
 	opening    map[uint64]chan struct{}
+	stop       chan struct{}
+	stopOnce   sync.Once
 }
 
-// NewNode creates a KV node.
+// NewNode creates a KV node. With Config.IdleSuspend set, it suspends idle
+// partitions in the background.
 func NewNode(cfg Config) *Node {
 	cfg = cfg.withDefaults()
 	if cfg.OwnerID == "" {
 		cfg.OwnerID = "kv-" + newID()[:12]
 	}
-	return &Node{cfg: cfg, partitions: map[uint64]*Partition{}, opening: map[uint64]chan struct{}{}}
+	n := &Node{cfg: cfg, partitions: map[uint64]*Partition{}, opening: map[uint64]chan struct{}{}, stop: make(chan struct{})}
+	if cfg.IdleSuspend > 0 {
+		go n.idleLoop()
+	}
+	return n
+}
+
+// PartitionEpoch is a served partition and its epoch.
+type PartitionEpoch struct {
+	Partition, Epoch uint64
+}
+
+// Partitions lists the partitions this node serves.
+func (n *Node) Partitions() []PartitionEpoch {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := make([]PartitionEpoch, 0, len(n.partitions))
+	for id, p := range n.partitions {
+		if p.Stopped() == nil {
+			out = append(out, PartitionEpoch{id, p.epoch})
+		}
+	}
+	return out
+}
+
+// idleLoop suspends partitions with no open transactions and no requests for
+// IdleSuspend: checkpoint, release, and (via OnEmpty) let the process exit.
+func (n *Node) idleLoop() {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	hadPartitions := false
+	for {
+		select {
+		case <-n.stop:
+			return
+		case <-tick.C:
+		}
+		n.mu.Lock()
+		ps := make([]*Partition, 0, len(n.partitions))
+		var stopped []*Partition
+		for id, p := range n.partitions {
+			if p.Stopped() != nil { // fenced by a newer owner, or failed
+				delete(n.partitions, id)
+				stopped = append(stopped, p)
+				hadPartitions = true
+				continue
+			}
+			ps = append(ps, p)
+		}
+		busy := len(n.opening) > 0
+		n.mu.Unlock()
+		for _, p := range stopped {
+			go p.Close()
+		}
+		for _, p := range ps {
+			if p.IdleFor() < n.cfg.IdleSuspend {
+				continue
+			}
+			ok, err := p.TrySuspend(context.Background(), n.cfg.IdleSuspend)
+			if err != nil {
+				n.cfg.Logger.Warn("idle suspend failed", "partition", p.id, "err", err)
+				continue
+			}
+			if !ok {
+				continue
+			}
+			n.mu.Lock()
+			if n.partitions[p.id] == p {
+				delete(n.partitions, p.id)
+			}
+			n.mu.Unlock()
+			hadPartitions = true
+			n.cfg.Logger.Info("suspended idle partition", "partition", p.id, "epoch", p.epoch)
+			if n.cfg.OnSuspend != nil {
+				n.cfg.OnSuspend(p.id, p.epoch)
+			}
+		}
+		n.mu.Lock()
+		empty := len(n.partitions) == 0 && len(n.opening) == 0
+		if len(n.partitions) > 0 || busy {
+			hadPartitions = true
+		}
+		n.mu.Unlock()
+		if empty && hadPartitions && n.cfg.OnEmpty != nil {
+			hadPartitions = false
+			n.cfg.OnEmpty()
+		}
+	}
+}
+
+// Get returns a served partition, or nil.
+func (n *Node) Get(pid uint64) *Partition {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.partitions[pid]
 }
 
 // OwnerID returns this node's owner id.
@@ -125,11 +222,15 @@ func (n *Node) Suspend(ctx context.Context, pid uint64) error {
 		delete(n.partitions, pid)
 	}
 	n.mu.Unlock()
+	if n.cfg.OnSuspend != nil {
+		n.cfg.OnSuspend(pid, p.epoch)
+	}
 	return nil
 }
 
 // Close stops serving every partition without a checkpoint.
 func (n *Node) Close() error {
+	n.stopOnce.Do(func() { close(n.stop) })
 	n.mu.Lock()
 	ps := make([]*Partition, 0, len(n.partitions))
 	for _, p := range n.partitions {

@@ -96,6 +96,8 @@ type (
 		CommitTS uint64
 	}
 
+	PingResp struct{ Owner string }
+
 	AutoIncReq struct {
 		H       Header
 		Txn     kv.TxnID // zero = peek
@@ -146,11 +148,12 @@ func (gobCodec) Unmarshal(data []byte, v any) error {
 // ServerOption makes a grpc.Server use the gob codec.
 func ServerOption() grpc.ServerOption { return grpc.ForceServerCodec(gobCodec{}) }
 
-// DialOptions make a client connection use the gob codec, wait for the owner
-// instead of failing fast while it restarts, and reconnect quickly.
+// DialOptions make a client connection use the gob codec and reconnect
+// quickly. Calls fail fast when the owner is unreachable: the query engine
+// then re-resolves the owner (which wakes or moves the partition) and retries.
 func DialOptions() []grpc.DialOption {
 	return []grpc.DialOption{
-		grpc.WithDefaultCallOptions(grpc.ForceCodec(gobCodec{}), grpc.WaitForReady(true)),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(gobCodec{})),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff:           backoff.Config{BaseDelay: 50 * time.Millisecond, Multiplier: 1.6, Jitter: 0.2, MaxDelay: time.Second},
 			MinConnectTimeout: time.Second,
@@ -319,6 +322,9 @@ var methods = map[string]handler{
 		st, ts, err := p.TxnStatus(r.H.Epoch, r.Txn)
 		return &TxnStatusResp{State: st, CommitTS: ts}, err
 	}),
+	"Ping": unary(func(s *Server, _ context.Context, _ *Empty) (*PingResp, error) {
+		return &PingResp{Owner: s.Node.OwnerID()}, nil
+	}),
 	"AutoIncrement": unary(func(s *Server, _ context.Context, r *AutoIncReq) (*AutoIncResp, error) {
 		p, err := s.part(r.H)
 		if err != nil {
@@ -433,6 +439,13 @@ func (c *Client) TxnStatus(ctx context.Context, r *TxnReq) (*TxnStatusResp, erro
 	var resp TxnStatusResp
 	err := c.call(ctx, "TxnStatus", r, &resp)
 	return &resp, err
+}
+
+// Ping checks that the node answers.
+func (c *Client) Ping(ctx context.Context) (string, error) {
+	var resp PingResp
+	err := c.call(ctx, "Ping", &Empty{}, &resp)
+	return resp.Owner, err
 }
 
 func (c *Client) AutoIncrement(ctx context.Context, r *AutoIncReq) (uint64, error) {

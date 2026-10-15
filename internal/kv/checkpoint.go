@@ -100,6 +100,7 @@ func (p *Partition) Checkpoint(ctx context.Context) error {
 			restore()
 			return fmt.Errorf("checkpoint: upload %s: %w", name, err)
 		}
+		p.cache.add(obj, filepath.Join(tmp, name)) // the next wake on this host skips the download
 		ref := FileRef{Name: name, Object: obj, Size: int64(len(data))}
 		if strings.HasSuffix(name, ".sst") {
 			p.uploaded[name] = ref

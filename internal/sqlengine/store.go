@@ -15,21 +15,45 @@ import (
 	"github.com/salesstair-01/001/internal/kvrpc"
 )
 
+// Router finds the KV owner of a partition. stale is an epoch the caller
+// found no longer served (0 = none), so the router must not return it again
+// without checking (slice 6: re-resolve on EpochChanged).
+type Router interface {
+	Resolve(ctx context.Context, partition, stale uint64) (*kvrpc.Client, uint64, error)
+}
+
+// StaticRouter sends every partition to one KV node, which takes a partition
+// over when it is opened.
+type StaticRouter struct{ Client *kvrpc.Client }
+
+func (r StaticRouter) Resolve(ctx context.Context, partition, _ uint64) (*kvrpc.Client, uint64, error) {
+	epoch, err := r.Client.Open(ctx, partition)
+	return r.Client, epoch, err
+}
+
 // Store is the query engine's handle on one partition (one tenant, D1).
 type Store struct {
-	client    *kvrpc.Client
+	router    Router
 	partition uint64
 
-	mu    sync.Mutex
-	epoch uint64 // 0 = not open; resolve on next use
-	open  map[*Txn]struct{}
+	mu     sync.Mutex
+	client *kvrpc.Client // current owner; nil = resolve on next use
+	epoch  uint64
+	stale  uint64 // last epoch found gone
+	open   map[*Txn]struct{}
 
 	stop chan struct{}
 }
 
-// NewStore creates a store for one partition and starts its heartbeat loop.
+// NewStore creates a store that talks to one KV node directly.
 func NewStore(client *kvrpc.Client, partition uint64) *Store {
-	s := &Store{client: client, partition: partition, open: map[*Txn]struct{}{}, stop: make(chan struct{})}
+	return NewRoutedStore(StaticRouter{Client: client}, partition)
+}
+
+// NewRoutedStore creates a store that finds the partition's owner through a
+// router (the directory), and starts its heartbeat loop.
+func NewRoutedStore(r Router, partition uint64) *Store {
+	s := &Store{router: r, partition: partition, open: map[*Txn]struct{}{}, stop: make(chan struct{})}
 	go s.heartbeats()
 	return s
 }
@@ -40,31 +64,32 @@ func (s *Store) Close() { close(s.stop) }
 // Partition returns the partition id.
 func (s *Store) Partition() uint64 { return s.partition }
 
-// header returns the request header, opening the partition if needed.
-func (s *Store) header(ctx context.Context) (kvrpc.Header, error) {
+// header returns the request header and the owner's client, resolving the
+// owner (and so waking the partition) if needed.
+func (s *Store) header(ctx context.Context) (kvrpc.Header, *kvrpc.Client, error) {
 	s.mu.Lock()
-	epoch := s.epoch
+	c, epoch, stale := s.client, s.epoch, s.stale
 	s.mu.Unlock()
-	if epoch == 0 {
-		e, err := s.client.Open(ctx, s.partition)
-		if err != nil {
-			return kvrpc.Header{}, err
+	if c == nil {
+		var err error
+		if c, epoch, err = s.router.Resolve(ctx, s.partition, stale); err != nil {
+			return kvrpc.Header{}, nil, err
 		}
 		s.mu.Lock()
-		if s.epoch == 0 {
-			s.epoch = e
+		if s.client == nil {
+			s.client, s.epoch = c, epoch
 		}
-		epoch = s.epoch
+		c, epoch = s.client, s.epoch
 		s.mu.Unlock()
 	}
-	return kvrpc.Header{Partition: s.partition, Epoch: epoch}, nil
+	return kvrpc.Header{Partition: s.partition, Epoch: epoch}, c, nil
 }
 
-// invalidate forgets the epoch after EpochChanged, so the next call re-resolves the owner.
+// invalidate forgets the owner after EpochChanged, so the next call re-resolves it.
 func (s *Store) invalidate(epoch uint64) {
 	s.mu.Lock()
-	if s.epoch == epoch {
-		s.epoch = 0
+	if s.client != nil && s.epoch == epoch {
+		s.client, s.stale = nil, epoch
 	}
 	s.mu.Unlock()
 }
@@ -79,17 +104,22 @@ func (s *Store) heartbeats() {
 			return
 		case <-t.C:
 		}
-		byEpoch := map[uint64][]kv.TxnID{}
+		type owner struct {
+			c     *kvrpc.Client
+			epoch uint64
+		}
+		byOwner := map[owner][]kv.TxnID{}
 		s.mu.Lock()
 		for txn := range s.open {
 			if txn.begun {
-				byEpoch[txn.epoch] = append(byEpoch[txn.epoch], txn.id)
+				o := owner{txn.client, txn.epoch}
+				byOwner[o] = append(byOwner[o], txn.id)
 			}
 		}
 		s.mu.Unlock()
-		for epoch, ids := range byEpoch {
+		for o, ids := range byOwner {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = s.client.Heartbeat(ctx, &kvrpc.HeartbeatReq{H: kvrpc.Header{Partition: s.partition, Epoch: epoch}, Txns: ids})
+			_ = o.c.Heartbeat(ctx, &kvrpc.HeartbeatReq{H: kvrpc.Header{Partition: s.partition, Epoch: o.epoch}, Txns: ids})
 			cancel()
 		}
 	}
@@ -116,12 +146,13 @@ type Txn struct {
 	iso      kv.Isolation
 	readOnly bool
 
-	mu    sync.Mutex
-	begun bool
-	epoch uint64
-	ops   int  // KV operations so far
-	wrote bool // any Mutate sent
-	dead  error
+	mu     sync.Mutex
+	begun  bool
+	client *kvrpc.Client // the owner the KV transaction lives on
+	epoch  uint64
+	ops    int  // KV operations so far
+	wrote  bool // any Mutate sent
+	dead   error
 }
 
 // NewTxn creates a transaction; nothing is sent to the owner yet.
@@ -141,29 +172,31 @@ func (t *Txn) ensure(ctx context.Context) (kvrpc.Header, error) {
 	if t.begun {
 		return kvrpc.Header{Partition: t.store.partition, Epoch: t.epoch}, nil
 	}
-	h, err := t.store.header(ctx)
+	h, c, err := t.store.header(ctx)
 	if err != nil {
 		return h, err
 	}
-	if err := t.store.client.Begin(ctx, &kvrpc.BeginReq{H: h, Txn: t.id, Isolation: t.iso}); err != nil {
+	if err := c.Begin(ctx, &kvrpc.BeginReq{H: h, Txn: t.id, Isolation: t.iso}); err != nil {
 		if kv.KindOf(err) == kv.KindEpochChanged {
 			t.store.invalidate(h.Epoch)
 		}
 		return h, err
 	}
-	t.begun, t.epoch = true, h.Epoch
+	t.begun, t.client, t.epoch = true, c, h.Epoch
 	t.store.mu.Lock()
 	t.store.open[t] = struct{}{}
 	t.store.mu.Unlock()
 	return h, nil
 }
 
-// retryable runs op; when the owner changed before this transaction did
-// anything, it re-begins on the new owner and retries once (D7: an
-// autocommit read is retried once on EpochChanged).
+// retryable runs op. When the owner changed before this transaction did
+// anything, it re-resolves the owner (waking the partition if it was
+// suspended) and begins again there; once the transaction has done
+// something, losing its owner aborts it (D5, slice 6).
 func (t *Txn) retryable(ctx context.Context, op func(h kvrpc.Header) error) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	backoff := 20 * time.Millisecond
 	for attempt := 0; ; attempt++ {
 		h, err := t.ensure(ctx)
 		if err == nil {
@@ -181,11 +214,21 @@ func (t *Txn) retryable(ctx context.Context, op func(h kvrpc.Header) error) erro
 			return err
 		}
 		t.store.invalidate(h.Epoch)
-		if attempt > 0 || t.ops > 0 || t.wrote {
+		if t.ops > 0 || t.wrote || attempt >= 20 {
 			t.markDead(err)
 			return err
 		}
 		t.forget()
+		if attempt > 0 { // e.g. the partition is still suspending
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			if backoff < time.Second {
+				backoff *= 2
+			}
+		}
 	}
 }
 
@@ -194,7 +237,7 @@ func (t *Txn) forget() {
 	t.store.mu.Lock()
 	delete(t.store.open, t)
 	t.store.mu.Unlock()
-	t.begun, t.epoch = false, 0
+	t.begun, t.client, t.epoch = false, nil, 0
 }
 
 func (t *Txn) markDead(err error) {
@@ -207,7 +250,7 @@ func (t *Txn) Get(ctx context.Context, keys [][]byte, o kvrpc.ReadOpts) ([][]byt
 	var out [][]byte
 	err := t.retryable(ctx, func(h kvrpc.Header) error {
 		var err error
-		out, err = t.store.client.Get(ctx, &kvrpc.GetReq{H: h, Txn: t.id, Keys: keys, Opts: o})
+		out, err = t.client.Get(ctx, &kvrpc.GetReq{H: h, Txn: t.id, Keys: keys, Opts: o})
 		return err
 	})
 	return out, err
@@ -218,7 +261,7 @@ func (t *Txn) Scan(ctx context.Context, start, end []byte, limit int, o kvrpc.Re
 	var out *kvrpc.ScanResp
 	err := t.retryable(ctx, func(h kvrpc.Header) error {
 		var err error
-		out, err = t.store.client.Scan(ctx, &kvrpc.ScanReq{H: h, Txn: t.id, Start: start, End: end, Limit: limit, Opts: o})
+		out, err = t.client.Scan(ctx, &kvrpc.ScanReq{H: h, Txn: t.id, Start: start, End: end, Limit: limit, Opts: o})
 		return err
 	})
 	return out, err
@@ -230,7 +273,7 @@ func (t *Txn) Mutate(ctx context.Context, stmt uint64, muts []kv.Mutation, lockW
 		return nil
 	}
 	err := t.retryable(ctx, func(h kvrpc.Header) error {
-		return t.store.client.Mutate(ctx, &kvrpc.MutateReq{H: h, Txn: t.id, Stmt: stmt, Mutations: muts, LockWaitMs: lockWait.Milliseconds()})
+		return t.client.Mutate(ctx, &kvrpc.MutateReq{H: h, Txn: t.id, Stmt: stmt, Mutations: muts, LockWaitMs: lockWait.Milliseconds()})
 	})
 	if err == nil || kv.KindOf(err) == kv.KindDuplicateKey || kv.KindOf(err) == kv.KindTxnTooLarge || kv.KindOf(err) == kv.KindLockTimeout {
 		t.mu.Lock()
@@ -247,7 +290,7 @@ func (t *Txn) AutoIncrement(ctx context.Context, table uint32, count, atLeast ui
 	var first uint64
 	err := t.retryable(ctx, func(h kvrpc.Header) error {
 		var err error
-		first, err = t.store.client.AutoIncrement(ctx, &kvrpc.AutoIncReq{H: h, Txn: t.id, Table: table, Count: count, AtLeast: atLeast})
+		first, err = t.client.AutoIncrement(ctx, &kvrpc.AutoIncReq{H: h, Txn: t.id, Table: table, Count: count, AtLeast: atLeast})
 		return err
 	})
 	if err == nil {
@@ -265,7 +308,7 @@ func (t *Txn) RollbackStatement(ctx context.Context, stmt uint64) error {
 	if !t.begun || t.dead != nil {
 		return nil
 	}
-	return t.store.client.RollbackStatement(ctx, &kvrpc.StmtReq{H: kvrpc.Header{Partition: t.store.partition, Epoch: t.epoch}, Txn: t.id, Stmt: stmt})
+	return t.client.RollbackStatement(ctx, &kvrpc.StmtReq{H: kvrpc.Header{Partition: t.store.partition, Epoch: t.epoch}, Txn: t.id, Stmt: stmt})
 }
 
 // Commit commits the KV transaction. If the owner changed while the commit
@@ -284,14 +327,14 @@ func (t *Txn) Commit(ctx context.Context) error {
 	if !t.wrote {
 		// Nothing to commit; release the snapshot. If the owner changed, the
 		// transaction went with it, and its reads were already consistent.
-		err := t.store.client.Rollback(ctx, &kvrpc.TxnReq{H: h, Txn: t.id})
+		err := t.client.Rollback(ctx, &kvrpc.TxnReq{H: h, Txn: t.id})
 		if kv.KindOf(err) == kv.KindEpochChanged {
 			t.store.invalidate(h.Epoch)
 			return nil
 		}
 		return err
 	}
-	_, err := t.store.client.Commit(ctx, &kvrpc.TxnReq{H: h, Txn: t.id})
+	_, err := t.client.Commit(ctx, &kvrpc.TxnReq{H: h, Txn: t.id})
 	switch kv.KindOf(err) {
 	case kv.KindEpochChanged, kv.KindUnavailable:
 		t.store.invalidate(h.Epoch)
@@ -305,10 +348,10 @@ func (t *Txn) Commit(ctx context.Context) error {
 func (t *Txn) statusOnNewOwner(ctx context.Context) (bool, error) {
 	var lastErr error
 	for i := 0; i < 20; i++ {
-		h, err := t.store.header(ctx)
+		h, c, err := t.store.header(ctx)
 		if err == nil {
 			var st *kvrpc.TxnStatusResp
-			st, err = t.store.client.TxnStatus(ctx, &kvrpc.TxnReq{H: h, Txn: t.id})
+			st, err = c.TxnStatus(ctx, &kvrpc.TxnReq{H: h, Txn: t.id})
 			if err == nil {
 				return st.State == kv.TxnCommitted, nil
 			}
@@ -332,7 +375,7 @@ func (t *Txn) Rollback(ctx context.Context) error {
 	if !t.begun || t.dead != nil {
 		return nil
 	}
-	err := t.store.client.Rollback(ctx, &kvrpc.TxnReq{H: kvrpc.Header{Partition: t.store.partition, Epoch: t.epoch}, Txn: t.id})
+	err := t.client.Rollback(ctx, &kvrpc.TxnReq{H: kvrpc.Header{Partition: t.store.partition, Epoch: t.epoch}, Txn: t.id})
 	if kv.KindOf(err) == kv.KindEpochChanged {
 		return nil // the owner is gone, and with it the transaction
 	}

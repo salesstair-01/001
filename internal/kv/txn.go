@@ -218,6 +218,9 @@ func (p *Partition) Begin(epoch uint64, id TxnID, opts BeginOptions) error {
 	if p.stopErr != nil {
 		return p.stopErr
 	}
+	if p.suspending {
+		return errSuspended
+	}
 	if _, ok := p.txns[id]; ok {
 		return nil
 	}

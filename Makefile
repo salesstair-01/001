@@ -1,4 +1,4 @@
-.PHONY: build test test-minio fault-1000 crash-test
+.PHONY: build test test-minio fault-1000 crash-test wake-demo wake-time
 
 build:
 	go build -o bin/ ./cmd/...
@@ -16,3 +16,9 @@ fault-1000:
 
 crash-test:
 	./scripts/crash-test.sh -kills 5
+
+wake-demo: build
+	./bin/wakedemo -bin ./bin -idle 3s -rounds 3
+
+wake-time: build
+	./bin/waketime -sizes 100,1024,5120

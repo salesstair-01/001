@@ -18,8 +18,7 @@ const (
 	KindDeadlock             // 1213, roll back the transaction
 	KindEpochChanged         // 1213, roll back the transaction; TxnStatus if a commit was in flight
 	KindTxnTooLarge          // 1197, roll back the transaction
-	KindTxnNotFound          // the transaction was aborted on the owner (lease expiry, owner loss)
-	KindConflict             // slice-3 stopgap: a write-write conflict, reported as 1213
+	KindTxnNotFound          // the transaction was aborted on the owner (lease expiry, deadlock, owner loss)
 	KindUnavailable          // the owner could not reach object storage; outcome of an in-flight commit unknown
 )
 
@@ -31,7 +30,6 @@ var kindNames = map[ErrKind]string{
 	KindEpochChanged: "EpochChanged",
 	KindTxnTooLarge:  "TxnTooLarge",
 	KindTxnNotFound:  "TxnNotFound",
-	KindConflict:     "Conflict",
 	KindUnavailable:  "Unavailable",
 }
 

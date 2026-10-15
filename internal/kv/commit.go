@@ -26,7 +26,8 @@ type commitReq struct {
 	done    chan commitResult
 }
 
-// Commit commits the transaction (D4): assign commit_ts = max + 1, join the
+// Commit commits the transaction (D4): check it still holds its locks (an
+// aborted transaction no longer exists), assign commit_ts = max + 1, join the
 // open group, and return once the group's WAL segment is durable in object
 // storage and applied. A transaction without writes commits at 0.
 func (p *Partition) Commit(epoch uint64, id TxnID) (uint64, error) {
@@ -47,30 +48,28 @@ func (p *Partition) Commit(epoch uint64, id TxnID) (uint64, error) {
 		p.mu.Unlock()
 		return 0, newErr(KindInternal, "transaction %s is already committing", id)
 	}
-	keys, writes := t.merged()
+	keys, writes := t.merged(0)
 	if len(keys) == 0 {
-		delete(p.txns, id)
+		p.abortTxnLocked(t) // nothing to write: just free the locks
 		p.mu.Unlock()
 		return 0, nil
 	}
+	// The transaction holds an exclusive lock on every key it wrote, so no
+	// other commit can have touched them since; re-check insert-only keys anyway.
 	for _, k := range keys {
 		in := writes[k]
-		latest, lts, err := p.latestLocked([]byte(k))
+		if !in.insertOnly {
+			continue
+		}
+		latest, _, err := p.latestLocked([]byte(k))
 		if err != nil {
 			p.mu.Unlock()
 			return 0, err
 		}
-		if in.insertOnly && latest != nil && !encoding.IsDelete(latest) {
+		if latest != nil && !encoding.IsDelete(latest) {
 			p.abortTxnLocked(t)
 			p.mu.Unlock()
 			return 0, &Error{Kind: KindDuplicateKey, Msg: "duplicate key at commit", Key: []byte(k)}
-		}
-		// Stopgap until locks (slice 4): reject a commit that overwrites a
-		// version newer than the snapshot it read.
-		if lts > in.readTS {
-			p.abortTxnLocked(t)
-			p.mu.Unlock()
-			return 0, newErr(KindConflict, "write conflict on a row changed after this transaction's snapshot; try restarting transaction")
 		}
 	}
 	ts := p.maxCommitTS + 1
@@ -91,11 +90,6 @@ func (p *Partition) Commit(epoch uint64, id TxnID) (uint64, error) {
 	}
 	res := <-req.done
 	return res.ts, res.err
-}
-
-func (p *Partition) abortTxnLocked(t *Txn) {
-	t.abortLocked()
-	delete(p.txns, t.id)
 }
 
 // flusher is the single goroutine that writes WAL segments, in sequence order.
@@ -221,6 +215,10 @@ func (p *Partition) flush(batch []*commitReq) error {
 		delete(p.txns, r.rec.TxnID)
 	}
 	p.mu.Unlock()
+	// Release locks only once the writes are visible (D4).
+	for _, r := range batch {
+		p.locks.ReleaseAll(r.rec.TxnID)
+	}
 	for _, r := range batch {
 		r.done <- commitResult{ts: r.rec.CommitTS}
 	}

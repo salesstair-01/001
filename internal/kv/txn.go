@@ -49,10 +49,37 @@ type BeginOptions struct {
 	ConsistentSnapshot bool
 }
 
+// ReadOptions qualify a Get or Scan.
+type ReadOptions struct {
+	Stmt uint64
+	// IncludeStmt makes the statement's own writes visible (duplicate-key
+	// checks); otherwise a statement never reads its own output, so an UPDATE
+	// that moves a primary key can't update a row twice.
+	IncludeStmt bool
+	// Lock makes this a locking read (UPDATE, DELETE, FOR UPDATE, LOCK IN
+	// SHARE MODE): each row is locked and its latest committed version is read,
+	// not the snapshot (D6).
+	Lock     LockMode
+	LockWait time.Duration // 0 = DefaultLockWait
+}
+
+func (o ReadOptions) skip() uint64 {
+	if o.IncludeStmt {
+		return 0
+	}
+	return o.Stmt
+}
+
+func lockWait(d time.Duration) time.Duration {
+	if d <= 0 {
+		return DefaultLockWait
+	}
+	return d
+}
+
 type intent struct {
 	value      []byte // row value or delete marker
 	insertOnly bool
-	readTS     uint64 // the snapshot the writing statement ran against
 }
 
 type stmtLayer struct {
@@ -73,8 +100,9 @@ const (
 type Txn struct {
 	id         TxnID
 	iso        Isolation
-	snapshotTS uint64 // 0 until the first consistent read (RR) or statement (RC)
-	snapStmt   uint64 // statement the RC snapshot belongs to
+	began      time.Time // for picking the youngest deadlock victim
+	snapshotTS uint64    // 0 until the first consistent read (RR) or statement (RC)
+	snapStmt   uint64    // statement the RC snapshot belongs to
 	layers     []*stmtLayer
 	bytes      int
 	lastSeen   time.Time
@@ -93,11 +121,9 @@ func (t *Txn) layer(stmt uint64) *stmtLayer {
 	return l
 }
 
-// lookup returns the transaction's own newest intent for key.
-func (t *Txn) lookup(key []byte) (intent, bool) { return t.lookupBefore(key, 0) }
-
-// lookupBefore is lookup ignoring the layer of statement skip (0 = none).
-func (t *Txn) lookupBefore(key []byte, skip uint64) (intent, bool) {
+// lookup returns the transaction's own newest intent for key, ignoring the
+// layer of statement skip (0 = none).
+func (t *Txn) lookup(key []byte, skip uint64) (intent, bool) {
 	for i := len(t.layers) - 1; i >= 0; i-- {
 		if skip != 0 && t.layers[i].id == skip {
 			continue
@@ -109,11 +135,9 @@ func (t *Txn) lookupBefore(key []byte, skip uint64) (intent, bool) {
 	return intent{}, false
 }
 
-// merged returns the transaction's final write per key, in key order.
-func (t *Txn) merged() ([]string, map[string]intent) { return t.mergedBefore(0) }
-
-// mergedBefore is merged ignoring the layer of statement skip (0 = none).
-func (t *Txn) mergedBefore(skip uint64) ([]string, map[string]intent) {
+// merged returns the transaction's final write per key, in key order,
+// ignoring the layer of statement skip (0 = none).
+func (t *Txn) merged(skip uint64) ([]string, map[string]intent) {
 	out := map[string]intent{}
 	for _, l := range t.layers {
 		if skip != 0 && l.id == skip {
@@ -141,10 +165,46 @@ func (p *Partition) txnLocked(id TxnID) (*Txn, error) {
 	}
 	t, ok := p.txns[id]
 	if !ok || t.aborted {
-		return nil, newErr(KindTxnNotFound, "transaction %s is not open on this owner", id)
+		return nil, newErr(KindTxnNotFound, "transaction %s is not open on this owner (aborted)", id)
 	}
 	t.lastSeen = time.Now()
 	return t, nil
+}
+
+// txn looks a transaction up without holding p.mu afterwards.
+func (p *Partition) txn(id TxnID) (*Txn, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	t, err := p.txnLocked(id)
+	if err == nil && t.committing {
+		return nil, newErr(KindInternal, "transaction %s is committing", id)
+	}
+	return t, err
+}
+
+// abortTxnLocked aborts a transaction and frees its locks. Requires p.mu.
+func (p *Partition) abortTxnLocked(t *Txn) {
+	t.abortLocked()
+	if p.txns[t.id] == t {
+		delete(p.txns, t.id)
+	}
+	p.locks.ReleaseAll(t.id)
+}
+
+func (p *Partition) abortTxn(t *Txn) {
+	p.mu.Lock()
+	if !t.committing {
+		p.abortTxnLocked(t)
+	}
+	p.mu.Unlock()
+}
+
+// lockErr aborts the transaction when a lock request made it a deadlock victim.
+func (p *Partition) lockErr(t *Txn, err error) error {
+	if KindOf(err) == KindDeadlock {
+		p.abortTxn(t)
+	}
+	return err
 }
 
 // Begin opens a transaction. Beginning an id that is already open is a no-op.
@@ -163,7 +223,8 @@ func (p *Partition) Begin(epoch uint64, id TxnID, opts BeginOptions) error {
 	if c, ok := p.recent[id]; ok {
 		return newErr(KindInternal, "transaction %s already committed at %d", id, c.ts)
 	}
-	t := &Txn{id: id, iso: opts.Isolation, lastSeen: time.Now()}
+	now := time.Now()
+	t := &Txn{id: id, iso: opts.Isolation, began: now, lastSeen: now}
 	if opts.ConsistentSnapshot {
 		t.snapshotTS = p.visibleTS.Load()
 	}
@@ -188,12 +249,10 @@ type KV struct {
 	Value []byte
 }
 
-// Get reads keys in the transaction: its own intents over its snapshot.
-// A nil value means the key does not exist. Writes of statement stmt itself
-// are visible only with includeStmt, so a statement doesn't read its own
-// output (an UPDATE that moves a primary key must not update a row twice);
-// duplicate-key checks set it.
-func (p *Partition) Get(epoch uint64, id TxnID, stmt uint64, keys [][]byte, includeStmt bool) ([][]byte, error) {
+// Get reads keys in the transaction: its own intents over its snapshot, or
+// for a locking read, over the latest committed versions. A nil value means
+// the key does not exist.
+func (p *Partition) Get(epoch uint64, id TxnID, keys [][]byte, o ReadOptions) ([][]byte, error) {
 	if err := p.checkEpoch(epoch); err != nil {
 		return nil, err
 	}
@@ -203,15 +262,14 @@ func (p *Partition) Get(epoch uint64, id TxnID, stmt uint64, keys [][]byte, incl
 		p.mu.Unlock()
 		return nil, err
 	}
-	ts := p.snapshotLocked(t, stmt)
-	skip := stmt
-	if includeStmt {
-		skip = 0
+	ts := uint64(math.MaxUint64)
+	if o.Lock == LockNone {
+		ts = p.snapshotLocked(t, o.Stmt)
 	}
 	out := make([][]byte, len(keys))
 	var misses []int
 	for i, k := range keys {
-		if in, ok := t.lookupBefore(k, skip); ok {
+		if in, ok := t.lookup(k, o.skip()); ok {
 			if !encoding.IsDelete(in.value) {
 				out[i] = in.value
 			}
@@ -221,6 +279,13 @@ func (p *Partition) Get(epoch uint64, id TxnID, stmt uint64, keys [][]byte, incl
 	}
 	p.mu.Unlock()
 	for _, i := range misses {
+		if o.Lock != LockNone {
+			// Lock first: once held, no other transaction can have a commit in
+			// flight for this key, so Pebble has its latest version.
+			if err := p.locks.Acquire(t, keys[i], o.Lock, lockWait(o.LockWait)); err != nil {
+				return nil, p.lockErr(t, err)
+			}
+		}
 		v, _, err := p.readVersion(keys[i], ts)
 		if err != nil {
 			return nil, err
@@ -261,24 +326,26 @@ func (p *Partition) latestLocked(key []byte) ([]byte, uint64, error) {
 }
 
 // Scan reads [start, end) in key order in the transaction, up to limit rows
-// (0 = no limit). more reports whether rows remain after the last one. As
-// with Get, writes of statement stmt itself are not visible.
-func (p *Partition) Scan(epoch uint64, id TxnID, stmt uint64, start, end []byte, limit int) ([]KV, bool, error) {
+// (0 = no limit). resume is where the next page starts, or nil at the end.
+func (p *Partition) Scan(epoch uint64, id TxnID, start, end []byte, limit int, o ReadOptions) ([]KV, []byte, error) {
 	if err := p.checkEpoch(epoch); err != nil {
-		return nil, false, err
+		return nil, nil, err
 	}
 	p.mu.Lock()
 	t, err := p.txnLocked(id)
 	if err != nil {
 		p.mu.Unlock()
-		return nil, false, err
+		return nil, nil, err
 	}
-	ts := p.snapshotLocked(t, stmt)
+	ts := uint64(math.MaxUint64)
+	if o.Lock == LockNone {
+		ts = p.snapshotLocked(t, o.Stmt)
+	}
 	// Collect the transaction's intents in range.
 	var ikeys []string
 	iv := map[string]intent{}
 	if len(t.layers) > 0 {
-		keys, all := t.mergedBefore(stmt)
+		keys, all := t.merged(o.skip())
 		for _, k := range keys {
 			if k >= string(start) && (end == nil || k < string(end)) {
 				ikeys = append(ikeys, k)
@@ -288,9 +355,39 @@ func (p *Partition) Scan(epoch uint64, id TxnID, stmt uint64, start, end []byte,
 	}
 	p.mu.Unlock()
 
+	rows, own, resume, err := p.scanMerged(start, end, limit, ts, ikeys, iv)
+	if err != nil || o.Lock == LockNone {
+		return rows, resume, err
+	}
+	// Locking read: lock each row found, then read its latest version; a row
+	// deleted while we waited drops out. Rows inserted into the range by
+	// others are not blocked (no gap locks, D5).
+	out := rows[:0]
+	for i, r := range rows {
+		if own[i] {
+			out = append(out, r)
+			continue
+		}
+		if err := p.locks.Acquire(t, r.Key, o.Lock, lockWait(o.LockWait)); err != nil {
+			return nil, nil, p.lockErr(t, err)
+		}
+		v, _, err := p.readVersion(r.Key, math.MaxUint64)
+		if err != nil {
+			return nil, nil, err
+		}
+		if v != nil && !encoding.IsDelete(v) {
+			out = append(out, KV{Key: r.Key, Value: v})
+		}
+	}
+	return out, resume, nil
+}
+
+// scanMerged merges the visible committed rows at ts with the given intents.
+// own[i] reports whether row i came from an intent.
+func (p *Partition) scanMerged(start, end []byte, limit int, ts uint64, ikeys []string, iv map[string]intent) ([]KV, []bool, []byte, error) {
 	it, err := p.db.NewIter(&pebble.IterOptions{LowerBound: start, UpperBound: end})
 	if err != nil {
-		return nil, false, err
+		return nil, nil, nil, err
 	}
 	defer it.Close()
 
@@ -324,65 +421,76 @@ func (p *Partition) Scan(epoch uint64, id TxnID, stmt uint64, start, end []byte,
 	}
 
 	var out []KV
+	var own []bool
 	ck, cv, cok, err := nextCommitted()
 	if err != nil {
-		return nil, false, err
+		return nil, nil, nil, err
 	}
 	ii := 0
 	for ii < len(ikeys) || cok {
 		var k, v []byte
+		fromIntent := false
 		if ii < len(ikeys) && (!cok || ikeys[ii] <= string(ck)) {
 			in := iv[ikeys[ii]]
 			k = []byte(ikeys[ii])
 			ii++
 			if cok && bytes.Equal(k, ck) { // our own write replaces the committed row
 				if ck, cv, cok, err = nextCommitted(); err != nil {
-					return nil, false, err
+					return nil, nil, nil, err
 				}
 			}
 			if encoding.IsDelete(in.value) {
 				continue
 			}
-			v = in.value
+			v, fromIntent = in.value, true
 		} else {
 			k, v = ck, cv
 			if ck, cv, cok, err = nextCommitted(); err != nil {
-				return nil, false, err
+				return nil, nil, nil, err
 			}
 		}
 		out = append(out, KV{Key: k, Value: v})
+		own = append(own, fromIntent)
 		if limit > 0 && len(out) >= limit {
-			return out, ii < len(ikeys) || cok, nil
+			if ii < len(ikeys) || cok {
+				return out, own, append(append([]byte(nil), k...), 0), nil
+			}
+			return out, own, nil, nil
 		}
 	}
-	return out, false, nil
+	return out, own, nil, nil
 }
 
-// Mutate adds writes to statement stmt's layer. Insert-only keys are checked
-// against the transaction's own writes and the latest committed version.
-func (p *Partition) Mutate(epoch uint64, id TxnID, stmt uint64, muts []Mutation) error {
+// Mutate adds writes to statement stmt's layer. Every written key is locked
+// exclusively first (D5); insert-only keys are then checked against the
+// transaction's own writes and the latest committed version.
+func (p *Partition) Mutate(epoch uint64, id TxnID, stmt uint64, muts []Mutation, wait time.Duration) error {
 	if err := p.checkEpoch(epoch); err != nil {
 		return err
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	t, err := p.txnLocked(id)
+	t, err := p.txn(id)
 	if err != nil {
 		return err
 	}
-	if t.committing {
-		return newErr(KindInternal, "transaction %s is committing", id)
+	for _, m := range muts {
+		if err := p.locks.Acquire(t, m.Key, LockExclusive, lockWait(wait)); err != nil {
+			return p.lockErr(t, err)
+		}
 	}
-	readTS := p.snapshotLocked(t, stmt)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if t, err = p.txnLocked(id); err != nil {
+		return err
+	}
 	l := t.layer(stmt)
 	for _, m := range muts {
-		in := intent{value: m.Value, readTS: readTS}
+		in := intent{value: m.Value}
 		switch m.Op {
 		case OpDelete:
 			in.value = []byte{encoding.DeleteMarker}
 		case OpInsertOnly:
 			in.insertOnly = true
-			if own, ok := t.lookup(m.Key); ok {
+			if own, ok := t.lookup(m.Key, 0); ok {
 				if !encoding.IsDelete(own.value) {
 					return &Error{Kind: KindDuplicateKey, Msg: "duplicate key", Key: m.Key}
 				}
@@ -416,7 +524,8 @@ func (p *Partition) Mutate(epoch uint64, id TxnID, stmt uint64, muts []Mutation)
 	return nil
 }
 
-// RollbackStatement drops every write made by statement stmt.
+// RollbackStatement drops every write made by statement stmt. Locks taken by
+// the statement stay until the transaction ends, as in InnoDB.
 func (p *Partition) RollbackStatement(epoch uint64, id TxnID, stmt uint64) error {
 	if err := p.checkEpoch(epoch); err != nil {
 		return err
@@ -447,8 +556,7 @@ func (p *Partition) Rollback(epoch uint64, id TxnID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if t, ok := p.txns[id]; ok && !t.committing {
-		t.abortLocked()
-		delete(p.txns, id)
+		p.abortTxnLocked(t)
 	}
 	return nil
 }
@@ -496,13 +604,6 @@ func (p *Partition) oldestSnapshotLocked() uint64 {
 	for _, t := range p.txns {
 		if t.snapshotTS != 0 && t.snapshotTS < safe {
 			safe = t.snapshotTS
-		}
-		for _, l := range t.layers {
-			for _, in := range l.writes {
-				if in.readTS < safe {
-					safe = in.readTS
-				}
-			}
 		}
 	}
 	return safe

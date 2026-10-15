@@ -40,12 +40,19 @@ type (
 	}
 	Empty struct{}
 
-	GetReq struct {
-		H           Header
-		Txn         kv.TxnID
+	// ReadOpts mirror kv.ReadOptions.
+	ReadOpts struct {
 		Stmt        uint64
-		Keys        [][]byte
 		IncludeStmt bool // see the statement's own writes (duplicate-key checks)
+		Lock        kv.LockMode
+		LockWaitMs  int64
+	}
+
+	GetReq struct {
+		H    Header
+		Txn  kv.TxnID
+		Keys [][]byte
+		Opts ReadOpts
 	}
 	GetResp struct {
 		Values [][]byte
@@ -55,20 +62,21 @@ type (
 	ScanReq struct {
 		H          Header
 		Txn        kv.TxnID
-		Stmt       uint64
 		Start, End []byte
 		Limit      int
+		Opts       ReadOpts
 	}
 	ScanResp struct {
 		Keys, Values [][]byte
-		More         bool
+		Resume       []byte // where the next page starts; empty at the end
 	}
 
 	MutateReq struct {
-		H         Header
-		Txn       kv.TxnID
-		Stmt      uint64
-		Mutations []kv.Mutation
+		H          Header
+		Txn        kv.TxnID
+		Stmt       uint64
+		Mutations  []kv.Mutation
+		LockWaitMs int64
 	}
 
 	StmtReq struct {
@@ -93,6 +101,10 @@ type (
 		Txns []kv.TxnID
 	}
 )
+
+func (o ReadOpts) kv() kv.ReadOptions {
+	return kv.ReadOptions{Stmt: o.Stmt, IncludeStmt: o.IncludeStmt, Lock: o.Lock, LockWait: time.Duration(o.LockWaitMs) * time.Millisecond}
+}
 
 // ---- codec -------------------------------------------------------------------
 
@@ -229,7 +241,7 @@ var methods = map[string]handler{
 		if err != nil {
 			return nil, err
 		}
-		vs, err := p.Get(r.H.Epoch, r.Txn, r.Stmt, r.Keys, r.IncludeStmt)
+		vs, err := p.Get(r.H.Epoch, r.Txn, r.Keys, r.Opts.kv())
 		resp := &GetResp{Values: vs, Found: make([]bool, len(vs))}
 		for i, v := range vs {
 			resp.Found[i] = v != nil
@@ -241,11 +253,11 @@ var methods = map[string]handler{
 		if err != nil {
 			return nil, err
 		}
-		rows, more, err := p.Scan(r.H.Epoch, r.Txn, r.Stmt, r.Start, r.End, r.Limit)
+		rows, resume, err := p.Scan(r.H.Epoch, r.Txn, r.Start, r.End, r.Limit, r.Opts.kv())
 		if err != nil {
 			return nil, err
 		}
-		resp := &ScanResp{More: more, Keys: make([][]byte, len(rows)), Values: make([][]byte, len(rows))}
+		resp := &ScanResp{Resume: resume, Keys: make([][]byte, len(rows)), Values: make([][]byte, len(rows))}
 		for i, kvp := range rows {
 			resp.Keys[i], resp.Values[i] = kvp.Key, kvp.Value
 		}
@@ -256,7 +268,7 @@ var methods = map[string]handler{
 		if err != nil {
 			return nil, err
 		}
-		return &Empty{}, p.Mutate(r.H.Epoch, r.Txn, r.Stmt, r.Mutations)
+		return &Empty{}, p.Mutate(r.H.Epoch, r.Txn, r.Stmt, r.Mutations, time.Duration(r.LockWaitMs)*time.Millisecond)
 	}),
 	"RollbackStatement": unary(func(s *Server, _ context.Context, r *StmtReq) (*Empty, error) {
 		p, err := s.part(r.H)

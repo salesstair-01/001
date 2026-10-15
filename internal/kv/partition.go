@@ -131,6 +131,8 @@ type Partition struct {
 
 	visibleTS atomic.Uint64 // highest commit_ts applied and readable
 
+	locks *lockTable // row locks; take p.mu before locks.mu, never the reverse
+
 	// Owned by the flusher goroutine, read by checkpoint under applyMu.
 	applyMu        sync.Mutex
 	nextWALSeq     uint64
@@ -196,6 +198,7 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	for _, f := range next.Files {
 		p.uploaded[f.Name] = f
 	}
+	p.locks = newLockTable(p.abortTxn)
 
 	// 3. Download the listed files and open Pebble.
 	p.dir = filepath.Join(cfg.DataDir, fmt.Sprintf("p%d-e%d-%d", pid, next.Epoch, time.Now().UnixNano()))
@@ -326,9 +329,8 @@ func (p *Partition) stop(err error) {
 		p.stopErr = err
 		queue := p.queue
 		p.queue = nil
-		for id, t := range p.txns {
-			t.abortLocked()
-			delete(p.txns, id)
+		for _, t := range p.txns {
+			p.abortTxnLocked(t)
 		}
 		p.mu.Unlock()
 		for _, c := range queue {

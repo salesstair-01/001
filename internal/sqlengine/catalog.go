@@ -13,14 +13,16 @@ import (
 
 	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/kv"
+	"github.com/salesstair-01/001/internal/kvrpc"
 )
 
 // The catalog is stored as rows in system table 1 (D2). Table and column ids
 // are never reused, so the database name never needs to be in a data key.
 //
-//	("db", lower(name))       -> DBInfo
-//	("table", table_id)       -> TableInfo
-//	("seq", "table_id")       -> next table id
+//	("db", lower(name))                  -> DBInfo
+//	("table", table_id)                  -> TableInfo
+//	("tname", lower(db) "." lower(name)) -> table_id, so names are unique
+//	("seq", "table_id")                  -> next table id
 type DBInfo struct {
 	Name      string `json:"name"`
 	Collation string `json:"collation,omitempty"`
@@ -75,6 +77,11 @@ func (s *Store) tableKey(id uint32) []byte {
 	return encoding.AppendUint(k, uint64(id), false)
 }
 
+func (s *Store) tableNameKey(db, name string) []byte {
+	k := encoding.AppendBytes(s.catalogPrefix(), []byte("tname"), false)
+	return encoding.AppendBytes(k, []byte(strings.ToLower(db)+"."+strings.ToLower(name)), false)
+}
+
 func (s *Store) seqKey(name string) []byte {
 	k := encoding.AppendBytes(s.catalogPrefix(), []byte("seq"), false)
 	return encoding.AppendBytes(k, []byte(name), false)
@@ -103,7 +110,7 @@ func (c *Catalog) load(ctx context.Context) error {
 	tables := map[uint32]*TableInfo{}
 	start, end := c.store.catalogPrefix(), encoding.PrefixEnd(c.store.catalogPrefix())
 	for {
-		resp, err := txn.Scan(ctx, 1, start, end, 1000)
+		resp, err := txn.Scan(ctx, start, end, 1000, kvrpc.ReadOpts{Stmt: 1})
 		if err != nil {
 			return err
 		}
@@ -127,10 +134,10 @@ func (c *Catalog) load(ctx context.Context) error {
 				tables[t.ID] = &t
 			}
 		}
-		if !resp.More || len(resp.Keys) == 0 {
+		if len(resp.Resume) == 0 {
 			break
 		}
-		start = append(append([]byte(nil), resp.Keys[len(resp.Keys)-1]...), 0)
+		start = resp.Resume
 	}
 	c.mu.Lock()
 	c.dbs, c.tables, c.loaded = dbs, tables, true
@@ -216,7 +223,7 @@ func (c *Catalog) ddl(ctx context.Context, f func(txn *Txn) error) error {
 		} else {
 			_ = txn.Rollback(ctx)
 		}
-		if !errIsKind(err, kv.KindConflict) && !errIsKind(err, kv.KindDuplicateKey) {
+		if !errIsKind(err, kv.KindDeadlock) && !errIsKind(err, kv.KindLockTimeout) {
 			break
 		}
 		if lerr := c.load(ctx); lerr != nil {
@@ -235,7 +242,7 @@ func put(txn *Txn, ctx context.Context, op kv.MutationOp, key []byte, v any) err
 	if err != nil {
 		return err
 	}
-	return txn.Mutate(ctx, 1, []kv.Mutation{{Op: op, Key: key, Value: b}})
+	return txn.Mutate(ctx, 1, []kv.Mutation{{Op: op, Key: key, Value: b}}, 0)
 }
 
 // CreateDatabase adds a database.
@@ -259,15 +266,18 @@ func (c *Catalog) DropDatabase(ctx context.Context, name string) error {
 	return c.ddl(ctx, func(txn *Txn) error {
 		muts := []kv.Mutation{{Op: kv.OpDelete, Key: c.store.dbKey(name)}}
 		for _, t := range tables {
-			muts = append(muts, kv.Mutation{Op: kv.OpDelete, Key: c.store.tableKey(t.ID)})
+			muts = append(muts,
+				kv.Mutation{Op: kv.OpDelete, Key: c.store.tableKey(t.ID)},
+				kv.Mutation{Op: kv.OpDelete, Key: c.store.tableNameKey(t.DB, t.Name)})
 		}
-		return txn.Mutate(ctx, 1, muts)
+		return txn.Mutate(ctx, 1, muts, 0)
 	})
 }
 
-// nextTableID allocates a table id inside txn.
+// nextTableID allocates a table id inside txn. The locking read serialises
+// concurrent allocations, so an id is never handed out twice.
 func (c *Catalog) nextTableID(ctx context.Context, txn *Txn) (uint32, error) {
-	vs, err := txn.Get(ctx, 1, [][]byte{c.store.seqKey("table_id")}, true)
+	vs, err := txn.Get(ctx, [][]byte{c.store.seqKey("table_id")}, kvrpc.ReadOpts{Stmt: 1, IncludeStmt: true, Lock: kv.LockExclusive})
 	if err != nil {
 		return 0, err
 	}
@@ -296,7 +306,35 @@ func (c *Catalog) CreateTable(ctx context.Context, t *TableInfo) error {
 			return err
 		}
 		t.ID = id
+		err = put(txn, ctx, kv.OpInsertOnly, c.store.tableNameKey(t.DB, t.Name), id)
+		if errIsKind(err, kv.KindDuplicateKey) {
+			return sql.ErrTableAlreadyExists.New(t.Name)
+		}
+		if err != nil {
+			return err
+		}
 		return put(txn, ctx, kv.OpInsertOnly, c.store.tableKey(id), t)
+	})
+}
+
+// RenameTable renames a table, keeping its id.
+func (c *Catalog) RenameTable(ctx context.Context, t *TableInfo, newName string) error {
+	return c.ddl(ctx, func(txn *Txn) error {
+		updated := *t
+		updated.Name = newName
+		if !strings.EqualFold(t.Name, newName) {
+			err := put(txn, ctx, kv.OpInsertOnly, c.store.tableNameKey(t.DB, newName), t.ID)
+			if errIsKind(err, kv.KindDuplicateKey) {
+				return sql.ErrTableAlreadyExists.New(newName)
+			}
+			if err != nil {
+				return err
+			}
+			if err := txn.Mutate(ctx, 1, []kv.Mutation{{Op: kv.OpDelete, Key: c.store.tableNameKey(t.DB, t.Name)}}, 0); err != nil {
+				return err
+			}
+		}
+		return put(txn, ctx, kv.OpPut, c.store.tableKey(t.ID), &updated)
 	})
 }
 
@@ -310,7 +348,10 @@ func (c *Catalog) UpdateTable(ctx context.Context, t *TableInfo) error {
 // DropTable removes a table from the catalog.
 func (c *Catalog) DropTable(ctx context.Context, t *TableInfo) error {
 	return c.ddl(ctx, func(txn *Txn) error {
-		return txn.Mutate(ctx, 1, []kv.Mutation{{Op: kv.OpDelete, Key: c.store.tableKey(t.ID)}})
+		return txn.Mutate(ctx, 1, []kv.Mutation{
+			{Op: kv.OpDelete, Key: c.store.tableKey(t.ID)},
+			{Op: kv.OpDelete, Key: c.store.tableNameKey(t.DB, t.Name)},
+		}, 0)
 	})
 }
 

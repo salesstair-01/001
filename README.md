@@ -14,8 +14,8 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | 0 | Walking skeleton | done — `mysql` client → `sqld` → gRPC → `kvd` |
 | 1 | Durable autocommit on object storage | done — Pebble with its WAL off, object-store WAL, group commit; `scripts/crash-test.sh` passes |
 | 2 | Fencing, takeover and checkpoints | done — numbered manifests and WAL segments with put-if-absent, compare-on-412, checkpoints + GC, txn ids; fault tests pass 1,000 seeded runs |
-| 3 | Transactions and MVCC | done — snapshot reads, statement layers, read-your-writes, RR/RC, SERIALIZABLE refused, MVCC GC, 64 MiB cap; stopgap conflict check (1213) until locks |
-| 4 | Locks | not started |
+| 3 | Transactions and MVCC | done — snapshot reads, statement layers, read-your-writes, RR/RC, SERIALIZABLE refused, MVCC GC, 64 MiB cap |
+| 4 | Locks | done — X/S row locks in owner memory, locking reads of the latest version for UPDATE/DELETE/`FOR UPDATE`/`LOCK IN SHARE MODE`, FIFO wait queue with `innodb_lock_wait_timeout` (1205), wait-for-graph deadlock detection with the youngest victim (1213), 2 s heartbeat / 10 s lease; the slice-3 stopgap is gone |
 | 5 | Indexes, types, collations | partly — every type round-trips, memcomparable keys incl. DECIMAL and collation weights; no secondary indexes, AUTO_INCREMENT or `_rowid` yet |
 | 6–9 | Scale-to-zero, proxy, schema changes, multi-tenant | not started (suspend/wake primitives exist in `kv`) |
 
@@ -64,8 +64,12 @@ replay even when goroutines interleave differently.
 ## Differences from MySQL in this version
 
 - Every table needs a PRIMARY KEY; AUTO_INCREMENT and secondary indexes are not supported yet (slice 5).
-- No locks yet (slice 4): concurrent writes to the same row fail with 1213 instead of waiting
-  (the slice-3 stopgap rejects a commit that overwrites a version newer than its snapshot).
+- No gap or next-key locks: a range `FOR UPDATE` doesn't block inserts into the range, so
+  check-then-insert code must rely on a unique key. Locking reads lock every row the key range
+  returns, before WHERE filters on non-key columns (as InnoDB does without an index).
+- `SELECT ... FOR SHARE` doesn't parse yet; use `LOCK IN SHARE MODE`.
+- After a deadlock (1213) the transaction is rolled back on the owner; further statements in it
+  return 1213 until the client sends COMMIT or ROLLBACK.
 - SERIALIZABLE is refused; READ UNCOMMITTED runs as READ COMMITTED.
 - Savepoints are not supported.
 - Collations: only `utf8mb4_0900_ai_ci`, `utf8mb4_general_ci`, `utf8mb4_0900_bin`, `utf8mb4_bin`

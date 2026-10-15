@@ -342,8 +342,7 @@ func (p *Partition) expireTxns() {
 	for id, t := range p.txns {
 		if !t.committing && now.Sub(t.lastSeen) > p.cfg.TxnLease {
 			p.log.Info("transaction lease expired", "txn", id)
-			t.abortLocked()
-			delete(p.txns, id)
+			p.abortTxnLocked(t)
 		}
 	}
 	cutoff := now.Add(-p.cfg.TxnIDWindow)

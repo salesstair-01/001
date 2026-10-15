@@ -2,10 +2,12 @@ package sqlengine
 
 import (
 	"context"
+	"sync"
 
 	sqle "github.com/dolthub/go-mysql-server"
 	"github.com/dolthub/go-mysql-server/server"
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/mysql"
 )
 
@@ -16,8 +18,28 @@ type Engine struct {
 	SQL      *sqle.Engine
 }
 
+var registerVarsOnce sync.Once
+
+// registerVars replaces go-mysql-server's placeholder definition of
+// innodb_lock_wait_timeout (global-only, fixed at 1) with MySQL's: session
+// and global, 1 to 1073741824 seconds, default 50 (D5).
+func registerVars() {
+	registerVarsOnce.Do(func() {
+		sql.SystemVariables.AddSystemVariables([]sql.SystemVariable{
+			&sql.MysqlSystemVariable{
+				Name:    "innodb_lock_wait_timeout",
+				Scope:   sql.GetMysqlScope(sql.SystemVariableScope_Both),
+				Dynamic: true,
+				Type:    types.NewSystemIntType("innodb_lock_wait_timeout", 1, 1073741824, false),
+				Default: int64(50),
+			},
+		})
+	})
+}
+
 // NewEngine builds a go-mysql-server engine over the store.
 func NewEngine(store *Store) *Engine {
+	registerVars()
 	pro := NewProvider(store)
 	return &Engine{Store: store, Provider: pro, SQL: sqle.NewDefault(pro)}
 }

@@ -51,7 +51,7 @@ func put(p *Partition, i int, v string) (uint64, error) {
 	if err := p.Begin(p.epoch, id, BeginOptions{}); err != nil {
 		return 0, err
 	}
-	if err := p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpPut, Key: key(i), Value: []byte(v)}}); err != nil {
+	if err := p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpPut, Key: key(i), Value: []byte(v)}}, 0); err != nil {
 		return 0, err
 	}
 	return p.Commit(p.epoch, id)
@@ -64,7 +64,7 @@ func get(t *testing.T, p *Partition, i int) string {
 		t.Fatal(err)
 	}
 	defer p.Rollback(p.epoch, id)
-	vs, err := p.Get(p.epoch, id, 1, [][]byte{key(i)}, false)
+	vs, err := p.Get(p.epoch, id, [][]byte{key(i)}, ReadOptions{Stmt: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,26 +261,26 @@ func TestSnapshotIsolation(t *testing.T) {
 	put(p, 1, "old")
 	a := txnID()
 	p.Begin(p.epoch, a, BeginOptions{})
-	if vs, _ := p.Get(p.epoch, a, 1, [][]byte{key(1)}, false); string(vs[0]) != "old" {
+	if vs, _ := p.Get(p.epoch, a, [][]byte{key(1)}, ReadOptions{Stmt: 1}); string(vs[0]) != "old" {
 		t.Fatal("first read")
 	}
 	put(p, 1, "new")
-	if vs, _ := p.Get(p.epoch, a, 2, [][]byte{key(1)}, false); string(vs[0]) != "old" {
+	if vs, _ := p.Get(p.epoch, a, [][]byte{key(1)}, ReadOptions{Stmt: 2}); string(vs[0]) != "old" {
 		t.Fatal("repeatable read must keep the old value")
 	}
 	// READ COMMITTED sees the new value on its next statement.
 	rc := txnID()
 	p.Begin(p.epoch, rc, BeginOptions{Isolation: ReadCommitted})
-	p.Get(p.epoch, rc, 1, [][]byte{key(1)}, false)
+	p.Get(p.epoch, rc, [][]byte{key(1)}, ReadOptions{Stmt: 1})
 	put(p, 1, "newer")
-	if vs, _ := p.Get(p.epoch, rc, 2, [][]byte{key(1)}, false); string(vs[0]) != "newer" {
+	if vs, _ := p.Get(p.epoch, rc, [][]byte{key(1)}, ReadOptions{Stmt: 2}); string(vs[0]) != "newer" {
 		t.Fatal("read committed must see the latest commit")
 	}
-	// The stopgap rejects a write over a version newer than the snapshot.
-	p.Mutate(p.epoch, a, 3, []Mutation{{Op: OpPut, Key: key(1), Value: []byte("lost update")}})
-	if _, err := p.Commit(p.epoch, a); KindOf(err) != KindConflict {
-		t.Fatalf("expected conflict, got %v", err)
+	// A locking read sees the latest committed version, not the snapshot.
+	if vs, _ := p.Get(p.epoch, a, [][]byte{key(1)}, ReadOptions{Stmt: 3, Lock: LockExclusive}); string(vs[0]) != "newer" {
+		t.Fatalf("locking read must read the latest version, got %q", vs[0])
 	}
+	p.Rollback(p.epoch, a)
 }
 
 func TestRollbackAndStatementRollback(t *testing.T) {
@@ -288,14 +288,14 @@ func TestRollbackAndStatementRollback(t *testing.T) {
 	put(p, 1, "a")
 	id := txnID()
 	p.Begin(p.epoch, id, BeginOptions{})
-	p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpPut, Key: key(2), Value: []byte("b")}})
-	p.Mutate(p.epoch, id, 2, []Mutation{{Op: OpPut, Key: key(3), Value: []byte("c")}})
-	err := p.Mutate(p.epoch, id, 2, []Mutation{{Op: OpInsertOnly, Key: key(1), Value: []byte("dup")}})
+	p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpPut, Key: key(2), Value: []byte("b")}}, 0)
+	p.Mutate(p.epoch, id, 2, []Mutation{{Op: OpPut, Key: key(3), Value: []byte("c")}}, 0)
+	err := p.Mutate(p.epoch, id, 2, []Mutation{{Op: OpInsertOnly, Key: key(1), Value: []byte("dup")}}, 0)
 	if KindOf(err) != KindDuplicateKey {
 		t.Fatalf("expected duplicate, got %v", err)
 	}
 	p.RollbackStatement(p.epoch, id, 2)
-	rows, _, err := p.Scan(p.epoch, id, 3, key(0), key(10), 0)
+	rows, _, err := p.Scan(p.epoch, id, key(0), key(10), 0, ReadOptions{Stmt: 3})
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("scan inside txn: %d rows %v", len(rows), err)
 	}
@@ -307,7 +307,7 @@ func TestRollbackAndStatementRollback(t *testing.T) {
 	}
 	id2 := txnID()
 	p.Begin(p.epoch, id2, BeginOptions{})
-	p.Mutate(p.epoch, id2, 1, []Mutation{{Op: OpDelete, Key: key(1)}})
+	p.Mutate(p.epoch, id2, 1, []Mutation{{Op: OpDelete, Key: key(1)}}, 0)
 	p.Rollback(p.epoch, id2)
 	if get(t, p, 1) != "a" {
 		t.Fatal("rollback left a trace")
@@ -325,21 +325,21 @@ func TestScanMergesIntents(t *testing.T) {
 		{Op: OpPut, Key: key(3), Value: []byte("3")},
 		{Op: OpDelete, Key: key(4)},
 		{Op: OpPut, Key: key(6), Value: []byte("six")},
-	})
+	}, 0)
 	var got []string
 	start := key(0)
 	for {
-		rows, more, err := p.Scan(p.epoch, id, 2, start, key(100), 2)
+		rows, resume, err := p.Scan(p.epoch, id, start, key(100), 2, ReadOptions{Stmt: 2})
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, r := range rows {
 			got = append(got, string(r.Value))
 		}
-		if !more || len(rows) == 0 {
+		if resume == nil {
 			break
 		}
-		start = append(append([]byte(nil), rows[len(rows)-1].Key...), 0)
+		start = resume
 	}
 	if fmt.Sprint(got) != "[0 2 3 six 8]" {
 		t.Fatalf("got %v", got)
@@ -351,7 +351,7 @@ func TestTxnStatusAndIdempotentCommit(t *testing.T) {
 	p := open(t, s, "a")
 	id := txnID()
 	p.Begin(p.epoch, id, BeginOptions{})
-	p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpPut, Key: key(1), Value: []byte("x")}})
+	p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpPut, Key: key(1), Value: []byte("x")}}, 0)
 	ts, err := p.Commit(p.epoch, id)
 	if err != nil {
 		t.Fatal(err)
@@ -379,7 +379,7 @@ func TestMVCCGC(t *testing.T) {
 	put(p, 2, "gone")
 	id := txnID()
 	p.Begin(p.epoch, id, BeginOptions{})
-	p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpDelete, Key: key(2)}})
+	p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpDelete, Key: key(2)}}, 0)
 	p.Commit(p.epoch, id)
 	n, err := p.gcVersions()
 	if err != nil {

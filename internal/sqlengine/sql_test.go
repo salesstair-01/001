@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/kv"
 	"github.com/salesstair-01/001/internal/kvrpc"
 	"github.com/salesstair-01/001/internal/objstore"
@@ -35,7 +36,7 @@ type cluster struct {
 func startKV(t *testing.T, store objstore.Store, owner, addr string) (*kv.Node, *grpc.Server, string) {
 	t.Helper()
 	node := kv.NewNode(kv.Config{
-		Store: store, DataDir: t.TempDir(), OwnerID: owner,
+		Store: store, DataDir: t.TempDir(), OwnerID: owner, TxnLease: 3 * time.Second,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	var lis net.Listener
@@ -353,35 +354,196 @@ func TestDurableAcrossKVRestart(t *testing.T) {
 	mustExec(t, db, "INSERT INTO log VALUES (100, 'after restart')")
 }
 
-func TestConcurrentWritersStopgap(t *testing.T) {
+// With row locks, concurrent increments of one row all succeed and none is lost.
+func TestConcurrentIncrements(t *testing.T) {
 	c := startCluster(t)
 	db := c.db(t)
 	mustExec(t, db, "CREATE TABLE ctr (id INT PRIMARY KEY, n INT)")
 	mustExec(t, db, "INSERT INTO ctr VALUES (1, 0)")
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	ok := 0
 	for w := 0; w < 8; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 10; i++ {
-				_, err := db.Exec("UPDATE ctr SET n = n + 1 WHERE id = 1")
-				if err == nil {
-					mu.Lock()
-					ok++
-					mu.Unlock()
-				} else if mysqlCode(err) != 1213 {
+				if _, err := db.Exec("UPDATE ctr SET n = n + 1 WHERE id = 1"); err != nil {
 					t.Error(err)
 				}
 			}
 		}()
 	}
 	wg.Wait()
-	// Every successful increment is counted exactly once; conflicts got 1213.
-	if got := queryStrings(t, db, "SELECT n FROM ctr"); fmt.Sprint(got) != fmt.Sprintf("[%d]", ok) {
-		t.Fatalf("lost update: counter %v, successful updates %d", got, ok)
+	if got := queryStrings(t, db, "SELECT n FROM ctr"); fmt.Sprint(got) != "[80]" {
+		t.Fatalf("lost update: %v", got)
 	}
+}
+
+func TestLockWaitTimeoutAndDeadlock(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	mustExec(t, db, "CREATE TABLE r (id INT PRIMARY KEY, v INT)")
+	mustExec(t, db, "INSERT INTO r VALUES (1, 0), (2, 0)")
+	ctx := context.Background()
+	a, _ := db.Conn(ctx)
+	b, _ := db.Conn(ctx)
+	defer a.Close()
+	defer b.Close()
+
+	// A blocked statement returns 1205 after innodb_lock_wait_timeout and
+	// rolls back only that statement.
+	mustExecConn(t, a, "BEGIN")
+	mustExecConn(t, a, "UPDATE r SET v = 1 WHERE id = 1")
+	mustExecConn(t, b, "SET SESSION innodb_lock_wait_timeout = 1")
+	mustExecConn(t, b, "BEGIN")
+	mustExecConn(t, b, "UPDATE r SET v = 2 WHERE id = 2")
+	start := time.Now()
+	_, err := b.ExecContext(ctx, "UPDATE r SET v = 2 WHERE id = 1")
+	if mysqlCode(err) != 1205 {
+		t.Fatalf("want 1205, got %v", err)
+	}
+	if d := time.Since(start); d < 900*time.Millisecond || d > 5*time.Second {
+		t.Fatalf("lock wait took %v", d)
+	}
+	mustExecConn(t, b, "COMMIT") // b's earlier statement survives
+	mustExecConn(t, a, "COMMIT")
+	if got := queryStrings(t, db, "SELECT id, v FROM r"); fmt.Sprint(got) != "[1,1 2,2]" {
+		t.Fatalf("after 1205: %v", got)
+	}
+
+	// A two-session deadlock returns 1213 to one session.
+	mustExecConn(t, b, "SET SESSION innodb_lock_wait_timeout = 50")
+	mustExecConn(t, a, "BEGIN")
+	mustExecConn(t, b, "BEGIN")
+	mustExecConn(t, a, "UPDATE r SET v = 10 WHERE id = 1")
+	mustExecConn(t, b, "UPDATE r SET v = 20 WHERE id = 2")
+	aDone := make(chan error, 1)
+	go func() { _, err := a.ExecContext(ctx, "UPDATE r SET v = 10 WHERE id = 2"); aDone <- err }()
+	time.Sleep(100 * time.Millisecond)
+	_, errB := b.ExecContext(ctx, "UPDATE r SET v = 20 WHERE id = 1")
+	errA := <-aDone
+	if mysqlCode(errA) == 1213 == (mysqlCode(errB) == 1213) {
+		t.Fatalf("exactly one session must get 1213: a=%v b=%v", errA, errB)
+	}
+	a.ExecContext(ctx, "COMMIT")
+	b.ExecContext(ctx, "ROLLBACK")
+}
+
+func TestSelectForUpdateBlocks(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	mustExec(t, db, "CREATE TABLE q (id INT PRIMARY KEY, v INT)")
+	mustExec(t, db, "INSERT INTO q VALUES (1, 0)")
+	ctx := context.Background()
+	a, _ := db.Conn(ctx)
+	b, _ := db.Conn(ctx)
+	defer a.Close()
+	defer b.Close()
+	mustExecConn(t, a, "BEGIN")
+	if got := connStrings(t, a, "SELECT v FROM q WHERE id = 1 FOR UPDATE"); fmt.Sprint(got) != "[0]" {
+		t.Fatal(got)
+	}
+	mustExecConn(t, b, "SET SESSION innodb_lock_wait_timeout = 1")
+	if _, err := b.ExecContext(ctx, "UPDATE q SET v = 5 WHERE id = 1"); mysqlCode(err) != 1205 {
+		t.Fatalf("FOR UPDATE must block writers: %v", err)
+	}
+	// Plain reads don't block on locks.
+	if got := connStrings(t, b, "SELECT v FROM q WHERE id = 1"); fmt.Sprint(got) != "[0]" {
+		t.Fatal(got)
+	}
+	mustExecConn(t, a, "UPDATE q SET v = 1 WHERE id = 1")
+	mustExecConn(t, a, "COMMIT")
+	mustExecConn(t, b, "UPDATE q SET v = v + 1 WHERE id = 1")
+	if got := queryStrings(t, db, "SELECT v FROM q"); fmt.Sprint(got) != "[2]" {
+		t.Fatal(got)
+	}
+}
+
+// Slice 4 done-when: killing a query engine mid-transaction frees its locks
+// within 10 s (the transaction lease).
+func TestDeadQueryEngineLocksExpire(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	mustExec(t, db, "CREATE TABLE z (id INT PRIMARY KEY, v INT)")
+	mustExec(t, db, "INSERT INTO z VALUES (1, 0)")
+
+	// A second query engine writes in a transaction, then dies without a
+	// rollback: its heartbeats stop.
+	cc, err := grpc.NewClient(c.kvAddr, append(kvrpc.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cc.Close()
+	other := NewStore(kvrpc.NewClient(cc), 1)
+	txn := other.NewTxn(kv.RepeatableRead, false)
+	key := encoding.AppendInt(encoding.Prefix(1, encoding.FirstUserTableID, 0), 1, false)
+	if err := txn.Mutate(context.Background(), 1, []kv.Mutation{{Op: kv.OpDelete, Key: key}}, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	other.Close()
+
+	start := time.Now()
+	mustExec(t, db, "UPDATE z SET v = 7 WHERE id = 1")
+	if d := time.Since(start); d > 12*time.Second {
+		t.Fatalf("locks freed after %v", d)
+	}
+	if got := queryStrings(t, db, "SELECT v FROM z"); fmt.Sprint(got) != "[7]" {
+		t.Fatalf("the dead transaction must have been aborted: %v", got)
+	}
+}
+
+// Slice 4 concurrency test through SQL: many sessions move money between
+// accounts; the total never changes.
+func TestMoneyTransfersSQL(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	mustExec(t, db, "CREATE TABLE acct (id INT PRIMARY KEY, bal INT)")
+	for i := 0; i < 5; i++ {
+		mustExec(t, db, "INSERT INTO acct VALUES (?, 100)", i)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	commits, deadlocks := 0, 0
+	for w := 0; w < 6; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 15; i++ {
+				from, to := (w+i)%5, (w+2*i+1)%5
+				if from == to {
+					continue
+				}
+				tx, err := db.Begin()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				_, err = tx.Exec("UPDATE acct SET bal = bal - 1 WHERE id = ?", from)
+				if err == nil {
+					_, err = tx.Exec("UPDATE acct SET bal = bal + 1 WHERE id = ?", to)
+				}
+				if err == nil {
+					err = tx.Commit()
+				} else {
+					tx.Rollback()
+				}
+				mu.Lock()
+				switch {
+				case err == nil:
+					commits++
+				case mysqlCode(err) == 1213:
+					deadlocks++
+				default:
+					t.Error(err)
+				}
+				mu.Unlock()
+			}
+		}(w)
+	}
+	wg.Wait()
+	if got := queryStrings(t, db, "SELECT SUM(bal) FROM acct"); fmt.Sprint(got) != "[500]" {
+		t.Fatalf("total changed: %v", got)
+	}
+	t.Logf("commits=%d deadlocks=%d", commits, deadlocks)
 }
 
 func mustExecConn(t *testing.T, c *sql.Conn, q string) {

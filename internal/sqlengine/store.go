@@ -173,6 +173,10 @@ func (t *Txn) retryable(ctx context.Context, op func(h kvrpc.Header) error) erro
 			t.ops++
 			return nil
 		}
+		if kv.KindOf(err) == kv.KindDeadlock {
+			t.markDead(err) // the owner rolled the whole transaction back
+			return err
+		}
 		if kv.KindOf(err) != kv.KindEpochChanged && kv.KindOf(err) != kv.KindTxnNotFound {
 			return err
 		}
@@ -198,38 +202,37 @@ func (t *Txn) markDead(err error) {
 	t.forget()
 }
 
-// Get reads keys; a nil value means absent. includeStmt makes writes of the
-// current statement visible (duplicate-key checks need them).
-func (t *Txn) Get(ctx context.Context, stmt uint64, keys [][]byte, includeStmt bool) ([][]byte, error) {
+// Get reads keys; a nil value means absent.
+func (t *Txn) Get(ctx context.Context, keys [][]byte, o kvrpc.ReadOpts) ([][]byte, error) {
 	var out [][]byte
 	err := t.retryable(ctx, func(h kvrpc.Header) error {
 		var err error
-		out, err = t.store.client.Get(ctx, &kvrpc.GetReq{H: h, Txn: t.id, Stmt: stmt, Keys: keys, IncludeStmt: includeStmt})
+		out, err = t.store.client.Get(ctx, &kvrpc.GetReq{H: h, Txn: t.id, Keys: keys, Opts: o})
 		return err
 	})
 	return out, err
 }
 
 // Scan reads a key range page.
-func (t *Txn) Scan(ctx context.Context, stmt uint64, start, end []byte, limit int) (*kvrpc.ScanResp, error) {
+func (t *Txn) Scan(ctx context.Context, start, end []byte, limit int, o kvrpc.ReadOpts) (*kvrpc.ScanResp, error) {
 	var out *kvrpc.ScanResp
 	err := t.retryable(ctx, func(h kvrpc.Header) error {
 		var err error
-		out, err = t.store.client.Scan(ctx, &kvrpc.ScanReq{H: h, Txn: t.id, Stmt: stmt, Start: start, End: end, Limit: limit})
+		out, err = t.store.client.Scan(ctx, &kvrpc.ScanReq{H: h, Txn: t.id, Start: start, End: end, Limit: limit, Opts: o})
 		return err
 	})
 	return out, err
 }
 
-// Mutate sends writes for statement stmt.
-func (t *Txn) Mutate(ctx context.Context, stmt uint64, muts []kv.Mutation) error {
+// Mutate sends writes for statement stmt, waiting up to lockWait for row locks.
+func (t *Txn) Mutate(ctx context.Context, stmt uint64, muts []kv.Mutation, lockWait time.Duration) error {
 	if len(muts) == 0 {
 		return nil
 	}
 	err := t.retryable(ctx, func(h kvrpc.Header) error {
-		return t.store.client.Mutate(ctx, &kvrpc.MutateReq{H: h, Txn: t.id, Stmt: stmt, Mutations: muts})
+		return t.store.client.Mutate(ctx, &kvrpc.MutateReq{H: h, Txn: t.id, Stmt: stmt, Mutations: muts, LockWaitMs: lockWait.Milliseconds()})
 	})
-	if err == nil || kv.KindOf(err) == kv.KindDuplicateKey || kv.KindOf(err) == kv.KindTxnTooLarge {
+	if err == nil || kv.KindOf(err) == kv.KindDuplicateKey || kv.KindOf(err) == kv.KindTxnTooLarge || kv.KindOf(err) == kv.KindLockTimeout {
 		t.mu.Lock()
 		t.wrote = true
 		t.mu.Unlock()

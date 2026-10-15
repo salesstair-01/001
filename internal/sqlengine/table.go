@@ -11,6 +11,7 @@ import (
 
 	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/kv"
+	"github.com/salesstair-01/001/internal/kvrpc"
 )
 
 // scanPage is how many rows one Scan call returns.
@@ -196,14 +197,14 @@ func (t *Table) PartitionRows(ctx *sql.Context, part sql.Partition) (sql.RowIter
 	if !ok {
 		return nil, fmt.Errorf("unexpected partition %T", part)
 	}
-	txn, stmt, done := sessionTxn(ctx, t.store)
-	return &rowIter{t: t, txn: txn, stmt: stmt, done: done, spans: p.spans}, nil
+	txn, done := sessionTxn(ctx, t.store)
+	return &rowIter{t: t, txn: txn, opts: readOpts(ctx, t.info.Name), done: done, spans: p.spans}, nil
 }
 
 type rowIter struct {
 	t     *Table
 	txn   *Txn
-	stmt  uint64
+	opts  kvrpc.ReadOpts
 	done  func()
 	spans []keySpan
 
@@ -234,7 +235,7 @@ func (it *rowIter) Next(ctx *sql.Context) (sql.Row, error) {
 		}
 		sp := it.spans[0]
 		if sp.point {
-			vs, err := it.txn.Get(ctx, it.stmt, [][]byte{sp.start}, false)
+			vs, err := it.txn.Get(ctx, [][]byte{sp.start}, it.opts)
 			if err != nil {
 				return nil, mysqlError(err)
 			}
@@ -252,13 +253,13 @@ func (it *rowIter) Next(ctx *sql.Context) (sql.Row, error) {
 }
 
 func (it *rowIter) fetch(ctx *sql.Context, sp keySpan) error {
-	resp, err := it.txn.Scan(ctx, it.stmt, it.next, sp.end, scanPage)
+	resp, err := it.txn.Scan(ctx, it.next, sp.end, scanPage, it.opts)
 	if err != nil {
 		return mysqlError(err)
 	}
-	it.page, it.more = resp.Values, resp.More && len(resp.Keys) > 0
-	if n := len(resp.Keys); n > 0 {
-		it.next = append(append([]byte(nil), resp.Keys[n-1]...), 0)
+	it.page, it.more = resp.Values, len(resp.Resume) > 0
+	if it.more {
+		it.next = resp.Resume
 	}
 	return nil
 }
@@ -330,7 +331,7 @@ func (e *editor) flush(ctx *sql.Context) error {
 	if txn.IsReadOnly() {
 		return sql.ErrReadOnlyTransaction.New()
 	}
-	return mysqlError(txn.Mutate(ctx, stmt, buf))
+	return mysqlError(txn.Mutate(ctx, stmt, buf, lockWait(ctx)))
 }
 
 // add buffers a mutation; a later write to the same key in the statement
@@ -368,7 +369,9 @@ func (e *editor) existing(ctx *sql.Context, key []byte) (sql.Row, error) {
 	if err != nil {
 		return nil, err
 	}
-	vs, err := txn.Get(ctx, stmt, [][]byte{key}, true)
+	// A locking read of the key: holding its lock keeps the duplicate check
+	// true until commit (D5).
+	vs, err := txn.Get(ctx, [][]byte{key}, kvrpc.ReadOpts{Stmt: stmt, IncludeStmt: true, Lock: kv.LockExclusive, LockWaitMs: lockWait(ctx).Milliseconds()})
 	if err != nil {
 		return nil, mysqlError(err)
 	}

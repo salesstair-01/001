@@ -2,7 +2,6 @@ package sqlengine
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/types"
@@ -186,10 +185,5 @@ func (d *Database) RenameTable(ctx *sql.Context, oldName, newName string) error 
 	if info == nil {
 		return sql.ErrTableNotFound.New(oldName)
 	}
-	if other, _ := d.p.catalog.Table(ctx, d.name, newName); other != nil && !strings.EqualFold(oldName, newName) {
-		return sql.ErrTableAlreadyExists.New(newName)
-	}
-	updated := *info
-	updated.Name = newName
-	return d.p.catalog.UpdateTable(ctx, &updated)
+	return d.p.catalog.RenameTable(ctx, info, newName)
 }

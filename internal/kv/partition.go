@@ -235,6 +235,7 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	next := *m
 	next.Epoch = m.Epoch + 1
 	next.Owner = cfg.OwnerID
+	next.CreatedAt = time.Now().UnixMicro()
 	if err := s.PutIfAbsent(ctx, manifestKey(pid, n+1), next.encode()); err != nil {
 		if errors.Is(err, objstore.ErrPreconditionFailed) {
 			return nil, errTakeoverLost

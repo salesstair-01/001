@@ -112,6 +112,7 @@ func (p *Partition) Checkpoint(ctx context.Context) error {
 	next := Manifest{
 		Epoch: p.epoch, Owner: p.cfg.OwnerID, Files: files,
 		ReplayAfterWALSeq: seq, MaxCommitTS: maxTS, CheckpointID: ckptID,
+		CreatedAt: time.Now().UnixMicro(),
 	}
 	data := next.encode()
 	key := manifestKey(p.id, p.manifestN+1)

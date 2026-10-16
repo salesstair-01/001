@@ -53,6 +53,9 @@ type Manifest struct {
 	ReplayAfterWALSeq uint64    `json:"replay_after_wal_seq"`
 	MaxCommitTS       uint64    `json:"max_commit_ts"`
 	CheckpointID      string    `json:"checkpoint_id,omitempty"`
+	// CreatedAt is when the manifest was written (unix µs), so point-in-time
+	// restore can pick the newest state before a given time.
+	CreatedAt int64 `json:"created_at,omitempty"`
 }
 
 func (m *Manifest) encode() []byte {

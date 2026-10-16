@@ -52,10 +52,16 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # MinIO no longer publishes images or binaries; build the pinned release.
+      - uses: actions/cache@v4
+        with:
+          path: ~/minio-bin
+          key: minio-RELEASE.2025-04-22T22-12-26Z
       - name: start MinIO
         run: |
-          docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
-            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          [ -x ~/minio-bin/minio ] || GOBIN=~/minio-bin go install github.com/minio/minio@RELEASE.2025-04-22T22-12-26Z
+          mkdir -p /tmp/minio-data
+          ~/minio-bin/minio server /tmp/minio-data --address 127.0.0.1:9000 > /tmp/minio.log 2>&1 &
           for i in $(seq 60); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
       - run: make test-minio
       - run: make crash-test

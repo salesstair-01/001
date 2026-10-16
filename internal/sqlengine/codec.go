@@ -1,6 +1,7 @@
 package sqlengine
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/types"
+	"github.com/dolthub/vitess/go/sqltypes"
 	"github.com/shopspring/decimal"
 
 	"github.com/salesstair-01/001/internal/encoding"
@@ -60,7 +62,8 @@ func (c *colCodec) encodeValue(ctx context.Context, v any) ([]byte, error) {
 		s, err := types.JsonToMySqlString(w)
 		return []byte(s), err
 	case types.IsText(t) || types.IsBinaryType(t):
-		return toBytes(v)
+		b, err := toBytes(v)
+		return trimChar(t, b), err
 	case types.IsGeometry(t):
 		return nil, fmt.Errorf("spatial types are not supported in v1")
 	}
@@ -159,13 +162,23 @@ func (c *colCodec) appendKey(ctx context.Context, b []byte, v any) ([]byte, erro
 		if err != nil {
 			return nil, err
 		}
-		w, err := sortKey(t, raw)
+		w, err := sortKey(t, trimChar(t, raw))
 		if err != nil {
 			return nil, err
 		}
 		return encoding.AppendBytes(b, w, false), nil
 	}
 	return nil, fmt.Errorf("column %s: type %s cannot be part of a key in v1", c.info.Name, t)
+}
+
+// trimChar drops the trailing spaces of a CHAR value, as MySQL does when it
+// stores one (without PAD_CHAR_TO_FULL_LENGTH): 'a ' reads back as 'a', and
+// ' ' and ” are the same key.
+func trimChar(t sql.Type, b []byte) []byte {
+	if t.Type() == sqltypes.Char {
+		return bytes.TrimRight(b, " ")
+	}
+	return b
 }
 
 // sortKey returns the bytes a string sorts by under its collation (D2):

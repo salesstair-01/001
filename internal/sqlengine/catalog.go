@@ -583,8 +583,14 @@ func columnInfo(col *sql.Column, id uint32) (ColumnInfo, error) {
 	if tc, ok := col.Type.(sql.TypeWithCollation); ok && !collationSupported(tc.Collation()) {
 		return ColumnInfo{}, fmt.Errorf("collation %s is not supported; v1 supports utf8mb4_0900_ai_ci, utf8mb4_general_ci, utf8mb4_0900_bin, utf8mb4_bin and binary", tc.Collation().Name())
 	}
+	typ := col.Type.String()
+	if tc, ok := col.Type.(sql.TypeWithCollation); ok {
+		// String() leaves out go-mysql-server's default collation
+		// (utf8mb4_0900_bin), which would read back as unspecified.
+		typ = tc.StringWithTableCollation(sql.Collation_Unspecified)
+	}
 	ci := ColumnInfo{
-		ID: id, Name: col.Name, Type: col.Type.String(), Nullable: col.Nullable,
+		ID: id, Name: col.Name, Type: typ, Nullable: col.Nullable,
 		AutoIncrement: col.AutoIncrement, Comment: col.Comment,
 	}
 	if col.Default != nil {
@@ -598,6 +604,13 @@ func sqlColumn(ctx *sql.Context, t *TableInfo, ci *ColumnInfo, pk bool) (*sql.Co
 	typ, err := planbuilder.ParseColumnTypeString(ci.Type)
 	if err != nil {
 		return nil, fmt.Errorf("column %s.%s: type %q: %w", t.Name, ci.Name, ci.Type, err)
+	}
+	if tc, ok := typ.(sql.TypeWithCollation); ok && tc.Collation() == sql.Collation_Unspecified {
+		// Stored without a collation: it was go-mysql-server's default. An
+		// unspecified collation makes LIKE false and COLLATE fail.
+		if typ, err = tc.WithNewCollation(sql.Collation_Default); err != nil {
+			return nil, fmt.Errorf("column %s.%s: %w", t.Name, ci.Name, err)
+		}
 	}
 	col := &sql.Column{
 		Name: ci.Name, Type: typ, Nullable: ci.Nullable, Source: t.Name, DatabaseSource: t.DB,

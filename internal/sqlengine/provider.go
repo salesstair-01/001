@@ -81,7 +81,7 @@ func (p *Provider) AllDatabases(ctx *sql.Context) []sql.Database {
 }
 
 func (p *Provider) CreateDatabase(ctx *sql.Context, name string) error {
-	return p.CreateCollatedDatabase(ctx, name, sql.Collation_Default)
+	return p.CreateCollatedDatabase(ctx, name, sql.Collation_utf8mb4_0900_ai_ci)
 }
 
 func (p *Provider) CreateCollatedDatabase(ctx *sql.Context, name string, collation sql.CollationID) error {

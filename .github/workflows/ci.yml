@@ -83,6 +83,18 @@ jobs:
         if: failure()
         run: tail -n 50 /tmp/s2z/*.log || true
 
+  mysql-diff:
+    name: differential tests against MySQL 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # The runner image ships MySQL 8.0 (root/root), stopped.
+      - run: sudo systemctl start mysql
+      - run: S2Z_MYSQL_DSN='root:root@tcp(127.0.0.1:3306)/' go test ./internal/sqlengine -run MySQLDiff -diff-rounds 10 -timeout 30m
+
   sqllogictest:
     name: sqllogictest subset
     runs-on: ubuntu-latest

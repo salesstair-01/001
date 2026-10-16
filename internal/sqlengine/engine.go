@@ -8,6 +8,7 @@ import (
 	sqle "github.com/dolthub/go-mysql-server"
 	"github.com/dolthub/go-mysql-server/server"
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/mysql"
 )
@@ -42,11 +43,24 @@ func registerVars() {
 				Default: int64(50),
 			},
 		})
+		// MySQL 8's default collation; go-mysql-server's is utf8mb4_0900_bin,
+		// which would make unqualified columns case- and accent-sensitive.
+		for _, name := range []string{"collation_server", "collation_database", "collation_connection", "default_collation_for_utf8mb4"} {
+			v, _, ok := sql.SystemVariables.GetGlobal(name)
+			mv, isMy := v.(*sql.MysqlSystemVariable)
+			if !ok || !isMy {
+				continue
+			}
+			c := *mv
+			c.Default = sql.Collation_utf8mb4_0900_ai_ci.Name()
+			sql.SystemVariables.AddSystemVariables([]sql.SystemVariable{&c})
+		}
 	})
 }
 
 func newSQLEngine(pro *Provider) *sqle.Engine {
-	e := sqle.NewDefault(pro)
+	a := analyzer.NewBuilder(pro).AddPreAnalyzeRule(explicitLikeEscapeID, explicitLikeEscape).Build()
+	e := sqle.New(a, nil)
 	e.Analyzer.Catalog.StatsProvider = &statsProvider{StatsProvider: e.Analyzer.Catalog.StatsProvider}
 	return e
 }
@@ -134,7 +148,7 @@ func ensureDatabase(ctx context.Context, s *Store, name string) error {
 	if err != nil || d != nil {
 		return err
 	}
-	err = s.catalog.CreateDatabase(ctx, name, sql.Collation_Default)
+	err = s.catalog.CreateDatabase(ctx, name, sql.Collation_utf8mb4_0900_ai_ci)
 	if sql.ErrDatabaseExists.Is(err) {
 		return nil
 	}

@@ -13,6 +13,14 @@ How it is checked:
 - **sqllogictest** (`make slt`, CI job `sqllogictest`): a subset of the
   SQLite-derived suite; results per file in
   [`scripts/slt/results.md`](../scripts/slt/results.md).
+- **MySQL 8 differential tests** (`internal/sqlengine/mysqldiff_test.go`):
+  seeded random tables and queries run on a real MySQL 8.0 and on this
+  engine, results compared: collation order, equality, index ranges, LIKE and
+  unique conflicts for each supported collation; round trips, order and
+  ranges for each scalar type, in secondary indexes and primary keys. Run
+  with `S2Z_MYSQL_DSN='root@tcp(127.0.0.1:3306)/' go test ./internal/sqlengine
+  -run MySQLDiff -diff-rounds 20`; `-diff-known-gaps` also generates the
+  inputs of the gaps listed under *Types and collations*.
 - **Go tests** in `internal/sqlengine` and `internal/proxy` for each item
   below that says "tested".
 
@@ -69,6 +77,9 @@ Accepted but different:
   `EXPLAIN FORMAT=TREE` returns the plan as text.
 - `DESC` in an index definition is accepted; entries are stored ascending.
   Results are correct, but a descending scan of such an index is not cheaper.
+- A prefix `LIKE 'abc%'` is evaluated as a filter, not an index range
+  (go-mysql-server's range rewrite drops strings that continue past U+00FF,
+  so it is disabled).
 - Performance shape: every table and index read is a KV call (two for a
   secondary index: entries, then rows). Repeated non-locking reads of the
   same key ranges within one statement, as in the inner side of a nested
@@ -116,8 +127,30 @@ Accepted but different:
 
 - All MySQL scalar types except spatial. DECIMAL keys are exact
   (memcomparable encoding); DATETIME/TIMESTAMP to microseconds.
-- Collations: `utf8mb4_0900_ai_ci` (default), `utf8mb4_general_ci`,
-  `utf8mb4_0900_bin`, `utf8mb4_bin`, `binary`. Others are refused.
+- Collations: `utf8mb4_0900_ai_ci` (the default, as in MySQL 8),
+  `utf8mb4_general_ci`, `utf8mb4_0900_bin`, `utf8mb4_bin`, `binary`. Others are
+  refused.
+- `CHAR(n)` drops trailing spaces on store, as MySQL does.
+- Known gaps, found by the differential tests and inherited from
+  go-mysql-server's comparisons (keys follow the same rules, so results are
+  consistent, but they differ from MySQL):
+  - Collation expansions are not applied: under `utf8mb4_0900_ai_ci`, `ß` and
+    `ẞ` do not sort and compare as `ss`, `æ` as `ae`, or ligatures such as `ﬁ`
+    as their letters; each is one character with its own weight.
+  - PAD SPACE: `utf8mb4_bin` and `utf8mb4_general_ci` should ignore trailing
+    spaces (`'a ' = 'a'`). Unique and primary keys do (a duplicate-key error,
+    as in MySQL), but comparisons, `GROUP BY` and `DISTINCT` treat the strings
+    as different.
+  - An `ENUM` compared with a string compares by member index
+    (`e < 'b'` means "declared before b"); MySQL compares the strings. `ORDER
+    BY` on an ENUM is by index in both.
+  - A `BIGINT UNSIGNED` compared with a string literal goes through float64,
+    so values within about 2^11 of 2^64 compare equal; integer literals and
+    parameters compare exactly.
+  - `ENUM ... LIKE` is always false.
+  - Output formatting: `DATETIME(6)` prints without trailing
+    zeros in the fraction (`.12`, MySQL `.120000`); `FLOAT` prints every
+    digit of the float32 (`-565.3059`, MySQL `-565.306`).
 - `AUTO_INCREMENT` within a multi-row insert comes from doubling
   reservations, so bulk inserts can leave gaps (like
   `innodb_autoinc_lock_mode=2`).

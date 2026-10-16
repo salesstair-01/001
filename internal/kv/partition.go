@@ -48,6 +48,20 @@ type Config struct {
 	CacheDir      string
 	CacheMaxBytes int64
 
+	// Per-partition resources, so one node can serve many tenants (slice 9):
+	// BlockCacheBytes is one Pebble block cache shared by the node's
+	// partitions (default 256 MiB), MemTableBytes each partition's memtable
+	// (default 4 MiB), PutConcurrency the node's concurrent object-store PUTs
+	// (default 32), and PutRate/PutBurst each partition's PUT quota in PUTs
+	// per second (default 100, burst 200; <0 = unlimited).
+	BlockCacheBytes int64
+	MemTableBytes   int64
+	PutConcurrency  int
+	PutRate         float64
+	PutBurst        int
+
+	res *nodeResources // shared by a node's partitions; set by NewNode
+
 	Logger *slog.Logger
 }
 
@@ -92,6 +106,21 @@ func (c *Config) withDefaults() Config {
 	if d.CacheMaxBytes == 0 {
 		d.CacheMaxBytes = 10 << 30
 	}
+	if d.BlockCacheBytes == 0 {
+		d.BlockCacheBytes = 256 << 20
+	}
+	if d.MemTableBytes == 0 {
+		d.MemTableBytes = 4 << 20
+	}
+	if d.PutConcurrency == 0 {
+		d.PutConcurrency = 32
+	}
+	if d.PutRate == 0 {
+		d.PutRate = 100
+	}
+	if d.PutBurst == 0 {
+		d.PutBurst = 200
+	}
 	return d
 }
 
@@ -103,14 +132,6 @@ var pebbleComparer = func() *pebble.Comparer {
 	c.Name = "s2z.mvcc.v1"
 	return &c
 }()
-
-func pebbleOptions() *pebble.Options {
-	return &pebble.Options{
-		Comparer:   pebbleComparer,
-		DisableWAL: true, // the object-store WAL is the source of truth
-		Logger:     quietLogger{},
-	}
-}
 
 type quietLogger struct{}
 
@@ -168,6 +189,8 @@ type Partition struct {
 	uploaded  map[string]FileRef // local SST name -> uploaded object
 	cache     *fileCache         // local copies of checkpoint files; may be nil
 	cacheHits int                // files the takeover found in the cache
+	puts      *atomic.Int64      // object-store PUTs made
+	ownRes    bool               // cfg.res is this partition's own, closed with it
 	garbage   []garbageItem
 
 	queueSignal chan struct{}
@@ -191,7 +214,15 @@ func (p *Partition) VisibleTS() uint64 { return p.visibleTS.Load() }
 // The caller registers the owner and epoch with the directory (step 6).
 func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	cfg = cfg.withDefaults()
-	s := cfg.Store
+	ownRes := cfg.res == nil
+	if ownRes { // a partition opened outside a node has its own
+		cfg.res = newNodeResources(&cfg)
+	}
+	fs := &fairStore{Store: cfg.Store, slots: cfg.res.putSlots, puts: new(atomic.Int64)}
+	if cfg.PutRate > 0 {
+		fs.bucket = newTokenBucket(cfg.PutRate, cfg.PutBurst)
+	}
+	var s objstore.Store = fs
 	log := cfg.Logger.With("partition", pid)
 
 	// 1. List the manifests and read the highest, N.
@@ -218,6 +249,7 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 		autoinc:   map[uint32]uint64{},
 		manifestN: n + 1, manifest: next, uploaded: map[string]FileRef{},
 		queueSignal: make(chan struct{}, 1), stopCh: make(chan struct{}),
+		puts: fs.puts, ownRes: ownRes,
 	}
 	for _, f := range next.Files {
 		p.uploaded[f.Name] = f
@@ -238,7 +270,7 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	downloaded := time.Since(start)
 	p.cacheHits = hits
 	p.cache.evict()
-	p.db, err = pebble.Open(p.dir, pebbleOptions())
+	p.db, err = pebble.Open(p.dir, p.pebbleOptions())
 	if err != nil {
 		return nil, fmt.Errorf("takeover: open pebble: %w", err)
 	}
@@ -409,6 +441,9 @@ func (p *Partition) Close() error {
 		p.wg.Wait()
 		p.closeErr = p.db.Close()
 		_ = os.RemoveAll(p.dir)
+		if p.ownRes {
+			p.cfg.res.close()
+		}
 	})
 	return p.closeErr
 }

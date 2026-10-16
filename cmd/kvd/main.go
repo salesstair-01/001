@@ -45,6 +45,11 @@ func main() {
 	idleSuspend := flag.Duration("idle-suspend", 0, "suspend a partition idle this long (0 = never; 5m is the v1 default with a directory)")
 	cacheDir := flag.String("cache-dir", env("KVD_CACHE_DIR", ""), "local SST cache kept across restarts (default: <data>/cache)")
 	exitWhenIdle := flag.Bool("exit-when-idle", false, "exit once no partition is served (a dedicated per-tenant process)")
+	blockCache := flag.Int64("block-cache-mb", 256, "Pebble block cache shared by all partitions, MiB")
+	memtable := flag.Int64("memtable-mb", 4, "memtable size per partition, MiB")
+	putConc := flag.Int("put-concurrency", 32, "concurrent object-store PUTs for the node")
+	putRate := flag.Float64("put-rate", 100, "object-store PUTs per second per partition (<0 = unlimited)")
+	putBurst := flag.Int("put-burst", 200, "PUT burst per partition")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -69,7 +74,9 @@ func main() {
 		addr = *advertise
 	}
 
-	cfg := kv.Config{Store: store, DataDir: *dataDir, CacheDir: *cacheDir, OwnerID: *owner, Logger: log, IdleSuspend: *idleSuspend}
+	cfg := kv.Config{Store: store, DataDir: *dataDir, CacheDir: *cacheDir, OwnerID: *owner, Logger: log, IdleSuspend: *idleSuspend,
+		BlockCacheBytes: *blockCache << 20, MemTableBytes: *memtable << 20,
+		PutConcurrency: *putConc, PutRate: *putRate, PutBurst: *putBurst}
 	var agent *directory.Agent
 	if *dirAddr != "" {
 		cc, err := grpc.NewClient(*dirAddr, append(kvrpc.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)

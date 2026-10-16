@@ -94,7 +94,10 @@ func (i *tableIndex) CanSupport(_ *sql.Context, ranges ...sql.Range) bool {
 // GetIndexes lists the primary key and the public secondary indexes; indexes
 // being built or dropped are maintained by writers but never read.
 func (t *Table) GetIndexes(*sql.Context) ([]sql.Index, error) {
-	out := []sql.Index{&tableIndex{t: t}}
+	var out []sql.Index
+	if !t.keyless {
+		out = append(out, &tableIndex{t: t})
+	}
 	for _, ix := range t.indexes {
 		if ix.info.State == "" {
 			out = append(out, &tableIndex{t: t, sec: ix})

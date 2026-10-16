@@ -155,13 +155,9 @@ func (d *Database) SetCollation(ctx *sql.Context, c sql.CollationID) error {
 	return fmt.Errorf("ALTER DATABASE ... COLLATE is not supported in v1")
 }
 
-// CreateTable stores a new table in the catalog. Tables are always clustered
-// by primary key, as in InnoDB.
+// CreateTable stores a new table in the catalog. Tables are clustered by
+// primary key, or by a hidden _rowid when they have none, as in InnoDB.
 func (d *Database) CreateTable(ctx *sql.Context, name string, schema sql.PrimaryKeySchema, collation sql.CollationID, comment string) error {
-	if len(schema.PkOrdinals) == 0 {
-		// The hidden _rowid for tables without a primary key comes in slice 5.
-		return fmt.Errorf("table %s: a PRIMARY KEY is required in this version", name)
-	}
 	if !collationSupported(collation) {
 		return fmt.Errorf("collation %s is not supported in v1", collation.Name())
 	}

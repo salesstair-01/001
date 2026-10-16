@@ -34,6 +34,8 @@ type Table struct {
 	// instantAdd marks the table object of an ADD COLUMN statement after the
 	// column was added: it reads no rows and writes nothing (see AddColumn).
 	instantAdd bool
+	// keyless tables have no primary key and are keyed by a hidden rowid.
+	keyless bool
 }
 
 var (
@@ -57,6 +59,7 @@ func newTable(ctx *sql.Context, cat *Catalog, info *TableInfo) (*Table, error) {
 		isPK[id] = i
 	}
 	t.pkOrd = make([]int, len(info.PK))
+	t.keyless = len(info.PK) == 0
 	var cols sql.Schema
 	for i := range info.Columns {
 		ci := &info.Columns[i]
@@ -321,6 +324,7 @@ type rowIter struct {
 	index *secIndex
 
 	page   [][]byte // row values ready to decode
+	keys   [][]byte // their keys, when noteKeys
 	next   []byte   // resume key of the current span; nil = span not started
 	more   bool
 	closed bool
@@ -331,7 +335,11 @@ func (it *rowIter) Next(ctx *sql.Context) (sql.Row, error) {
 		if len(it.page) > 0 {
 			v := it.page[0]
 			it.page = it.page[1:]
-			return it.t.decodeRow(ctx, v)
+			var k []byte
+			if it.noteKeys() {
+				k, it.keys = it.keys[0], it.keys[1:]
+			}
+			return it.row(ctx, v, k)
 		}
 		if it.next != nil && it.more {
 			if err := it.fetch(ctx, it.spans[0]); err != nil {
@@ -353,7 +361,7 @@ func (it *rowIter) Next(ctx *sql.Context) (sql.Row, error) {
 			}
 			it.spans = it.spans[1:]
 			if vs[0] != nil {
-				return it.t.decodeRow(ctx, vs[0])
+				return it.row(ctx, vs[0], sp.start)
 			}
 			continue
 		}
@@ -374,11 +382,11 @@ func (it *rowIter) fetch(ctx *sql.Context, sp keySpan) error {
 		it.next = resp.Resume
 	}
 	if it.index == nil {
-		it.page = resp.Values
+		it.page, it.keys = resp.Values, resp.Keys
 		return nil
 	}
 	if len(resp.Keys) == 0 {
-		it.page = nil
+		it.page, it.keys = nil, nil
 		return nil
 	}
 	pks := make([][]byte, len(resp.Keys))
@@ -391,13 +399,28 @@ func (it *rowIter) fetch(ctx *sql.Context, sp keySpan) error {
 	if err != nil {
 		return mysqlError(err)
 	}
-	it.page = it.page[:0]
-	for _, r := range rows {
+	it.page, it.keys = it.page[:0], it.keys[:0]
+	for i, r := range rows {
 		if r != nil {
 			it.page = append(it.page, r)
+			it.keys = append(it.keys, pks[i])
 		}
 	}
 	return nil
+}
+
+// noteKeys says whether rows read are noted with their keys, for the
+// UPDATE or DELETE of a keyless table (see rowid.go).
+func (it *rowIter) noteKeys() bool {
+	return it.t.keyless && it.opts.Lock != kv.LockNone
+}
+
+func (it *rowIter) row(ctx *sql.Context, v, key []byte) (sql.Row, error) {
+	row, err := it.t.decodeRow(ctx, v)
+	if err == nil && it.noteKeys() {
+		err = it.t.noteRowKey(ctx, row, key)
+	}
+	return row, err
 }
 
 func (it *rowIter) Close(*sql.Context) error {
@@ -549,11 +572,15 @@ func entryOp(unique bool) kv.MutationOp {
 }
 
 func (e *editor) Insert(ctx *sql.Context, row sql.Row) error {
-	pk, err := e.t.pkKey(ctx, row)
-	if err != nil {
+	var pk []byte
+	var err error
+	if e.t.keyless {
+		if pk, err = e.newRowid(ctx); err != nil {
+			return err
+		}
+	} else if pk, err = e.t.pkKey(ctx, row); err != nil {
 		return err
-	}
-	if old, err := e.existing(ctx, pk); err != nil {
+	} else if old, err := e.existing(ctx, pk); err != nil {
 		return err
 	} else if old != nil {
 		return sql.NewUniqueKeyErr(keyString(row, e.t.pkOrd), true, old)
@@ -593,11 +620,7 @@ func (e *editor) Insert(ctx *sql.Context, row sql.Row) error {
 }
 
 func (e *editor) Update(ctx *sql.Context, old, new sql.Row) error {
-	oldPK, err := e.t.pkKey(ctx, old)
-	if err != nil {
-		return err
-	}
-	newPK, err := e.t.pkKey(ctx, new)
+	oldPK, newPK, err := e.updateKeys(ctx, old, new)
 	if err != nil {
 		return err
 	}
@@ -664,8 +687,29 @@ func (e *editor) Update(ctx *sql.Context, old, new sql.Row) error {
 	return nil
 }
 
+// updateKeys returns the keys of a row before and after an update; a keyless
+// row keeps its rowid.
+func (e *editor) updateKeys(ctx *sql.Context, old, new sql.Row) ([]byte, []byte, error) {
+	if e.t.keyless {
+		k, err := e.keyOf(ctx, old)
+		return k, k, err
+	}
+	oldPK, err := e.t.pkKey(ctx, old)
+	if err != nil {
+		return nil, nil, err
+	}
+	newPK, err := e.t.pkKey(ctx, new)
+	return oldPK, newPK, err
+}
+
 func (e *editor) Delete(ctx *sql.Context, row sql.Row) error {
-	pk, err := e.t.pkKey(ctx, row)
+	var pk []byte
+	var err error
+	if e.t.keyless {
+		pk, err = e.keyOf(ctx, row)
+	} else {
+		pk, err = e.t.pkKey(ctx, row)
+	}
 	if err != nil {
 		return err
 	}

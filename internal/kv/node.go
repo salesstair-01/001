@@ -24,6 +24,7 @@ type Node struct {
 // partitions in the background.
 func NewNode(cfg Config) *Node {
 	cfg = cfg.withDefaults()
+	cfg.res = newNodeResources(&cfg)
 	if cfg.OwnerID == "" {
 		cfg.OwnerID = "kv-" + newID()[:12]
 	}
@@ -244,5 +245,6 @@ func (n *Node) Close() error {
 			errs = append(errs, fmt.Errorf("partition %d: %w", p.id, err))
 		}
 	}
+	n.cfg.res.close()
 	return errors.Join(errs...)
 }

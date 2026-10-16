@@ -29,6 +29,8 @@ type Session struct {
 	autoMu sync.Mutex
 	auto   map[uint32]*autoBatch // AUTO_INCREMENT reservations of the current statement
 
+	keyless rowKeyTables // keys of keyless rows read by the current statement
+
 	txnMu   sync.Mutex
 	current *Txn // the open transaction, until it commits or rolls back
 }

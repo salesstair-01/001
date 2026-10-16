@@ -317,7 +317,11 @@ func (p *Partition) readVersion(userKey []byte, ts uint64) ([]byte, uint64, erro
 	if err != nil || !bytes.Equal(uk, userKey) {
 		return nil, 0, err
 	}
-	return append([]byte(nil), it.Value()...), vts, nil
+	// make, not append to nil: an empty value (a secondary-index entry) must
+	// stay non-nil, or it reads as absent.
+	v := make([]byte, len(it.Value()))
+	copy(v, it.Value())
+	return v, vts, nil
 }
 
 // latestLocked returns the newest committed version of key, including
@@ -414,7 +418,7 @@ func (p *Partition) scanMerged(start, end []byte, limit int, ts uint64, ikeys []
 			var k, v []byte
 			if !encoding.IsDelete(it.Value()) {
 				k = append([]byte(nil), uk...)
-				v = append([]byte(nil), it.Value()...)
+				v = append([]byte{}, it.Value()...)
 			}
 			valid = it.SeekGE(append(encoding.MVCCKey(uk, 0), 0))
 			if k != nil {

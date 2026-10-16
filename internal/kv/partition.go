@@ -213,12 +213,13 @@ func (p *Partition) VisibleTS() uint64 { return p.visibleTS.Load() }
 // Takeover makes this process the owner of partition pid (D4, steps 1–5).
 // The caller registers the owner and epoch with the directory (step 6).
 func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
+	t0 := time.Now()
 	cfg = cfg.withDefaults()
 	ownRes := cfg.res == nil
 	if ownRes { // a partition opened outside a node has its own
 		cfg.res = newNodeResources(&cfg)
 	}
-	fs := &fairStore{Store: cfg.Store, slots: cfg.res.putSlots, puts: new(atomic.Int64)}
+	fs := &fairStore{Store: cfg.Store, slots: cfg.res.putSlots, puts: new(atomic.Int64), label: pidLabel(pid)}
 	if cfg.PutRate > 0 {
 		fs.bucket = newTokenBucket(cfg.PutRate, cfg.PutBurst)
 	}
@@ -334,6 +335,11 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	go p.background()
 	p.log.Info("took over partition", "manifest", p.manifestN, "replayed_through", seq-1, "max_commit_ts", p.maxCommitTS,
 		"files", len(next.Files), "cache_hits", hits, "download", downloaded.Round(time.Millisecond))
+	cache := "warm"
+	if hits < len(next.Files) {
+		cache = "cold"
+	}
+	takeoverSeconds.ObserveSince(t0, cache)
 	return p, nil
 }
 

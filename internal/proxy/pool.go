@@ -31,9 +31,15 @@ type Spawner func(ctx context.Context) (*Engine, error)
 type PoolConfig struct {
 	Static []string // engines that always run (not started or stopped by the proxy)
 	Spawn  Spawner  // starts engines on demand; nil = static only
-	// Warm is how many idle spawned engines to keep ready, so a cold tenant
-	// pays only for its KV wake (0 = every compute layer can reach zero).
+	// Warm is how many spawned engines to keep running even with no
+	// sessions, so a cold tenant pays only for its KV wake (0 = every compute
+	// layer can reach zero). While Warm > 0 the pool also starts an engine
+	// ahead of need once every engine is at 80% of MaxSessions.
 	Warm int
+	// MaxSessions is how many backend connections one engine takes before
+	// the pool starts another (default 256). Engines serve any tenant, so
+	// many tenants share one.
+	MaxSessions int
 	// Idle stops a spawned engine with no sessions for this long, beyond Warm.
 	Idle   time.Duration
 	Logger *slog.Logger
@@ -46,6 +52,7 @@ type Pool struct {
 	mu       sync.Mutex
 	engines  []*Engine
 	spawning int
+	spawned  chan struct{} // closed when the spawns in flight end; nil = none
 	wake     chan struct{}
 	stop     chan struct{}
 }
@@ -54,6 +61,9 @@ type Pool struct {
 func NewPool(cfg PoolConfig) *Pool {
 	if cfg.Idle == 0 {
 		cfg.Idle = 5 * time.Minute
+	}
+	if cfg.MaxSessions == 0 {
+		cfg.MaxSessions = 256
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -101,36 +111,50 @@ func (p *Pool) Running() int {
 	return n
 }
 
-// Acquire returns the least-loaded engine, starting one if none is running.
+// Acquire returns the least-loaded engine with room, starting one if there
+// is none. Concurrent callers share an engine being started.
 func (p *Pool) Acquire(ctx context.Context) (*Engine, error) {
 	for {
 		p.mu.Lock()
-		var live []*Engine
+		var best *Engine
 		for _, e := range p.engines {
-			if !e.dead {
-				live = append(live, e)
+			if !e.dead && e.conns < p.cfg.MaxSessions && (best == nil || e.conns < best.conns) {
+				best = e
 			}
 		}
-		if len(live) > 0 {
-			sort.Slice(live, func(i, j int) bool { return live[i].conns < live[j].conns })
-			e := live[0]
-			e.conns++
-			e.lastUsed = time.Now()
+		if best != nil {
+			best.conns++
+			best.lastUsed = time.Now()
 			p.mu.Unlock()
-			p.kick() // keep Warm idle engines in reserve
-			return e, nil
+			p.kick() // start one ahead if engines are getting full
+			return best, nil
 		}
 		if p.cfg.Spawn == nil {
 			p.mu.Unlock()
 			return nil, errors.New("proxy: no query engine available")
 		}
-		p.mu.Unlock()
-		p.mu.Lock()
-		p.spawning++
+		if ch := p.spawned; ch != nil { // wait for the engine being started
+			p.mu.Unlock()
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		p.beginSpawnLocked()
 		p.mu.Unlock()
 		if err := p.spawnOne(ctx); err != nil {
 			return nil, err
 		}
+	}
+}
+
+// beginSpawnLocked counts a spawn in flight. Requires p.mu.
+func (p *Pool) beginSpawnLocked() {
+	p.spawning++
+	if p.spawned == nil {
+		p.spawned = make(chan struct{})
 	}
 }
 
@@ -164,6 +188,10 @@ func (p *Pool) spawnOne(ctx context.Context) error {
 		e.lastUsed = time.Now()
 		p.engines = append(p.engines, e)
 	}
+	if p.spawning == 0 && p.spawned != nil {
+		close(p.spawned)
+		p.spawned = nil
+	}
 	p.mu.Unlock()
 	if err != nil {
 		return err
@@ -180,7 +208,8 @@ func (p *Pool) spawnOne(ctx context.Context) error {
 	return nil
 }
 
-// loop keeps Warm idle engines ready and stops engines idle past Idle.
+// loop keeps Warm engines running, starts one ahead when every engine is
+// nearly full, and stops engines idle past Idle beyond the Warm ones.
 func (p *Pool) loop() {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -192,31 +221,44 @@ func (p *Pool) loop() {
 		case <-p.wake:
 		}
 		p.mu.Lock()
+		// Busiest and most recently used first, so the longest-idle engines are
+		// the ones stopped.
+		sort.SliceStable(p.engines, func(i, j int) bool {
+			a, b := p.engines[i], p.engines[j]
+			if a.conns != b.conns {
+				return a.conns > b.conns
+			}
+			return a.lastUsed.After(b.lastUsed)
+		})
 		kept := p.engines[:0]
-		idleSpawned := 0
+		running, roomy := 0, 0
 		var stop []*Engine
-		// Newest first, so the longest-idle engines are the ones stopped.
-		sort.SliceStable(p.engines, func(i, j int) bool { return p.engines[i].lastUsed.After(p.engines[j].lastUsed) })
 		for _, e := range p.engines {
 			if e.dead {
 				continue
 			}
-			if e.Stop != nil && e.conns == 0 {
-				if idleSpawned >= p.cfg.Warm && time.Since(e.lastUsed) > p.cfg.Idle {
+			if e.Stop != nil {
+				if e.conns == 0 && running >= p.cfg.Warm && time.Since(e.lastUsed) > p.cfg.Idle {
 					stop = append(stop, e)
 					continue
 				}
-				idleSpawned++
+				running++
+			}
+			if e.conns < p.cfg.MaxSessions*8/10 {
+				roomy++
 			}
 			kept = append(kept, e)
 		}
 		p.engines = kept
 		need := 0
-		if p.cfg.Spawn != nil {
-			need = p.cfg.Warm - idleSpawned - p.spawning
+		if p.cfg.Spawn != nil && p.spawning == 0 {
+			need = p.cfg.Warm - running
+			if need < 1 && p.cfg.Warm > 0 && roomy == 0 {
+				need = 1
+			}
 		}
-		if need > 0 {
-			p.spawning += need
+		for i := 0; i < need; i++ {
+			p.beginSpawnLocked()
 		}
 		p.mu.Unlock()
 		for _, e := range stop {

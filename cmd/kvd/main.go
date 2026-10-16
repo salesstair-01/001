@@ -18,6 +18,7 @@ import (
 	"github.com/salesstair-01/001/internal/directory"
 	"github.com/salesstair-01/001/internal/kv"
 	"github.com/salesstair-01/001/internal/kvrpc"
+	"github.com/salesstair-01/001/internal/metrics"
 	"github.com/salesstair-01/001/internal/objstore"
 )
 
@@ -50,9 +51,14 @@ func main() {
 	putConc := flag.Int("put-concurrency", 32, "concurrent object-store PUTs for the node")
 	putRate := flag.Float64("put-rate", 100, "object-store PUTs per second per partition (<0 = unlimited)")
 	putBurst := flag.Int("put-burst", 200, "PUT burst per partition")
+	metricsListen := flag.String("metrics-listen", "", "serve Prometheus metrics at http://<addr>/metrics (empty = off)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if err := metrics.Serve(*metricsListen); err != nil {
+		log.Error("metrics listener", "err", err)
+		os.Exit(1)
+	}
 	slog.SetDefault(log)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -88,6 +94,7 @@ func main() {
 		cfg.OnSuspend, cfg.OnEmpty = agent.OnSuspend, agent.OnEmpty
 	}
 	node := kv.NewNode(cfg)
+	node.RegisterMetrics(metrics.Default)
 	if agent != nil {
 		agent.NodeID = *nodeID
 		if agent.NodeID == "" {

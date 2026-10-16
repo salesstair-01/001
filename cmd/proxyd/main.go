@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/salesstair-01/001/internal/metrics"
 	"github.com/salesstair-01/001/internal/proxy"
 	"github.com/salesstair-01/001/internal/sqlengine"
 )
@@ -33,12 +34,18 @@ func main() {
 	sqldBin := flag.String("spawn-sqld", "", "sqld binary to start generic query engines on demand")
 	dirAddr := flag.String("directory", "127.0.0.1:7000", "directory address passed to spawned query engines")
 	workDir := flag.String("spawn-data", "./data/sqld", "directory for spawned query engines' logs")
-	warm := flag.Int("warm", 1, "idle query engines kept ready (0 lets query engines reach zero)")
+	warm := flag.Int("warm", 1, "query engines kept running with no sessions (0 lets query engines reach zero)")
+	maxSessions := flag.Int("engine-sessions", 256, "backend connections per query engine before another is started")
 	engineIdle := flag.Duration("engine-idle", 5*time.Minute, "stop a spawned query engine with no sessions for this long")
 	backendIdle := flag.Duration("backend-idle", 30*time.Second, "release a session's query-engine connection after this long idle")
+	metricsListen := flag.String("metrics-listen", "", "serve Prometheus metrics at http://<addr>/metrics (empty = off)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if err := metrics.Serve(*metricsListen); err != nil {
+		log.Error("metrics listener", "err", err)
+		os.Exit(1)
+	}
 	slog.SetDefault(log)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -67,7 +74,7 @@ func main() {
 		}
 	}
 
-	pcfg := proxy.PoolConfig{Warm: *warm, Idle: *engineIdle, Logger: log}
+	pcfg := proxy.PoolConfig{Warm: *warm, MaxSessions: *maxSessions, Idle: *engineIdle, Logger: log}
 	if *engines != "" {
 		pcfg.Static = strings.Split(*engines, ",")
 	}
@@ -109,6 +116,7 @@ func main() {
 		log.Error("listen", "err", err)
 		os.Exit(1)
 	}
+	p.RegisterMetrics(metrics.Default)
 	log.Info("proxyd listening", "addr", p.Addr(), "warm", *warm, "spawn", *sqldBin)
 	<-ctx.Done()
 	p.Close()

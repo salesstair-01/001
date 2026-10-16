@@ -121,6 +121,9 @@ func (p *Partition) CommitGuarded(epoch uint64, id TxnID, guards []Guard) (uint6
 	default:
 	}
 	res := <-req.done
+	if res.err == nil {
+		commitSeconds.ObserveSince(req.arrived)
+	}
 	return res.ts, res.err
 }
 

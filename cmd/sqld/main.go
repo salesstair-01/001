@@ -15,6 +15,7 @@ import (
 
 	"github.com/salesstair-01/001/internal/directory"
 	"github.com/salesstair-01/001/internal/kvrpc"
+	"github.com/salesstair-01/001/internal/metrics"
 	"github.com/salesstair-01/001/internal/sqlengine"
 )
 
@@ -32,9 +33,14 @@ func main() {
 	dirAddr := flag.String("directory", env("SQLD_DIRECTORY", ""), "directory service address; routes to the partition's owner and wakes it (overrides -kv)")
 	generic := flag.Bool("generic", false, "serve any tenant: the connecting user s2z_p<partition> picks it (used behind proxyd; needs -directory)")
 	createDB := flag.String("create-db", "app", "create this database at startup if it does not exist (empty = none)")
+	metricsListen := flag.String("metrics-listen", "", "serve Prometheus metrics at http://<addr>/metrics (empty = off)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if err := metrics.Serve(*metricsListen); err != nil {
+		log.Error("metrics listener", "err", err)
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

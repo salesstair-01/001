@@ -58,6 +58,7 @@ type fairStore struct {
 	slots  chan struct{}
 	bucket *tokenBucket // nil = no rate limit
 	puts   *atomic.Int64
+	label  string // partition id, for metrics
 }
 
 func (f *fairStore) PutIfAbsent(ctx context.Context, key string, data []byte) error {
@@ -73,6 +74,7 @@ func (f *fairStore) PutIfAbsent(ctx context.Context, key string, data []byte) er
 	}
 	defer func() { <-f.slots }()
 	f.puts.Add(1)
+	putsTotal.Inc(f.label)
 	return f.Store.PutIfAbsent(ctx, key, data)
 }
 

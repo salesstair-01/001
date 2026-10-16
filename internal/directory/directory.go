@@ -59,6 +59,8 @@ type Directory struct {
 	waitingOn map[string]chan struct{} // spawned node id -> closed on registration
 	clients   map[string]*kvrpc.Client
 	seq       int
+	// sharedSpawn is the node being started for shared placement, if any.
+	sharedSpawn *spawnWait
 }
 
 // Open opens the directory and its SQLite table.
@@ -267,7 +269,14 @@ func (d *Directory) Resolve(ctx context.Context, pid, stale uint64) (Route, erro
 				return Route{}, err
 			}
 		}
-		r, err = d.wake(ctx, pid)
+		reason := "suspended"
+		switch {
+		case r.Node != "": // routed to a node that is gone
+			reason = "node_lost"
+		case r.Epoch == 0:
+			reason = "first_use"
+		}
+		r, err = d.wake(ctx, pid, reason)
 		if err == nil || attempt >= 3 || ctx.Err() != nil {
 			return r, err
 		}
@@ -299,7 +308,7 @@ func (d *Directory) open(ctx context.Context, addr string, pid uint64) (uint64, 
 
 // wake places a partition on a node and has it take the partition over. One
 // wake per partition runs at a time; concurrent callers share it.
-func (d *Directory) wake(ctx context.Context, pid uint64) (Route, error) {
+func (d *Directory) wake(ctx context.Context, pid uint64, reason string) (Route, error) {
 	d.mu.Lock()
 	if ch, ok := d.waking[pid]; ok {
 		d.mu.Unlock()
@@ -341,7 +350,9 @@ func (d *Directory) wake(ctx context.Context, pid uint64) (Route, error) {
 	d.mu.Lock()
 	n.parts[pid] = epoch
 	d.mu.Unlock()
-	d.log.Info("woke partition", "partition", pid, "node", n.id, "epoch", epoch, "took", time.Since(start).Round(time.Millisecond))
+	d.log.Info("woke partition", "partition", pid, "node", n.id, "epoch", epoch, "reason", reason, "took", time.Since(start).Round(time.Millisecond))
+	wakesTotal.Inc(reason)
+	wakeSeconds.ObserveSince(start, reason)
 	return r, nil
 }
 
@@ -371,12 +382,48 @@ func (d *Directory) place(ctx context.Context) (*node, error) {
 		d.mu.Unlock()
 		return nil, errors.New("directory: no live KV node and no way to start one")
 	}
+	if !d.cfg.DedicatedNodes {
+		// Partitions share nodes: concurrent wakes wait for one new node.
+		if w := d.sharedSpawn; w != nil {
+			d.mu.Unlock()
+			select {
+			case <-w.done:
+				return w.n, w.err
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		w := &spawnWait{done: make(chan struct{})}
+		d.sharedSpawn = w
+		d.mu.Unlock()
+		w.n, w.err = d.spawn(ctx)
+		d.mu.Lock()
+		d.sharedSpawn = nil
+		d.mu.Unlock()
+		close(w.done)
+		return w.n, w.err
+	}
+	d.mu.Unlock()
+	return d.spawn(ctx)
+}
+
+// spawnWait is a node spawn other wakes wait for.
+type spawnWait struct {
+	done chan struct{}
+	n    *node
+	err  error
+}
+
+// spawn starts a KV process and returns it once it registers.
+func (d *Directory) spawn(ctx context.Context) (*node, error) {
+	d.mu.Lock()
 	d.seq++
 	id := fmt.Sprintf("kv-%d-%d", time.Now().UnixNano(), d.seq)
 	registered := make(chan struct{})
 	d.waitingOn[id] = registered
 	d.mu.Unlock()
 
+	spawnsTotal.Inc()
 	exited, err := d.cfg.Spawn(ctx, id)
 	if err != nil {
 		d.mu.Lock()

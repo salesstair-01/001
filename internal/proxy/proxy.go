@@ -56,6 +56,10 @@ type session struct {
 	inTxn     bool   // the backend reported SERVER_STATUS_IN_TRANS
 	pinned    string // why the backend may not be released ("" = it may)
 	lastUsed  time.Time
+	// coldStart is when the statement that opened the current backend began;
+	// the statement's result records the cold-start latency.
+	coldStart  time.Time
+	coldEngine string
 }
 
 type setStmt struct {
@@ -423,6 +427,11 @@ func (p *Proxy) forward(ctx context.Context, c *mysql.Conn, s *session, query st
 	s.inTxn = uint16(status)&mysql.ServerInTransaction != 0
 	c.StatusFlags = uint16(status) & (mysql.ServerInTransaction | mysql.ServerStatusAutocommit)
 	s.lastUsed = time.Now()
+	queriesTotal.Inc(s.principal.tenant.Name)
+	if !s.coldStart.IsZero() {
+		coldStartSeconds.ObserveSince(s.coldStart, s.coldEngine)
+		s.coldStart = time.Time{}
+	}
 	return res, nil
 }
 
@@ -431,6 +440,11 @@ func (p *Proxy) forward(ctx context.Context, c *mysql.Conn, s *session, query st
 func (p *Proxy) ensureBackend(ctx context.Context, s *session) error {
 	if s.backend != nil {
 		return nil
+	}
+	start := time.Now()
+	engine := "running"
+	if p.cfg.Pool.Running() == 0 {
+		engine = "started"
 	}
 	e, err := p.cfg.Pool.Acquire(ctx)
 	if err != nil {
@@ -471,6 +485,7 @@ func (p *Proxy) ensureBackend(ctx context.Context, s *session) error {
 	}
 	s.backend = b
 	s.inTxn = false
+	s.coldStart, s.coldEngine = start, engine
 	return nil
 }
 

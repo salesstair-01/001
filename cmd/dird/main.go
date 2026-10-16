@@ -18,6 +18,7 @@ import (
 
 	"github.com/salesstair-01/001/internal/directory"
 	"github.com/salesstair-01/001/internal/kvrpc"
+	"github.com/salesstair-01/001/internal/metrics"
 )
 
 func main() {
@@ -27,9 +28,14 @@ func main() {
 	kvdArgs := flag.String("spawn-args", "", "extra arguments for spawned kvd processes (MinIO flags, -idle-suspend ...)")
 	kvdData := flag.String("spawn-data", "./data/spawned", "base directory for spawned kvd processes; their SST cache is shared under <base>/cache")
 	dedicated := flag.Bool("dedicated", true, "with -spawn-kvd, give each woken tenant its own kvd that exits when idle")
+	metricsListen := flag.String("metrics-listen", "", "serve Prometheus metrics at http://<addr>/metrics (empty = off)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if err := metrics.Serve(*metricsListen); err != nil {
+		log.Error("metrics listener", "err", err)
+		os.Exit(1)
+	}
 	slog.SetDefault(log)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

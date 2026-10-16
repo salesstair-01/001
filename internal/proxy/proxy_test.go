@@ -47,6 +47,8 @@ type stack struct {
 type stackOpts struct {
 	kvIdle, backendIdle, engineIdle time.Duration
 	warm                            int
+	sharedKV                        bool     // one KV node serves every tenant
+	tenants                         []Tenant // default: acme only
 }
 
 func newStack(t *testing.T, o stackOpts) *stack {
@@ -57,7 +59,7 @@ func newStack(t *testing.T, o stackOpts) *stack {
 	}
 	s.dirAddr = lis.Addr().String()
 	s.dir, err = directory.Open(directory.Config{
-		DBPath: filepath.Join(t.TempDir(), "dir.db"), Dial: kvrpc.Dial, Logger: quiet, DedicatedNodes: true,
+		DBPath: filepath.Join(t.TempDir(), "dir.db"), Dial: kvrpc.Dial, Logger: quiet, DedicatedNodes: !o.sharedKV,
 		Spawn: func(_ context.Context, id string) (<-chan struct{}, error) { return s.startKV(id, o.kvIdle), nil },
 	})
 	if err != nil {
@@ -68,8 +70,11 @@ func newStack(t *testing.T, o stackOpts) *stack {
 	go g.Serve(lis)
 
 	s.pool = NewPool(PoolConfig{Spawn: s.startQE, Warm: o.warm, Idle: o.engineIdle, Logger: quiet})
+	if o.tenants == nil {
+		o.tenants = []Tenant{{Name: "acme", Partition: 42, Users: map[string]string{"app": "s3cret"}}}
+	}
 	s.proxy, err = New("127.0.0.1:0", Config{
-		Tenants: NewTenants("db.test", Tenant{Name: "acme", Partition: 42, Users: map[string]string{"app": "s3cret"}}),
+		Tenants: NewTenants("db.test", o.tenants...),
 		Pool:    s.pool, TenantUser: sqlengine.TenantUser, BackendIdle: o.backendIdle, Logger: quiet,
 		TLS: mustTLS(t),
 	})

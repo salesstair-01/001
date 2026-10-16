@@ -26,6 +26,9 @@ import (
 type Header struct {
 	Partition uint64
 	Epoch     uint64
+	// Background requests (statistics, maintenance) don't count as activity,
+	// so they don't keep an idle partition awake.
+	Background bool
 }
 
 type (
@@ -86,8 +89,9 @@ type (
 	}
 
 	TxnReq struct {
-		H   Header
-		Txn kv.TxnID
+		H      Header
+		Txn    kv.TxnID
+		Guards []kv.Guard // Commit only
 	}
 	CommitResp struct{ CommitTS uint64 }
 
@@ -217,7 +221,11 @@ type Server struct {
 }
 
 func (s *Server) part(h Header) (*kv.Partition, error) {
-	return s.Node.Partition(h.Partition)
+	p, err := s.Node.Partition(h.Partition)
+	if err == nil && !h.Background {
+		p.Touch()
+	}
+	return p, err
 }
 
 type handler func(s *Server, ctx context.Context, dec func(any) error) (any, error)
@@ -304,7 +312,7 @@ var methods = map[string]handler{
 		if err != nil {
 			return nil, err
 		}
-		ts, err := p.Commit(r.H.Epoch, r.Txn)
+		ts, err := p.CommitGuarded(r.H.Epoch, r.Txn, r.Guards)
 		return &CommitResp{CommitTS: ts}, err
 	}),
 	"Rollback": unary(func(s *Server, _ context.Context, r *TxnReq) (*Empty, error) {

@@ -44,6 +44,13 @@ type Store struct {
 
 	catalog *Catalog
 	stop    chan struct{}
+
+	jobsOnce sync.Once
+	jobRun   *jobRunner
+
+	statsMu   sync.Mutex
+	changed   map[uint32]int // rows written per table since its last ANALYZE
+	analyzing map[uint32]bool
 }
 
 // NewStore creates a store that talks to one KV node directly.
@@ -146,10 +153,11 @@ func newTxnID() kv.TxnID {
 // Txn is a query-engine transaction. Its KV transaction begins lazily on the
 // first read or write, and commits or rolls back with the MySQL transaction.
 type Txn struct {
-	store    *Store
-	id       kv.TxnID
-	iso      kv.Isolation
-	readOnly bool
+	store      *Store
+	id         kv.TxnID
+	iso        kv.Isolation
+	readOnly   bool
+	background bool // statistics and maintenance: not activity, never wakes the tenant
 
 	mu     sync.Mutex
 	begun  bool
@@ -158,6 +166,17 @@ type Txn struct {
 	ops    int  // KV operations so far
 	wrote  bool // any Mutate sent
 	dead   error
+	guards map[string][]byte // commit preconditions: schema versions of written tables
+}
+
+// Guard adds a commit precondition: key's latest value must be value.
+func (t *Txn) Guard(key, value []byte) {
+	t.mu.Lock()
+	if t.guards == nil {
+		t.guards = map[string][]byte{}
+	}
+	t.guards[string(key)] = value
+	t.mu.Unlock()
 }
 
 // NewTxn creates a transaction; nothing is sent to the owner yet.
@@ -175,12 +194,21 @@ func (t *Txn) ensure(ctx context.Context) (kvrpc.Header, error) {
 		return kvrpc.Header{}, t.dead
 	}
 	if t.begun {
-		return kvrpc.Header{Partition: t.store.partition, Epoch: t.epoch}, nil
+		return kvrpc.Header{Partition: t.store.partition, Epoch: t.epoch, Background: t.background}, nil
+	}
+	if t.background {
+		t.store.mu.Lock()
+		asleep := t.store.client == nil
+		t.store.mu.Unlock()
+		if asleep {
+			return kvrpc.Header{}, errAsleep
+		}
 	}
 	h, c, err := t.store.header(ctx)
 	if err != nil {
 		return h, err
 	}
+	h.Background = t.background
 	if err := c.Begin(ctx, &kvrpc.BeginReq{H: h, Txn: t.id, Isolation: t.iso}); err != nil {
 		if kv.KindOf(err) == kv.KindEpochChanged {
 			t.store.invalidate(h.Epoch)
@@ -219,7 +247,7 @@ func (t *Txn) retryable(ctx context.Context, op func(h kvrpc.Header) error) erro
 			return err
 		}
 		t.store.invalidate(h.Epoch)
-		if t.ops > 0 || t.wrote || attempt >= 20 {
+		if t.ops > 0 || t.wrote || attempt >= 20 || t.background {
 			t.markDead(err)
 			return err
 		}
@@ -328,7 +356,7 @@ func (t *Txn) Commit(ctx context.Context) error {
 	if !t.begun {
 		return nil
 	}
-	h := kvrpc.Header{Partition: t.store.partition, Epoch: t.epoch}
+	h := kvrpc.Header{Partition: t.store.partition, Epoch: t.epoch, Background: t.background}
 	if !t.wrote {
 		// Nothing to commit; release the snapshot. If the owner changed, the
 		// transaction went with it, and its reads were already consistent.
@@ -339,7 +367,14 @@ func (t *Txn) Commit(ctx context.Context) error {
 		}
 		return err
 	}
-	_, err := t.client.Commit(ctx, &kvrpc.TxnReq{H: h, Txn: t.id})
+	var guards []kv.Guard
+	for k, v := range t.guards {
+		guards = append(guards, kv.Guard{Key: []byte(k), Value: v})
+	}
+	_, err := t.client.Commit(ctx, &kvrpc.TxnReq{H: h, Txn: t.id, Guards: guards})
+	if kv.KindOf(err) == kv.KindSchemaChanged {
+		t.store.catalog.Invalidate() // the next statement sees the new schema
+	}
 	switch kv.KindOf(err) {
 	case kv.KindEpochChanged, kv.KindUnavailable:
 		t.store.invalidate(h.Epoch)
@@ -386,6 +421,9 @@ func (t *Txn) Rollback(ctx context.Context) error {
 	}
 	return err
 }
+
+// errAsleep stops background work from waking a suspended tenant.
+var errAsleep = &kv.Error{Kind: kv.KindEpochChanged, Msg: "tenant is asleep; background work skipped"}
 
 // errIsKind reports whether err is a KV error of the given kind.
 func errIsKind(err error, k kv.ErrKind) bool {

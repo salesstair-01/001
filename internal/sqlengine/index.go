@@ -6,11 +6,8 @@ import (
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/dolthub/go-mysql-server/sql/types"
 
 	"github.com/salesstair-01/001/internal/encoding"
-	"github.com/salesstair-01/001/internal/kv"
-	"github.com/salesstair-01/001/internal/kvrpc"
 )
 
 // tableIndex exposes the primary key (sec == nil) or a secondary index to the
@@ -94,10 +91,14 @@ func (i *tableIndex) CanSupport(_ *sql.Context, ranges ...sql.Range) bool {
 	return true
 }
 
+// GetIndexes lists the primary key and the public secondary indexes; indexes
+// being built or dropped are maintained by writers but never read.
 func (t *Table) GetIndexes(*sql.Context) ([]sql.Index, error) {
 	out := []sql.Index{&tableIndex{t: t}}
 	for _, ix := range t.indexes {
-		out = append(out, &tableIndex{t: t, sec: ix})
+		if ix.info.State == "" {
+			out = append(out, &tableIndex{t: t, sec: ix})
+		}
 	}
 	return out, nil
 }
@@ -221,137 +222,4 @@ func (t *Table) span(ctx *sql.Context, idx *tableIndex, r sql.MySQLRange) (keySp
 		return keySpan{start: prefix, point: true}, false
 	}
 	return keySpan{start: prefix, end: encoding.PrefixEnd(prefix)}, false
-}
-
-// ---- CREATE / DROP / RENAME INDEX --------------------------------------------------
-
-func (t *Table) findIndex(name string) int {
-	for i := range t.info.Indexes {
-		if strings.EqualFold(t.info.Indexes[i].Name, name) {
-			return i
-		}
-	}
-	return -1
-}
-
-// CreateIndex adds a secondary index and backfills it in the same DDL
-// transaction (bounded by the 64 MiB transaction cap until the resumable
-// backfill job of slice 8).
-func (t *Table) CreateIndex(ctx *sql.Context, def sql.IndexDef) error {
-	switch def.Constraint {
-	case sql.IndexConstraint_Fulltext, sql.IndexConstraint_Spatial, sql.IndexConstraint_Vector:
-		return fmt.Errorf("FULLTEXT, SPATIAL and VECTOR indexes are not supported in v1")
-	case sql.IndexConstraint_Primary:
-		return fmt.Errorf("changing the primary key is not supported in v1")
-	}
-	info := IndexInfo{Name: def.Name, Unique: def.IsUnique(), Comment: def.Comment}
-	for _, c := range def.Columns {
-		ord := -1
-		for i, col := range t.schema.Schema {
-			if strings.EqualFold(col.Name, c.Name) {
-				ord = i
-			}
-		}
-		if ord < 0 {
-			return sql.ErrKeyColumnDoesNotExist.New(c.Name)
-		}
-		col := t.schema.Schema[ord]
-		if !keyable(col.Type) {
-			return fmt.Errorf("column %s: type %s cannot be indexed in v1", col.Name, col.Type)
-		}
-		if c.Length > 0 && !(types.IsText(col.Type) || types.IsBinaryType(col.Type)) {
-			return sql.ErrInvalidIndexPrefix.New(col.Name)
-		}
-		if c.Length == 0 && types.IsTextBlob(col.Type) {
-			return sql.ErrInvalidBlobTextKey.New(col.Name)
-		}
-		info.Columns = append(info.Columns, IndexColumn{ColID: t.codecs[ord].info.ID, Prefix: int(c.Length)})
-	}
-	if info.Name == "" {
-		info.Name = t.indexName(def.Columns[0].Name)
-	}
-	if strings.EqualFold(info.Name, "PRIMARY") || t.findIndex(info.Name) >= 0 {
-		return sql.ErrDuplicateKey.New(info.Name)
-	}
-	return t.cat.AlterTable(ctx, t.info, func(txn *Txn, ti *TableInfo) error {
-		if ti.NextIndexID == 0 {
-			ti.NextIndexID = 1
-		}
-		info.ID = ti.NextIndexID
-		ti.NextIndexID++
-		ti.Indexes = append(ti.Indexes, info)
-		nt, err := newTable(ctx, t.cat, ti)
-		if err != nil {
-			return err
-		}
-		return nt.backfill(ctx, txn, nt.indexes[len(nt.indexes)-1])
-	})
-}
-
-// indexName picks MySQL's default name for an index: its first column, then col_2, col_3, ...
-func (t *Table) indexName(col string) string {
-	name := col
-	for n := 2; t.findIndex(name) >= 0 || strings.EqualFold(name, "PRIMARY"); n++ {
-		name = fmt.Sprintf("%s_%d", col, n)
-	}
-	return name
-}
-
-// backfill writes the index entries of every existing row.
-func (t *Table) backfill(ctx *sql.Context, txn *Txn, ix *secIndex) error {
-	start, end := t.prefix(), encoding.PrefixEnd(t.prefix())
-	for {
-		resp, err := txn.Scan(ctx, start, end, scanPage, kvrpc.ReadOpts{Stmt: 1})
-		if err != nil {
-			return err
-		}
-		var muts []kv.Mutation
-		for i, v := range resp.Values {
-			row, err := t.decodeRow(ctx, v)
-			if err != nil {
-				return err
-			}
-			k, val, uniq, err := ix.entry(ctx, row, resp.Keys[i])
-			if err != nil {
-				return err
-			}
-			muts = append(muts, kv.Mutation{Op: entryOp(uniq), Key: k, Value: val})
-		}
-		if err := txn.Mutate(ctx, 2, muts, lockWait(ctx)); err != nil {
-			if errIsKind(err, kv.KindDuplicateKey) {
-				return sql.ErrDuplicateEntry.New(ix.info.Name)
-			}
-			return err
-		}
-		if len(resp.Resume) == 0 {
-			return nil
-		}
-		start = resp.Resume
-	}
-}
-
-// DropIndex removes an index from the catalog. Its entries are left behind;
-// the index id is never reused.
-func (t *Table) DropIndex(ctx *sql.Context, name string) error {
-	if t.findIndex(name) < 0 {
-		return sql.ErrIndexNotFound.New(name)
-	}
-	return t.cat.AlterTable(ctx, t.info, func(_ *Txn, ti *TableInfo) error {
-		i := (&Table{info: ti}).findIndex(name)
-		ti.Indexes = append(ti.Indexes[:i], ti.Indexes[i+1:]...)
-		return nil
-	})
-}
-
-func (t *Table) RenameIndex(ctx *sql.Context, from, to string) error {
-	if t.findIndex(from) < 0 {
-		return sql.ErrIndexNotFound.New(from)
-	}
-	if t.findIndex(to) >= 0 && !strings.EqualFold(from, to) {
-		return sql.ErrDuplicateKey.New(to)
-	}
-	return t.cat.AlterTable(ctx, t.info, func(_ *Txn, ti *TableInfo) error {
-		ti.Indexes[(&Table{info: ti}).findIndex(from)].Name = to
-		return nil
-	})
 }

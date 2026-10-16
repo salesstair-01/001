@@ -19,7 +19,8 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | 5 | Indexes, types, collations | mostly — secondary indexes (non-unique, unique, the NULL rule, unique-key locks, prefix `col(N)`, CREATE/DROP/RENAME INDEX with backfill), AUTO_INCREMENT counters in system table 3, every type round-trips, memcomparable keys incl. DECIMAL and collation weights. Not yet: hidden `_rowid`, DESC index columns, the MySQL 8 property-test harness, the ORM suite |
 | 6 | KV scale-to-zero | done — directory service (`dird`, SQLite partition table, node heartbeats), idle suspend (checkpoint → release → exit), wake on demand by spawning a per-tenant `kvd` or placing on a pooled node, query engines route through the directory and re-resolve on EpochChanged, local SST cache across restarts; wake time measured below |
 | 7 | Proxy and query-engine scale-to-zero | done — `proxyd`: TLS, `caching_sha2_password` (and native) auth, tenant from `user@tenant` or the TLS hostname `<tenant>.<domain>`; holds client sockets while compute starts; pings and `SELECT 1` answered locally; `USE`/`SET` tracked and replayed onto a new query engine; prepared statements kept at the proxy, so nothing needs re-preparing; transactions, temp tables, `GET_LOCK`, `LOCK TABLES` pin the session; idle backends released; generic `sqld -generic` engines started on demand with a pre-warmed pool; cold starts measured below |
-| 8–9 | Schema changes, multi-tenant | not started |
+| 8 | Schema changes across query engines | done — per-table schema versions guard every writing commit, so no write commits with a stale schema; catalog caches refresh under a 2 s lease; index builds go write-only → backfill (locking batches, progress in a catalog job row, resumed by any engine after a KV or engine restart) → public; index drops go write-only and wait out the lease; instant ADD/DROP COLUMN with original defaults; compatible MODIFY/RENAME COLUMN; row counts in system table 2 from ANALYZE and a background auto-analyze that never keeps a tenant awake |
+| 9 | Multi-tenant and compatibility hardening | not started |
 
 ## Layout
 
@@ -138,9 +139,13 @@ replay even when goroutines interleave differently.
 ## Differences from MySQL in this version
 
 - Every table needs a PRIMARY KEY (the hidden `_rowid` is still to come).
-- CREATE INDEX backfills inside one transaction (so tables up to the 64 MiB cap), and is not yet
-  safe against concurrent writes from other sessions (online schema change is slice 8).
-- DROP INDEX leaves the old entries behind (index ids are never reused).
+- DROP INDEX leaves the old entries behind (index ids are never reused), and takes two catalog
+  leases (about 4 s) to finish.
+- A write that raced a schema change on another query engine fails with 1213 and succeeds when
+  retried; reads may see a schema up to one lease (2 s) old.
+- ALTER TABLE is limited to changes that need no rewrite: ADD/DROP COLUMN (not primary-key or
+  indexed columns), RENAME/MOVE COLUMN, defaults, dropping NOT NULL, and widening integers or
+  string lengths. Changing the primary key or a column's type otherwise is refused.
 - AUTO_INCREMENT values within a multi-row INSERT come from doubling reservations, so a bulk
   insert can leave gaps (as with `innodb_autoinc_lock_mode=2`).
 - No gap or next-key locks: a range `FOR UPDATE` doesn't block inserts into the range, so
@@ -157,7 +162,6 @@ replay even when goroutines interleave differently.
 - Rows up to 1 MiB, transactions up to 64 MiB of intents.
 - DROP TABLE / DROP DATABASE remove catalog rows only; the data is left behind
   (ids are never reused) until a background cleanup exists.
-- One query engine per tenant: the catalog cache is not shared across engines until slice 8.
 - Authentication is at `proxyd` (tenants file); `sqld` and `kvd` trust their network and must
   not be exposed directly.
 - The proxy runs prepared statements as text on the query engine, and buffers each result in

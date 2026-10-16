@@ -1,12 +1,15 @@
 package sqlengine
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/planbuilder"
@@ -23,6 +26,11 @@ import (
 //	("table", table_id)                  -> TableInfo
 //	("tname", lower(db) "." lower(name)) -> table_id, so names are unique
 //	("seq", "table_id")                  -> next table id
+//	("seq", "catalog_version")           -> bumped by every DDL, for lease refresh
+//	("schemaver", table_id)              -> the table's schema version (u64), the commit guard
+//	("job", table_id, index_id)          -> progress of an index backfill
+//
+// Table statistics live in system table 2: (table_id) -> TableStats.
 type DBInfo struct {
 	Name      string `json:"name"`
 	Collation string `json:"collation,omitempty"`
@@ -56,7 +64,17 @@ type IndexInfo struct {
 	Columns []IndexColumn `json:"columns"`
 	Unique  bool          `json:"unique,omitempty"`
 	Comment string        `json:"comment,omitempty"`
+	// State is "" (public), or IndexWriteOnly while it is built or dropped:
+	// writers maintain it but readers don't use it (the F1/TiDB states).
+	State string `json:"state,omitempty"`
+	// Dropping marks a write-only index on its way out; Since is when it
+	// stopped being readable (unix nanos).
+	Dropping bool  `json:"dropping,omitempty"`
+	Since    int64 `json:"since,omitempty"`
 }
+
+// IndexWriteOnly is the state of an index being backfilled or dropped.
+const IndexWriteOnly = "write_only"
 
 // TableInfo is one table.
 type TableInfo struct {
@@ -68,8 +86,11 @@ type TableInfo struct {
 	NextColumnID uint32       `json:"next_column_id"`
 	Indexes      []IndexInfo  `json:"indexes,omitempty"`
 	NextIndexID  uint32       `json:"next_index_id,omitempty"`
-	Collation    string       `json:"collation,omitempty"`
-	Comment      string       `json:"comment,omitempty"`
+	// Version changes with every schema change; writers guard their commit on
+	// it, so no write commits with a stale schema (slice 8).
+	Version   uint64 `json:"version,omitempty"`
+	Collation string `json:"collation,omitempty"`
+	Comment   string `json:"comment,omitempty"`
 }
 
 // clone deep-copies a table so the cached original is never mutated.
@@ -87,6 +108,17 @@ var supportedCollations = map[sql.CollationID]bool{
 	sql.Collation_utf8mb4_0900_bin:   true,
 	sql.Collation_utf8mb4_bin:        true,
 	sql.Collation_binary:             true,
+}
+
+// collationSupported checks by name: go-mysql-server has several ids for
+// one collation (such as the unspecified default).
+func collationSupported(c sql.CollationID) bool {
+	for id := range supportedCollations {
+		if id.Name() == c.Name() {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) catalogPrefix() []byte {
@@ -108,20 +140,56 @@ func (s *Store) tableNameKey(db, name string) []byte {
 	return encoding.AppendBytes(k, []byte(strings.ToLower(db)+"."+strings.ToLower(name)), false)
 }
 
+func (s *Store) schemaVerKey(table uint32) []byte {
+	k := encoding.AppendBytes(s.catalogPrefix(), []byte("schemaver"), false)
+	return encoding.AppendUint(k, uint64(table), false)
+}
+
+func (s *Store) jobKey(table, index uint32) []byte {
+	k := encoding.AppendBytes(s.catalogPrefix(), []byte("job"), false)
+	k = encoding.AppendUint(k, uint64(table), false)
+	return encoding.AppendUint(k, uint64(index), false)
+}
+
+func (s *Store) statsPrefix() []byte {
+	return encoding.Prefix(s.partition, encoding.TableStatistics, 0)
+}
+
+func (s *Store) statsKey(table uint32) []byte {
+	return encoding.AppendUint(s.statsPrefix(), uint64(table), false)
+}
+
+func versionBytes(v uint64) []byte { return binary.BigEndian.AppendUint64(nil, v) }
+
 func (s *Store) seqKey(name string) []byte {
 	k := encoding.AppendBytes(s.catalogPrefix(), []byte("seq"), false)
 	return encoding.AppendBytes(k, []byte(name), false)
 }
 
-// Catalog caches the catalog rows. With one query engine per tenant this is
-// exact; schema leases across query engines are slice 8.
+// CatalogLease is how long a query engine trusts its cached catalog before
+// checking the catalog version again. Several query engines can serve one
+// tenant: writes are exact (commit guards on the table's schema version),
+// and reads see a schema at most one lease old.
+var CatalogLease = 2 * time.Second
+
+// TableStats are a table's statistics (system table 2).
+type TableStats struct {
+	Rows     uint64 `json:"rows"`
+	Bytes    uint64 `json:"bytes"`
+	Analyzed int64  `json:"analyzed"` // unix seconds
+}
+
+// Catalog caches the catalog rows under a lease.
 type Catalog struct {
 	store *Store
 
-	mu     sync.RWMutex
-	loaded bool
-	dbs    map[string]*DBInfo // lower-case name
-	tables map[uint32]*TableInfo
+	mu      sync.RWMutex
+	loaded  bool
+	version uint64             // catalog version the cache reflects
+	checked time.Time          // when the version was last confirmed
+	dbs     map[string]*DBInfo // lower-case name
+	tables  map[uint32]*TableInfo
+	stats   map[uint32]TableStats
 }
 
 func NewCatalog(s *Store) *Catalog {
@@ -134,6 +202,7 @@ func (c *Catalog) load(ctx context.Context) error {
 	defer txn.Rollback(ctx)
 	dbs := map[string]*DBInfo{}
 	tables := map[uint32]*TableInfo{}
+	var version uint64
 	start, end := c.store.catalogPrefix(), encoding.PrefixEnd(c.store.catalogPrefix())
 	for {
 		resp, err := txn.Scan(ctx, start, end, 1000, kvrpc.ReadOpts{Stmt: 1})
@@ -158,6 +227,10 @@ func (c *Catalog) load(ctx context.Context) error {
 					return err
 				}
 				tables[t.ID] = &t
+			case "seq":
+				if bytes.Equal(k, c.store.seqKey("catalog_version")) {
+					_ = json.Unmarshal(resp.Values[i], &version)
+				}
 			}
 		}
 		if len(resp.Resume) == 0 {
@@ -165,20 +238,69 @@ func (c *Catalog) load(ctx context.Context) error {
 		}
 		start = resp.Resume
 	}
+	stats := map[uint32]TableStats{}
+	resp, err := txn.Scan(ctx, c.store.statsPrefix(), encoding.PrefixEnd(c.store.statsPrefix()), 0, kvrpc.ReadOpts{Stmt: 1})
+	if err != nil {
+		return err
+	}
+	for i, k := range resp.Keys {
+		id, _, err := encoding.DecodeUint(k[encoding.PrefixLen:], false)
+		var st TableStats
+		if err == nil && json.Unmarshal(resp.Values[i], &st) == nil {
+			stats[uint32(id)] = st
+		}
+	}
 	c.mu.Lock()
-	c.dbs, c.tables, c.loaded = dbs, tables, true
+	c.dbs, c.tables, c.stats, c.version, c.checked, c.loaded = dbs, tables, stats, version, time.Now(), true
 	c.mu.Unlock()
+	c.store.resumeJobs(tables)
 	return nil
 }
 
+// ensure loads the catalog, or once the lease has run out, checks the
+// catalog version and reloads if another query engine changed the schema.
 func (c *Catalog) ensure(ctx context.Context) error {
 	c.mu.RLock()
-	loaded := c.loaded
+	loaded, fresh, version := c.loaded, time.Since(c.checked) < CatalogLease, c.version
 	c.mu.RUnlock()
-	if loaded {
+	if loaded && fresh {
 		return nil
 	}
+	if loaded {
+		txn := c.store.NewTxn(kv.ReadCommitted, true)
+		vs, err := txn.Get(ctx, [][]byte{c.store.seqKey("catalog_version")}, kvrpc.ReadOpts{Stmt: 1})
+		_ = txn.Rollback(ctx)
+		if err != nil {
+			return err
+		}
+		var cur uint64
+		if vs[0] != nil {
+			_ = json.Unmarshal(vs[0], &cur)
+		}
+		if cur == version {
+			c.mu.Lock()
+			c.checked = time.Now()
+			c.mu.Unlock()
+			return nil
+		}
+	}
 	return c.load(ctx)
+}
+
+// Invalidate makes the next use reload the catalog (after a commit failed
+// on a schema guard).
+func (c *Catalog) Invalidate() {
+	c.mu.Lock()
+	c.loaded = false
+	c.mu.Unlock()
+}
+
+// Stats returns a table's statistics, if it has been analyzed.
+func (c *Catalog) Stats(id uint32) (TableStats, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	st, ok := c.stats[id]
+	return st, ok
 }
 
 // Database returns a database by name (case-insensitive).
@@ -245,11 +367,14 @@ func (c *Catalog) ddl(ctx context.Context, f func(txn *Txn) error) error {
 	for attempt := 0; attempt < 5; attempt++ {
 		txn := c.store.NewTxn(kv.RepeatableRead, false)
 		if err = f(txn); err == nil {
+			err = c.bumpVersion(ctx, txn)
+		}
+		if err == nil {
 			err = txn.Commit(ctx)
 		} else {
 			_ = txn.Rollback(ctx)
 		}
-		if !errIsKind(err, kv.KindDeadlock) && !errIsKind(err, kv.KindLockTimeout) {
+		if !errIsKind(err, kv.KindDeadlock) && !errIsKind(err, kv.KindLockTimeout) && !errIsKind(err, kv.KindSchemaChanged) {
 			break
 		}
 		if lerr := c.load(ctx); lerr != nil {
@@ -261,6 +386,25 @@ func (c *Catalog) ddl(ctx context.Context, f func(txn *Txn) error) error {
 		return err
 	}
 	return c.load(ctx)
+}
+
+// bumpVersion increments the catalog version; its lock also serialises DDL.
+func (c *Catalog) bumpVersion(ctx context.Context, txn *Txn) error {
+	key := c.store.seqKey("catalog_version")
+	vs, err := txn.Get(ctx, [][]byte{key}, kvrpc.ReadOpts{Stmt: 1, IncludeStmt: true, Lock: kv.LockExclusive})
+	if err != nil {
+		return err
+	}
+	var v uint64
+	if vs[0] != nil {
+		_ = json.Unmarshal(vs[0], &v)
+	}
+	return put(txn, ctx, kv.OpPut, key, v+1)
+}
+
+// setSchemaVersion writes a table's commit-guard version in txn.
+func (c *Catalog) setSchemaVersion(ctx context.Context, txn *Txn, t *TableInfo) error {
+	return txn.Mutate(ctx, 1, []kv.Mutation{{Op: kv.OpPut, Key: c.store.schemaVerKey(t.ID), Value: versionBytes(t.Version)}}, 0)
 }
 
 func put(txn *Txn, ctx context.Context, op kv.MutationOp, key []byte, v any) error {
@@ -294,7 +438,8 @@ func (c *Catalog) DropDatabase(ctx context.Context, name string) error {
 		for _, t := range tables {
 			muts = append(muts,
 				kv.Mutation{Op: kv.OpDelete, Key: c.store.tableKey(t.ID)},
-				kv.Mutation{Op: kv.OpDelete, Key: c.store.tableNameKey(t.DB, t.Name)})
+				kv.Mutation{Op: kv.OpDelete, Key: c.store.tableNameKey(t.DB, t.Name)},
+				kv.Mutation{Op: kv.OpDelete, Key: c.store.schemaVerKey(t.ID)})
 		}
 		return txn.Mutate(ctx, 1, muts, 0)
 	})
@@ -331,7 +476,10 @@ func (c *Catalog) CreateTable(ctx context.Context, t *TableInfo) error {
 		if err != nil {
 			return err
 		}
-		t.ID = id
+		t.ID, t.Version = id, 1
+		if err := c.setSchemaVersion(ctx, txn, t); err != nil {
+			return err
+		}
 		err = put(txn, ctx, kv.OpInsertOnly, c.store.tableNameKey(t.DB, t.Name), id)
 		if errIsKind(err, kv.KindDuplicateKey) {
 			return sql.ErrTableAlreadyExists.New(t.Name)
@@ -346,8 +494,12 @@ func (c *Catalog) CreateTable(ctx context.Context, t *TableInfo) error {
 // RenameTable renames a table, keeping its id.
 func (c *Catalog) RenameTable(ctx context.Context, t *TableInfo, newName string) error {
 	return c.ddl(ctx, func(txn *Txn) error {
-		updated := *t
+		updated := *t.clone()
 		updated.Name = newName
+		updated.Version++
+		if err := c.setSchemaVersion(ctx, txn, &updated); err != nil {
+			return err
+		}
 		if !strings.EqualFold(t.Name, newName) {
 			err := put(txn, ctx, kv.OpInsertOnly, c.store.tableNameKey(t.DB, newName), t.ID)
 			if errIsKind(err, kv.KindDuplicateKey) {
@@ -361,13 +513,6 @@ func (c *Catalog) RenameTable(ctx context.Context, t *TableInfo, newName string)
 			}
 		}
 		return put(txn, ctx, kv.OpPut, c.store.tableKey(t.ID), &updated)
-	})
-}
-
-// UpdateTable rewrites a table's catalog row (rename, ALTER).
-func (c *Catalog) UpdateTable(ctx context.Context, t *TableInfo) error {
-	return c.ddl(ctx, func(txn *Txn) error {
-		return put(txn, ctx, kv.OpPut, c.store.tableKey(t.ID), t)
 	})
 }
 
@@ -392,6 +537,10 @@ func (c *Catalog) AlterTable(ctx context.Context, t *TableInfo, f func(txn *Txn,
 		if err := f(txn, &updated); err != nil {
 			return err
 		}
+		updated.Version++
+		if err := c.setSchemaVersion(ctx, txn, &updated); err != nil {
+			return err
+		}
 		return put(txn, ctx, kv.OpPut, c.store.tableKey(t.ID), &updated)
 	})
 }
@@ -402,6 +551,7 @@ func (c *Catalog) DropTable(ctx context.Context, t *TableInfo) error {
 		return txn.Mutate(ctx, 1, []kv.Mutation{
 			{Op: kv.OpDelete, Key: c.store.tableKey(t.ID)},
 			{Op: kv.OpDelete, Key: c.store.tableNameKey(t.DB, t.Name)},
+			{Op: kv.OpDelete, Key: c.store.schemaVerKey(t.ID)}, // stale writers' guards now fail
 		}, 0)
 	})
 }
@@ -410,7 +560,7 @@ func (c *Catalog) DropTable(ctx context.Context, t *TableInfo) error {
 
 // columnInfo converts a go-mysql-server column for storage.
 func columnInfo(col *sql.Column, id uint32) (ColumnInfo, error) {
-	if tc, ok := col.Type.(sql.TypeWithCollation); ok && !supportedCollations[tc.Collation()] {
+	if tc, ok := col.Type.(sql.TypeWithCollation); ok && !collationSupported(tc.Collation()) {
 		return ColumnInfo{}, fmt.Errorf("collation %s is not supported; v1 supports utf8mb4_0900_ai_ci, utf8mb4_general_ci, utf8mb4_0900_bin, utf8mb4_bin and binary", tc.Collation().Name())
 	}
 	ci := ColumnInfo{

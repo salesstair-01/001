@@ -85,7 +85,7 @@ func (p *Provider) CreateDatabase(ctx *sql.Context, name string) error {
 }
 
 func (p *Provider) CreateCollatedDatabase(ctx *sql.Context, name string, collation sql.CollationID) error {
-	if !supportedCollations[collation] {
+	if !collationSupported(collation) {
 		return fmt.Errorf("collation %s is not supported in v1", collation.Name())
 	}
 	cat, err := p.catalogOf(ctx)
@@ -162,7 +162,7 @@ func (d *Database) CreateTable(ctx *sql.Context, name string, schema sql.Primary
 		// The hidden _rowid for tables without a primary key comes in slice 5.
 		return fmt.Errorf("table %s: a PRIMARY KEY is required in this version", name)
 	}
-	if !supportedCollations[collation] {
+	if !collationSupported(collation) {
 		return fmt.Errorf("collation %s is not supported in v1", collation.Name())
 	}
 	info := &TableInfo{DB: d.name, Name: name, Collation: collation.Name(), Comment: comment}

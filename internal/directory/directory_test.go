@@ -328,3 +328,26 @@ func TestQueriesAtTheSuspendBoundary(t *testing.T) {
 	}
 	waitFor(t, "every process to exit", 10*time.Second, func() bool { return e.liveProcs() == 0 })
 }
+
+// Background ANALYZE never keeps a tenant awake (slice 8).
+func TestBackgroundAnalyzeDoesNotKeepTenantAwake(t *testing.T) {
+	e := newEnv(t, time.Second, true)
+	db := e.sqlServer(21)
+	exec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(100))")
+	q := "INSERT INTO t VALUES "
+	for i := 0; i < 1500; i++ {
+		if i > 0 {
+			q += ","
+		}
+		q += fmt.Sprintf("(%d, 'some value %d')", i, i)
+	}
+	exec(t, db, q) // past the auto-analyze threshold
+	start := time.Now()
+	waitFor(t, "the tenant to suspend", 10*time.Second, func() bool { return e.liveProcs() == 0 })
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("suspend took %v", d)
+	}
+	if n := count(t, db, "SELECT COUNT(*) FROM t"); n != 1500 {
+		t.Fatalf("rows: %d", n)
+	}
+}

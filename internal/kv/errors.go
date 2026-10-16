@@ -12,25 +12,27 @@ import (
 type ErrKind int
 
 const (
-	KindInternal     ErrKind = iota
-	KindLockTimeout          // 1205, roll back the statement
-	KindDuplicateKey         // 1062, roll back the statement
-	KindDeadlock             // 1213, roll back the transaction
-	KindEpochChanged         // 1213, roll back the transaction; TxnStatus if a commit was in flight
-	KindTxnTooLarge          // 1197, roll back the transaction
-	KindTxnNotFound          // the transaction was aborted on the owner (lease expiry, deadlock, owner loss)
-	KindUnavailable          // the owner could not reach object storage; outcome of an in-flight commit unknown
+	KindInternal      ErrKind = iota
+	KindLockTimeout           // 1205, roll back the statement
+	KindDuplicateKey          // 1062, roll back the statement
+	KindDeadlock              // 1213, roll back the transaction
+	KindEpochChanged          // 1213, roll back the transaction; TxnStatus if a commit was in flight
+	KindTxnTooLarge           // 1197, roll back the transaction
+	KindTxnNotFound           // the transaction was aborted on the owner (lease expiry, deadlock, owner loss)
+	KindUnavailable           // the owner could not reach object storage; outcome of an in-flight commit unknown
+	KindSchemaChanged         // a commit guard failed: written with a stale schema; reported as 1213
 )
 
 var kindNames = map[ErrKind]string{
-	KindInternal:     "Internal",
-	KindLockTimeout:  "LockTimeout",
-	KindDuplicateKey: "DuplicateKey",
-	KindDeadlock:     "Deadlock",
-	KindEpochChanged: "EpochChanged",
-	KindTxnTooLarge:  "TxnTooLarge",
-	KindTxnNotFound:  "TxnNotFound",
-	KindUnavailable:  "Unavailable",
+	KindInternal:      "Internal",
+	KindLockTimeout:   "LockTimeout",
+	KindDuplicateKey:  "DuplicateKey",
+	KindDeadlock:      "Deadlock",
+	KindEpochChanged:  "EpochChanged",
+	KindTxnTooLarge:   "TxnTooLarge",
+	KindTxnNotFound:   "TxnNotFound",
+	KindUnavailable:   "Unavailable",
+	KindSchemaChanged: "SchemaChanged",
 }
 
 func (k ErrKind) String() string { return kindNames[k] }

@@ -31,6 +31,19 @@ type commitReq struct {
 // open group, and return once the group's WAL segment is durable in object
 // storage and applied. A transaction without writes commits at 0.
 func (p *Partition) Commit(epoch uint64, id TxnID) (uint64, error) {
+	return p.CommitGuarded(epoch, id, nil)
+}
+
+// Guard is a commit precondition: the latest committed value of Key must be
+// Value (nil = absent). Query engines guard a table's schema version, so no
+// write committed with a stale schema (slice 8).
+type Guard struct {
+	Key, Value []byte
+}
+
+// CommitGuarded is Commit with preconditions checked at commit time, in
+// commit order: a schema change that commits first makes this one fail.
+func (p *Partition) CommitGuarded(epoch uint64, id TxnID, guards []Guard) (uint64, error) {
 	if err := p.checkEpoch(epoch); err != nil {
 		return 0, err
 	}
@@ -53,6 +66,21 @@ func (p *Partition) Commit(epoch uint64, id TxnID) (uint64, error) {
 		p.abortTxnLocked(t) // nothing to write: just free the locks
 		p.mu.Unlock()
 		return 0, nil
+	}
+	for _, g := range guards {
+		cur, _, err := p.latestLocked(g.Key)
+		if err != nil {
+			p.mu.Unlock()
+			return 0, err
+		}
+		if encoding.IsDelete(cur) {
+			cur = nil
+		}
+		if !bytes.Equal(cur, g.Value) {
+			p.abortTxnLocked(t)
+			p.mu.Unlock()
+			return 0, newErr(KindSchemaChanged, "the table's schema changed during the transaction; try restarting transaction")
+		}
 	}
 	// The transaction holds an exclusive lock on every key it wrote, so no
 	// other commit can have touched them since; re-check insert-only keys anyway.

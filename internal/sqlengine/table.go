@@ -31,6 +31,9 @@ type Table struct {
 	colOrd  map[uint32]int
 	indexes []*secIndex
 	autoOrd int // ordinal of the AUTO_INCREMENT column, or -1
+	// instantAdd marks the table object of an ADD COLUMN statement after the
+	// column was added: it reads no rows and writes nothing (see AddColumn).
+	instantAdd bool
 }
 
 var (
@@ -179,6 +182,16 @@ func (t *Table) decodeRow(ctx context.Context, b []byte) (sql.Row, error) {
 	return row, nil
 }
 
+// guard makes txn's commit fail if this table's schema changed since this
+// query engine loaded it: no write commits with a stale schema (slice 8).
+func (t *Table) guard(txn *Txn) {
+	var v []byte
+	if t.info.Version != 0 {
+		v = versionBytes(t.info.Version)
+	}
+	txn.Guard(t.store.schemaVerKey(t.info.ID), v)
+}
+
 // ---- secondary indexes (D2) ----------------------------------------------------
 
 // secIndex is one secondary index. Entries are
@@ -281,6 +294,9 @@ func (it *partitionIter) Next(*sql.Context) (sql.Partition, error) {
 func (it *partitionIter) Close(*sql.Context) error { return nil }
 
 func (t *Table) Partitions(*sql.Context) (sql.PartitionIter, error) {
+	if t.instantAdd {
+		return &partitionIter{}, nil
+	}
 	p := t.prefix()
 	return &partitionIter{parts: []*kvPartition{{spans: []keySpan{{start: p, end: encoding.PrefixEnd(p)}}, key: p}}}, nil
 }
@@ -451,6 +467,8 @@ func (e *editor) flush(ctx *sql.Context) error {
 	if txn.IsReadOnly() {
 		return sql.ErrReadOnlyTransaction.New()
 	}
+	e.t.guard(txn)
+	e.t.store.noteWrites(e.t.info, len(buf))
 	return mysqlError(txn.Mutate(ctx, stmt, buf, lockWait(ctx)))
 }
 

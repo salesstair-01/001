@@ -45,11 +45,17 @@ func registerVars() {
 	})
 }
 
+func newSQLEngine(pro *Provider) *sqle.Engine {
+	e := sqle.NewDefault(pro)
+	e.Analyzer.Catalog.StatsProvider = &statsProvider{StatsProvider: e.Analyzer.Catalog.StatsProvider}
+	return e
+}
+
 // NewEngine builds a go-mysql-server engine over the store.
 func NewEngine(store *Store) *Engine {
 	registerVars()
 	pro := NewProvider(store)
-	return &Engine{Store: store, Provider: pro, SQL: sqle.NewDefault(pro)}
+	return &Engine{Store: store, Provider: pro, SQL: newSQLEngine(pro)}
 }
 
 // NewGenericEngine builds an engine that serves any tenant. A connection
@@ -58,7 +64,7 @@ func NewEngine(store *Store) *Engine {
 func NewGenericEngine(r Router, createDB string) *Engine {
 	registerVars()
 	pro := NewProvider(nil)
-	return &Engine{Provider: pro, SQL: sqle.NewDefault(pro), router: r, createDB: createDB, tenants: map[uint64]*Store{}}
+	return &Engine{Provider: pro, SQL: newSQLEngine(pro), router: r, createDB: createDB, tenants: map[uint64]*Store{}}
 }
 
 // TenantUser is the user name that selects a tenant on a generic engine.

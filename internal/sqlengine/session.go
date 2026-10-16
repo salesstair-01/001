@@ -243,7 +243,7 @@ func mysqlError(err error) error {
 		return mysql.NewSQLError(mysql.ERDupEntry, "23000", "Duplicate entry for key 'PRIMARY'")
 	case kv.KindTxnTooLarge:
 		return mysql.NewSQLError(1197, "HY000", "Multi-statement transaction required more than 64 MiB of storage; batch the work into smaller transactions")
-	case kv.KindDeadlock, kv.KindEpochChanged, kv.KindTxnNotFound, kv.KindUnavailable:
+	case kv.KindDeadlock, kv.KindEpochChanged, kv.KindTxnNotFound, kv.KindUnavailable, kv.KindSchemaChanged:
 		return mysql.NewSQLError(mysql.ERLockDeadlock, mysql.SSLockDeadlock,
 			"Deadlock found when trying to get lock; try restarting transaction (%s)", ke.Msg)
 	}

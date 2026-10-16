@@ -476,8 +476,11 @@ func (p *Partition) Stopped() error {
 	return p.stopErr
 }
 
+// Touch records client activity for idle detection. Background work (such as
+// ANALYZE) doesn't touch, so it never keeps a tenant awake.
+func (p *Partition) Touch() { p.lastActive.Store(time.Now().UnixNano()) }
+
 func (p *Partition) checkEpoch(epoch uint64) error {
-	p.lastActive.Store(time.Now().UnixNano())
 	if epoch != 0 && epoch != p.epoch {
 		return newErr(KindEpochChanged, "epoch %d requested, owner serves %d", epoch, p.epoch)
 	}

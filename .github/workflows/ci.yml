@@ -1,0 +1,97 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  MINIO_ROOT_USER: minioadmin
+  MINIO_ROOT_PASSWORD: minioadmin
+
+jobs:
+  test:
+    name: vet, unit and integration tests (race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && false)
+      - run: go vet ./...
+      - run: go test -race -timeout 20m ./...
+
+  fault:
+    name: fault injection, 1000 seeds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make fault-1000
+
+  minio:
+    name: MinIO tests, crash test, driver matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
+            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          for i in $(seq 60); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
+      - run: make test-minio
+      - run: make crash-test
+      - name: driver matrix (sqld and proxyd)
+        run: |
+          make build
+          mkdir -p /tmp/s2z
+          ./bin/kvd -listen 127.0.0.1:7070 -data /tmp/s2z/kv > /tmp/s2z/kvd.log 2>&1 &
+          ./bin/sqld -listen 127.0.0.1:3306 -kv 127.0.0.1:7070 -partition 5001 > /tmp/s2z/sqld.log 2>&1 &
+          ./bin/dird -listen 127.0.0.1:7000 -db /tmp/s2z/dir.db -spawn-kvd ./bin/kvd \
+            -spawn-data /tmp/s2z/spawned > /tmp/s2z/dird.log 2>&1 &
+          echo '[{"name":"acme","partition":5002,"users":{"app":"s3cret"}}]' > /tmp/s2z/tenants.json
+          ./bin/proxyd -listen 127.0.0.1:3307 -tenants /tmp/s2z/tenants.json -domain db.test \
+            -spawn-sqld ./bin/sqld -directory 127.0.0.1:7000 -warm 1 > /tmp/s2z/proxyd.log 2>&1 &
+          sleep 3
+          DRV_PORT=3306 scripts/drivers/run.sh
+          DRV_PORT=3307 DRV_USER=app@acme DRV_PASSWORD=s3cret scripts/drivers/run.sh
+      - name: logs
+        if: failure()
+        run: tail -n 50 /tmp/s2z/*.log || true
+
+  sqllogictest:
+    name: sqllogictest subset
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: scripts/slt/fetch.sh
+      - name: run (fails below the recorded pass rate)
+        run: |
+          go run ./cmd/slt -summary /tmp/results.md -min-pass-rate "$(cat scripts/slt/min-pass-rate)" \
+            $(grep -v '^#' scripts/slt/files.txt | sed 's|^|scripts/slt/test/|') 2>/dev/null
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sqllogictest-results
+          path: /tmp/results.md

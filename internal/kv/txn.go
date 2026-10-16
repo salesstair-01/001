@@ -304,6 +304,11 @@ func (p *Partition) Get(epoch uint64, id TxnID, keys [][]byte, o ReadOptions) ([
 // readVersion returns the newest version of userKey at or below ts (which may
 // be a delete marker), and its commit_ts. A nil value means no version.
 func (p *Partition) readVersion(userKey []byte, ts uint64) ([]byte, uint64, error) {
+	release, err := p.readDB()
+	if err != nil {
+		return nil, 0, err
+	}
+	defer release()
 	upper := append(encoding.MVCCKey(userKey, 0), 0)
 	it, err := p.db.NewIter(&pebble.IterOptions{LowerBound: encoding.MVCCKey(userKey, ts), UpperBound: upper})
 	if err != nil {
@@ -393,6 +398,11 @@ func (p *Partition) Scan(epoch uint64, id TxnID, start, end []byte, limit int, o
 // scanMerged merges the visible committed rows at ts with the given intents.
 // own[i] reports whether row i came from an intent.
 func (p *Partition) scanMerged(start, end []byte, limit int, ts uint64, ikeys []string, iv map[string]intent) ([]KV, []bool, []byte, error) {
+	release, err := p.readDB()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer release()
 	it, err := p.db.NewIter(&pebble.IterOptions{LowerBound: start, UpperBound: end})
 	if err != nil {
 		return nil, nil, nil, err

@@ -83,3 +83,57 @@ func TestLockingReadThroughSecondaryIndex(t *testing.T) {
 		t.Fatalf("DELETE through index affected %d rows", n)
 	}
 }
+
+// Disjoint ranges whose key spans overlap once widened must not return a
+// row twice (found by sqllogictest select4).
+func TestOverlappingSpansReadOnce(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	mustExec(t, db, "CREATE TABLE t8 (a8 INT, b8 INT, e8 INT)")
+	mustExec(t, db, "INSERT INTO t8 VALUES (347, 665, 14), (701, 253, 866), (1, 2, 900), (3, 665, 900)")
+	mustExec(t, db, "CREATE INDEX t8all ON t8 (e8 DESC, b8 ASC, a8 DESC)")
+	if got := strings.Join(queryStrings(t, db, "SELECT a8 FROM t8 WHERE (b8 = 665 OR 866 = e8) ORDER BY a8"), ";"); got != "3;347;701" {
+		t.Fatalf("got %q", got)
+	}
+	mustExec(t, db, "CREATE TABLE p (id INT PRIMARY KEY, v INT)")
+	mustExec(t, db, "INSERT INTO p VALUES (1, 1), (5, 5), (9, 9)")
+	if got := strings.Join(queryStrings(t, db, "SELECT id FROM p WHERE id = 5 OR id > 3 OR id IN (5, 9) ORDER BY id"), ";"); got != "5;9" {
+		t.Fatalf("primary key: got %q", got)
+	}
+}
+
+func TestMergeSpans(t *testing.T) {
+	sp := func(s, e string) keySpan { return keySpan{start: []byte(s), end: []byte(e)} }
+	pt := func(s string) keySpan { return keySpan{start: []byte(s), point: true} }
+	got := mergeSpans([]keySpan{sp("d", "f"), pt("b"), sp("a", "c"), pt("x"), pt("x"), sp("e", "g"), {start: []byte("w")}})
+	var parts []string
+	for _, s := range got {
+		if s.point {
+			parts = append(parts, string(s.start))
+		} else {
+			parts = append(parts, string(s.start)+"-"+string(s.end))
+		}
+	}
+	if strings.Join(parts, " ") != "a-c d-g w-" {
+		t.Fatalf("merged: %v", parts)
+	}
+}
+
+// ORDER BY ... DESC over an index (found by sqllogictest orderby_nosort).
+func TestOrderByDescKeepsSort(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	mustExec(t, db, "CREATE TABLE tab0 (pk INT PRIMARY KEY, col1 FLOAT, KEY i1 (col1))")
+	mustExec(t, db, "INSERT INTO tab0 VALUES (1, 80), (2, 10), (3, 90), (4, 75)")
+	for q, want := range map[string]string{
+		"SELECT pk FROM tab0 WHERE col1 > 71.33 ORDER BY 1 DESC": "4;3;1",
+		"SELECT pk FROM tab0 ORDER BY pk DESC":                   "4;3;2;1",
+		"SELECT pk FROM tab0 WHERE col1 > 50 ORDER BY col1 DESC": "3;1;4",
+		"SELECT pk FROM tab0 WHERE col1 > 50 ORDER BY col1":      "4;1;3",
+		"SELECT pk FROM tab0 WHERE pk IN (4, 1, 3) ORDER BY pk":  "1;3;4",
+	} {
+		if got := strings.Join(queryStrings(t, db, q), ";"); got != want {
+			t.Errorf("%s: got %q, want %q", q, got, want)
+		}
+	}
+}

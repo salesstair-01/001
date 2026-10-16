@@ -5,11 +5,13 @@ go 1.26.0
 require (
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/dolthub/go-mysql-server v0.20.0
+	github.com/dolthub/sqllogictest/go v0.0.0-20260630170052-04b0d198bf9d
 	github.com/dolthub/vitess v0.0.0-20250512224608-8fb9c6ea092c
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/minio/minio-go/v7 v7.4.1
 	github.com/shopspring/decimal v1.5.0
 	google.golang.org/grpc v1.84.0
+	modernc.org/sqlite v1.34.5
 )
 
 require (
@@ -77,5 +79,4 @@ require (
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect
 	modernc.org/memory v1.8.0 // indirect
-	modernc.org/sqlite v1.34.5 // indirect
 )

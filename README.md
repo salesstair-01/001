@@ -16,11 +16,11 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | 2 | Fencing, takeover and checkpoints | done — numbered manifests and WAL segments with put-if-absent, compare-on-412, checkpoints + GC, txn ids; fault tests pass 1,000 seeded runs |
 | 3 | Transactions and MVCC | done — snapshot reads, statement layers, read-your-writes, RR/RC, SERIALIZABLE refused, MVCC GC, 64 MiB cap |
 | 4 | Locks | done — X/S row locks in owner memory, locking reads of the latest version for UPDATE/DELETE/`FOR UPDATE`/`LOCK IN SHARE MODE`, FIFO wait queue with `innodb_lock_wait_timeout` (1205), wait-for-graph deadlock detection with the youngest victim (1213), 2 s heartbeat / 10 s lease; the slice-3 stopgap is gone |
-| 5 | Indexes, types, collations | mostly — secondary indexes (non-unique, unique, the NULL rule, unique-key locks, prefix `col(N)`, CREATE/DROP/RENAME INDEX with backfill), AUTO_INCREMENT counters in system table 3, every type round-trips, memcomparable keys incl. DECIMAL and collation weights. Not yet: hidden `_rowid`, DESC index columns, the MySQL 8 property-test harness, the ORM suite |
+| 5 | Indexes, types, collations | mostly — secondary indexes (non-unique, unique, the NULL rule, unique-key locks, prefix `col(N)`, CREATE/DROP/RENAME INDEX with backfill), AUTO_INCREMENT counters in system table 3, every type round-trips, memcomparable keys incl. DECIMAL and collation weights. Not yet: DESC index columns (accepted, stored ascending), the MySQL 8 property-test harness, the ORM suite |
 | 6 | KV scale-to-zero | done — directory service (`dird`, SQLite partition table, node heartbeats), idle suspend (checkpoint → release → exit), wake on demand by spawning a per-tenant `kvd` or placing on a pooled node, query engines route through the directory and re-resolve on EpochChanged, local SST cache across restarts; wake time measured below |
 | 7 | Proxy and query-engine scale-to-zero | done — `proxyd`: TLS, `caching_sha2_password` (and native) auth, tenant from `user@tenant` or the TLS hostname `<tenant>.<domain>`; holds client sockets while compute starts; pings and `SELECT 1` answered locally; `USE`/`SET` tracked and replayed onto a new query engine; prepared statements kept at the proxy, so nothing needs re-preparing; transactions, temp tables, `GET_LOCK`, `LOCK TABLES` pin the session; idle backends released; generic `sqld -generic` engines started on demand with a pre-warmed pool; cold starts measured below |
 | 8 | Schema changes across query engines | done — per-table schema versions guard every writing commit, so no write commits with a stale schema; catalog caches refresh under a 2 s lease; index builds go write-only → backfill (locking batches, progress in a catalog job row, resumed by any engine after a KV or engine restart) → public; index drops go write-only and wait out the lease; instant ADD/DROP COLUMN with original defaults; compatible MODIFY/RENAME COLUMN; row counts in system table 2 from ANALYZE and a background auto-analyze that never keeps a tenant awake |
-| 9 | Multi-tenant and compatibility hardening | not started |
+| 9 | Multi-tenant and compatibility hardening | done — tables without a primary key (hidden rowid); per-partition Pebble limits (shared block cache, 4 MiB memtables, one compaction) and fair PUTs (node-wide PUT slots, per-tenant token bucket); 100 tenants on one KV node and one query engine through the proxy with isolation checks; Prometheus metrics on every binary; point-in-time restore into a new partition (`s2zctl`); persistent views and `TRUNCATE`; sqllogictest subset: 139,122 of 140,709 records pass, none wrong (`scripts/slt/results.md`); driver matrix (Go, PyMySQL, mysql2, Connector/J) passing direct and through the proxy; GitHub Actions CI; [docs/compatibility.md](docs/compatibility.md) |
 
 ## Layout
 
@@ -39,6 +39,12 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | `cmd/proxyd` | the proxy binary |
 | `cmd/wakedemo`, `cmd/waketime` | the slice-6 sleep/wake demo and wake-time benchmark |
 | `cmd/coldstart` | the slice-7 cold-start benchmark (every layer at zero, pooled app) |
+| `internal/metrics` | dependency-free Prometheus text registry (`-metrics-listen` on every binary) |
+| `cmd/s2zctl` | operator tool: restore points and point-in-time restore |
+| `cmd/slt`, `scripts/slt` | sqllogictest runner, the pinned file list and recorded results |
+| `scripts/drivers` | the driver matrix (Go, Python, Node, Java) |
+| `docs/compatibility.md` | what differs from MySQL 8.0, and how it is checked |
+| `.github/workflows/ci.yml` | CI: race tests, 1,000 fault seeds, MinIO + crash test + drivers, sqllogictest |
 
 Object layout per partition: `p/<id>/manifest/<N>`, `p/<id>/wal/<seq>`,
 `p/<id>/sst/<uuid>.sst`, `p/<id>/meta/<checkpoint>/<pebble file>`.
@@ -121,6 +127,32 @@ Cold wake grows linearly with tenant size because takeover downloads every
 SST before serving (the known v1 limit in D4); reading SSTs on demand from
 object storage is the later fix.
 
+### Many tenants per node, metrics and restore (slice 9)
+
+Pool mode (`dird` without `-spawn-kvd`, or `-dedicated=false`) puts many
+tenants on one `kvd`. Each partition gets a 4 MiB memtable and one compaction
+at a time, all share one block cache (`-block-cache-mb`, 256), and object-store
+PUTs take a node-wide slot (`-put-concurrency`, 32) and a token from the
+tenant's bucket (`-put-rate`/`-put-burst`, 100/s and 200). A tenant over its
+rate waits; its commits meanwhile batch into larger group commits, so it pays
+in latency and the others keep their PUTs. Behind the proxy, one query engine
+takes up to `-engine-sessions` (256) backend connections before another starts.
+
+Every binary takes `-metrics-listen 127.0.0.1:9100` and serves `/metrics`:
+`s2z_kv_commit_seconds`, `s2z_kv_puts_total{partition}`,
+`s2z_kv_takeover_seconds{cache}`, `s2z_dir_wakes_total{reason}` (first_use,
+suspended, node_lost), `s2z_dir_wake_seconds`, `s2z_proxy_cold_start_seconds{engine}`,
+`s2z_proxy_queries_total{tenant}` and session/engine gauges.
+
+Point-in-time restore writes a new partition as an old one was at a time
+within the GC grace (1 h):
+
+```sh
+./bin/s2zctl restore-points -partition 42
+./bin/s2zctl restore -src 42 -dst 1042 -at 2026-10-16T09:30:00Z
+# check it, then point the tenant at partition 1042 in the tenants file
+```
+
 ## Tests
 
 ```sh
@@ -130,7 +162,13 @@ make fault-1000           # slice 2 bar: 1,000 seeded fault-injection runs
 make crash-test           # slice 1: write loop, kill -9 kvd 5 times, verify every acknowledged row
 make wake-demo            # slice 6: tenant kvd exits when idle, next query wakes it
 make cold-start           # slice 7: pooled app through proxyd, p50/p99 from all-zero
+make slt                  # sqllogictest subset, writes scripts/slt/results.md
+make drivers              # driver matrix against DRV_HOST:DRV_PORT (scripts/drivers/README.md)
 ```
+
+CI (`.github/workflows/ci.yml`) runs the race tests, 1,000 fault seeds, the
+MinIO tests, the crash test, the driver matrix against `sqld` and `proxyd`,
+and the sqllogictest subset, which fails below `scripts/slt/min-pass-rate`.
 
 Replay a failing fault seed with `go test ./internal/kv -run TestFaultInjection -fault-seed=N`.
 Fault decisions derive from the seed, operation, key and attempt, so they
@@ -138,36 +176,20 @@ replay even when goroutines interleave differently.
 
 ## Differences from MySQL in this version
 
-- Every table needs a PRIMARY KEY (the hidden `_rowid` is still to come).
-- DROP INDEX leaves the old entries behind (index ids are never reused), and takes two catalog
-  leases (about 4 s) to finish.
-- A write that raced a schema change on another query engine fails with 1213 and succeeds when
-  retried; reads may see a schema up to one lease (2 s) old.
-- ALTER TABLE is limited to changes that need no rewrite: ADD/DROP COLUMN (not primary-key or
-  indexed columns), RENAME/MOVE COLUMN, defaults, dropping NOT NULL, and widening integers or
-  string lengths. Changing the primary key or a column's type otherwise is refused.
-- AUTO_INCREMENT values within a multi-row INSERT come from doubling reservations, so a bulk
-  insert can leave gaps (as with `innodb_autoinc_lock_mode=2`).
-- No gap or next-key locks: a range `FOR UPDATE` doesn't block inserts into the range, so
-  check-then-insert code must rely on a unique key. Locking reads lock every row the key range
-  returns, before WHERE filters on non-key columns (as InnoDB does without an index).
-- `SELECT ... FOR SHARE` doesn't parse yet; use `LOCK IN SHARE MODE`.
-- After a deadlock (1213) the transaction is rolled back on the owner; further statements in it
-  return 1213 until the client sends COMMIT or ROLLBACK.
-- SERIALIZABLE is refused; READ UNCOMMITTED runs as READ COMMITTED.
-- Savepoints are not supported.
-- Collations: only `utf8mb4_0900_ai_ci`, `utf8mb4_general_ci`, `utf8mb4_0900_bin`, `utf8mb4_bin`
-  and `binary`. Key weights for `_ci` collations come from go-mysql-server's collation sorter;
-  checking them against MySQL's `WEIGHT_STRING()` is still on the verify-before-coding list.
-- Rows up to 1 MiB, transactions up to 64 MiB of intents.
-- DROP TABLE / DROP DATABASE remove catalog rows only; the data is left behind
-  (ids are never reused) until a background cleanup exists.
-- Authentication is at `proxyd` (tenants file); `sqld` and `kvd` trust their network and must
-  not be exposed directly.
-- The proxy runs prepared statements as text on the query engine, and buffers each result in
-  memory before sending it (no row streaming yet).
-- User variables assigned inside a query (`SELECT @x := ...`) pin the session rather than being
-  tracked; a `SET` sent before any statement needs compute is checked only when it is replayed.
-- A query arriving while its tenant is waking waits for the wake. A transaction whose owner goes
-  away after it has done something (owner crash) is aborted with 1213; idle suspend never cuts
-  one off, because a partition with an open transaction is not suspended.
+The full list, with how each item is checked, is in
+[docs/compatibility.md](docs/compatibility.md). The ones most likely to matter:
+
+- No triggers, stored procedures, foreign keys, CHECK constraints, temporary
+  tables, savepoints, FULLTEXT or spatial types.
+- No gap or next-key locks: a range `FOR UPDATE` doesn't block inserts into
+  the range; use a unique key for check-then-insert.
+- `ALTER TABLE` only for changes that need no rewrite; changing the primary
+  key or a column's type otherwise is refused.
+- A write racing a schema change on another query engine fails with 1213 and
+  succeeds when retried.
+- SERIALIZABLE is refused; `SELECT ... FOR SHARE` doesn't parse (use
+  `LOCK IN SHARE MODE`).
+- Rows up to 1 MiB, transactions up to 64 MiB of writes.
+- `DROP TABLE`/`DROP DATABASE`/`TRUNCATE` leave the old rows in storage until a
+  cleanup job exists.
+- Authentication is at `proxyd`; `sqld` and `kvd` must not be exposed.

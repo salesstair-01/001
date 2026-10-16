@@ -310,7 +310,16 @@ func (t *Table) PartitionRows(ctx *sql.Context, part sql.Partition) (sql.RowIter
 		return nil, fmt.Errorf("unexpected partition %T", part)
 	}
 	txn, done := sessionTxn(ctx, t.store)
-	return &rowIter{t: t, txn: txn, opts: readOpts(ctx, t.info.Name), done: done, spans: p.spans, index: p.index}, nil
+	it := &rowIter{t: t, txn: txn, opts: readOpts(ctx, t.info.Name), done: done, spans: p.spans, index: p.index}
+	if c, stmt, ok := cacheable(ctx, it); ok {
+		key := cacheKey(t, p.index, p.spans)
+		if rows, hit := c.get(stmt, key); hit {
+			it.page, it.spans, it.fromCache = rows, nil, true
+		} else {
+			it.cache, it.cacheStmt, it.cacheKey = c, stmt, key
+		}
+	}
+	return it, nil
 }
 
 // rowIter reads rows span by span: primary spans directly, secondary spans
@@ -328,6 +337,14 @@ type rowIter struct {
 	next   []byte   // resume key of the current span; nil = span not started
 	more   bool
 	closed bool
+
+	// Statement read cache (readcache.go): rows read so far, kept on EOF.
+	cache     *readCache
+	cacheStmt uint64
+	cacheKey  string
+	seen      [][]byte
+	seenBytes int
+	fromCache bool
 }
 
 func (it *rowIter) Next(ctx *sql.Context) (sql.Row, error) {
@@ -335,6 +352,7 @@ func (it *rowIter) Next(ctx *sql.Context) (sql.Row, error) {
 		if len(it.page) > 0 {
 			v := it.page[0]
 			it.page = it.page[1:]
+			it.remember(v)
 			var k []byte
 			if it.noteKeys() {
 				k, it.keys = it.keys[0], it.keys[1:]
@@ -351,6 +369,10 @@ func (it *rowIter) Next(ctx *sql.Context) (sql.Row, error) {
 			it.spans, it.next = it.spans[1:], nil
 		}
 		if len(it.spans) == 0 {
+			if it.cache != nil {
+				it.cache.put(it.cacheStmt, it.cacheKey, it.seen, it.seenBytes)
+				it.cache = nil
+			}
 			return nil, io.EOF
 		}
 		sp := it.spans[0]
@@ -361,6 +383,7 @@ func (it *rowIter) Next(ctx *sql.Context) (sql.Row, error) {
 			}
 			it.spans = it.spans[1:]
 			if vs[0] != nil {
+				it.remember(vs[0])
 				return it.row(ctx, vs[0], sp.start)
 			}
 			continue
@@ -407,6 +430,19 @@ func (it *rowIter) fetch(ctx *sql.Context, sp keySpan) error {
 		}
 	}
 	return nil
+}
+
+// remember keeps a row value for the statement read cache.
+func (it *rowIter) remember(v []byte) {
+	if it.cache == nil {
+		return
+	}
+	it.seenBytes += len(v) + 24
+	if it.seenBytes > readCacheEntryBytes {
+		it.cache, it.seen = nil, nil // too big to keep
+		return
+	}
+	it.seen = append(it.seen, v)
 }
 
 // noteKeys says whether rows read are noted with their keys, for the

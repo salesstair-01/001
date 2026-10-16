@@ -199,6 +199,10 @@ type Partition struct {
 	stopOnce    sync.Once
 	closeOnce   sync.Once
 	closeErr    error
+	// dbMu guards reads of Pebble by requests against Close: a request can
+	// still be reading (after a lock wait, say) when the partition stops.
+	dbMu     sync.RWMutex
+	dbClosed bool
 }
 
 // ID returns the partition id.
@@ -446,13 +450,26 @@ func (p *Partition) Close() error {
 	p.stop(errStopped)
 	p.closeOnce.Do(func() {
 		p.wg.Wait()
+		p.dbMu.Lock()
+		p.dbClosed = true
 		p.closeErr = p.db.Close()
+		p.dbMu.Unlock()
 		_ = os.RemoveAll(p.dir)
 		if p.ownRes {
 			p.cfg.res.close()
 		}
 	})
 	return p.closeErr
+}
+
+// readDB holds Pebble open for a request's read; release when done.
+func (p *Partition) readDB() (release func(), err error) {
+	p.dbMu.RLock()
+	if p.dbClosed {
+		p.dbMu.RUnlock()
+		return nil, errStopped
+	}
+	return p.dbMu.RUnlock, nil
 }
 
 // Suspend checkpoints and stops serving, so the next wake has almost no WAL

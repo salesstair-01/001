@@ -3,6 +3,7 @@ package sqlengine
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
@@ -18,7 +19,16 @@ type tableIndex struct {
 	sec *secIndex
 }
 
-var _ sql.Index = (*tableIndex)(nil)
+var _ sql.OrderedIndex = (*tableIndex)(nil)
+
+// Order is ascending: keys are memcomparable in the column's collation, NULL
+// first, and lookups read their (sorted, merged) spans in key order.
+func (i *tableIndex) Order() sql.IndexOrder { return sql.IndexOrderAsc }
+
+// Reversible is false: KV scans run forward only. go-mysql-server treats an
+// index without OrderedIndex as reversible and would drop the sort of an
+// ORDER BY ... DESC.
+func (i *tableIndex) Reversible() bool { return false }
 
 func (i *tableIndex) ords() []int {
 	if i.sec == nil {
@@ -139,7 +149,49 @@ func (it *indexedTable) LookupPartitions(ctx *sql.Context, lookup sql.IndexLooku
 			part.spans = append(part.spans, sp)
 		}
 	}
+	part.spans = mergeSpans(part.spans)
 	return &partitionIter{parts: []*kvPartition{part}}, nil
+}
+
+// mergeSpans sorts spans and merges the overlapping ones. Disjoint ranges
+// can give overlapping spans, since each span is widened to a superset; read
+// separately, a row in the overlap would be returned twice.
+func mergeSpans(spans []keySpan) []keySpan {
+	if len(spans) < 2 {
+		return spans
+	}
+	end := func(s keySpan) []byte {
+		if s.point {
+			return append(append([]byte(nil), s.start...), 0) // just past the key
+		}
+		return s.end
+	}
+	// less reports a < b for span ends, where nil is +infinity.
+	less := func(a, b []byte) bool {
+		if a == nil {
+			return false
+		}
+		return b == nil || bytes.Compare(a, b) < 0
+	}
+	sort.Slice(spans, func(i, j int) bool { return bytes.Compare(spans[i].start, spans[j].start) < 0 })
+	out := []keySpan{spans[0]}
+	for _, s := range spans[1:] {
+		cur := &out[len(out)-1]
+		ce := end(*cur)
+		if ce != nil && bytes.Compare(s.start, ce) >= 0 {
+			out = append(out, s)
+			continue
+		}
+		if cur.point && s.point && bytes.Equal(cur.start, s.start) {
+			continue // the same row twice
+		}
+		e := end(s)
+		if less(ce, e) {
+			ce = e
+		}
+		*cur = keySpan{start: cur.start, end: ce}
+	}
+	return out
 }
 
 // span turns one range into a key span: equal-valued leading columns extend

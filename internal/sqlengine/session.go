@@ -31,6 +31,10 @@ type Session struct {
 
 	keyless rowKeyTables // keys of keyless rows read by the current statement
 
+	lentDB bool // the current database was set only to bind a view (views.go)
+
+	reads readCache // rows of the current statement's completed reads (readcache.go)
+
 	txnMu   sync.Mutex
 	current *Txn // the open transaction, until it commits or rolls back
 }
@@ -118,6 +122,16 @@ func (s *Session) CommandEnd() {
 		_ = cur.Rollback(context.Background())
 	}
 	s.endOrphan()
+	if s.lentDB {
+		s.lentDB = false
+		s.SetCurrentDatabase("")
+	}
+}
+
+// lendDatabase makes db current until the command ends.
+func (s *Session) lendDatabase(ctx *sql.Context, db string) {
+	s.lentDB = true
+	ctx.SetCurrentDatabase(db)
 }
 
 func (s *Session) autocommit() bool {

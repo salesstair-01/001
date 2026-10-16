@@ -189,6 +189,7 @@ type Catalog struct {
 	checked time.Time          // when the version was last confirmed
 	dbs     map[string]*DBInfo // lower-case name
 	tables  map[uint32]*TableInfo
+	views   map[string]*ViewInfo // "db.name", lower-case
 	stats   map[uint32]TableStats
 }
 
@@ -202,6 +203,7 @@ func (c *Catalog) load(ctx context.Context) error {
 	defer txn.Rollback(ctx)
 	dbs := map[string]*DBInfo{}
 	tables := map[uint32]*TableInfo{}
+	views := map[string]*ViewInfo{}
 	var version uint64
 	start, end := c.store.catalogPrefix(), encoding.PrefixEnd(c.store.catalogPrefix())
 	for {
@@ -227,6 +229,12 @@ func (c *Catalog) load(ctx context.Context) error {
 					return err
 				}
 				tables[t.ID] = &t
+			case "view":
+				v, err := decodeView(resp.Values[i])
+				if err != nil {
+					return err
+				}
+				views[viewMapKey(v.DB, v.Name)] = v
 			case "seq":
 				if bytes.Equal(k, c.store.seqKey("catalog_version")) {
 					_ = json.Unmarshal(resp.Values[i], &version)
@@ -251,7 +259,7 @@ func (c *Catalog) load(ctx context.Context) error {
 		}
 	}
 	c.mu.Lock()
-	c.dbs, c.tables, c.stats, c.version, c.checked, c.loaded = dbs, tables, stats, version, time.Now(), true
+	c.dbs, c.tables, c.views, c.stats, c.version, c.checked, c.loaded = dbs, tables, views, stats, version, time.Now(), true
 	c.mu.Unlock()
 	c.store.resumeJobs(tables)
 	return nil
@@ -433,8 +441,15 @@ func (c *Catalog) DropDatabase(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	views, err := c.Views(ctx, name)
+	if err != nil {
+		return err
+	}
 	return c.ddl(ctx, func(txn *Txn) error {
 		muts := []kv.Mutation{{Op: kv.OpDelete, Key: c.store.dbKey(name)}}
+		for _, v := range views {
+			muts = append(muts, kv.Mutation{Op: kv.OpDelete, Key: c.store.viewKey(v.DB, v.Name)})
+		}
 		for _, t := range tables {
 			muts = append(muts,
 				kv.Mutation{Op: kv.OpDelete, Key: c.store.tableKey(t.ID)},
@@ -470,6 +485,11 @@ func (c *Catalog) CreateTable(ctx context.Context, t *TableInfo) error {
 		if existing, err := c.Table(ctx, t.DB, t.Name); err != nil {
 			return err
 		} else if existing != nil {
+			return sql.ErrTableAlreadyExists.New(t.Name)
+		}
+		if v, err := c.View(ctx, t.DB, t.Name); err != nil {
+			return err
+		} else if v != nil {
 			return sql.ErrTableAlreadyExists.New(t.Name)
 		}
 		id, err := c.nextTableID(ctx, txn)

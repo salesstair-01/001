@@ -1,0 +1,28 @@
+# sqllogictest files run by `make slt`, relative to test/ in
+# github.com/dolthub/sqllogictest at the commit in fetch.sh.
+select1.test
+select2.test
+select3.test
+select4.test
+evidence/in1.test
+evidence/in2.test
+evidence/slt_lang_aggfunc.test
+evidence/slt_lang_createview.test
+evidence/slt_lang_dropindex.test
+evidence/slt_lang_droptable.test
+evidence/slt_lang_dropview.test
+evidence/slt_lang_replace.test
+evidence/slt_lang_update.test
+random/aggregates/slt_good_0.test
+random/aggregates/slt_good_1.test
+random/expr/slt_good_0.test
+random/expr/slt_good_1.test
+random/groupby/slt_good_0.test
+random/select/slt_good_0.test
+index/between/1/slt_good_0.test
+index/commute/10/slt_good_0.test
+index/delete/1/slt_good_0.test
+index/in/10/slt_good_0.test
+index/orderby/10/slt_good_0.test
+index/orderby_nosort/10/slt_good_0.test
+index/random/10/slt_good_0.test

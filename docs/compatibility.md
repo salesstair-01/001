@@ -21,6 +21,10 @@ How it is checked:
   with `S2Z_MYSQL_DSN='root@tcp(127.0.0.1:3306)/' go test ./internal/sqlengine
   -run MySQLDiff -diff-rounds 20`; `-diff-known-gaps` also generates the
   inputs of the gaps listed under *Types and collations*.
+- **ORM suite** (`scripts/orm`, CI job `minio`): a SQLAlchemy 2.0 +
+  Alembic app (migrations up/down/up, autogenerate finding no changes,
+  reflection, ORM CRUD, relationships, upserts, transactions, row locks)
+  passes 16/16 against `sqld`, through `proxyd`, and on MySQL 8.0.
 - **Go tests** in `internal/sqlengine` and `internal/proxy` for each item
   below that says "tested".
 
@@ -36,6 +40,7 @@ How it is checked:
 | Pings, `SELECT 1` | Answered by the proxy; they never wake compute. |
 | Results | Buffered whole at the proxy before sending (no row streaming); very large results cost proxy memory. |
 | Multi-statements | Supported (`CLIENT_MULTI_STATEMENTS`). |
+| Autocommit | The handshake announces autocommit on, as MySQL's does, so drivers that switch it off (PyMySQL, SQLAlchemy) send `SET autocommit = 0` and get implicit transactions. |
 
 ## SQL surface
 
@@ -49,14 +54,21 @@ engine), `INSERT ... ON DUPLICATE KEY UPDATE`, `REPLACE`, multi-row
 functions, JSON columns and functions, generated columns, `ENUM`/`SET`,
 `SHOW CREATE TABLE`, `SHOW [FULL] TABLES`, `information_schema` tables and
 columns, `ANALYZE TABLE`, `GET_LOCK`/`RELEASE_LOCK`, `AUTO_INCREMENT`,
-tables without a primary key (hidden rowid).
+tables without a primary key (hidden rowid), column defaults that are
+expressions (`DEFAULT CURRENT_TIMESTAMP`, `now()`, `(expr)`), `ON UPDATE
+CURRENT_TIMESTAMP`, stored and virtual generated columns, and foreign keys:
+declared in `CREATE TABLE` or `ALTER TABLE ... ADD/DROP FOREIGN KEY`,
+enforced (1452 on an orphan child, 1451 on a referenced parent), with
+`ON DELETE`/`ON UPDATE` `CASCADE`, `SET NULL` and `RESTRICT`; a reference
+check takes a shared lock on the parent row, as InnoDB does, so a concurrent
+parent delete waits for the child's transaction.
 
 Not supported in v1 (statement fails with an error):
 
 | feature | error |
 |---|---|
 | Triggers, stored procedures, events | `database "app" doesn't support triggers` (and similar) |
-| Foreign keys, CHECK constraints | `the table does not support foreign key operations` |
+| CHECK constraints | `the table does not support check constraint operations` |
 | Temporary tables | `database does not support temporary tables` |
 | Savepoints | 1235 `savepoints are not supported in v1` |
 | FULLTEXT indexes | refused by go-mysql-server (its error text is garbled: `tables cannot be created on database %!s(MISSING)`) |

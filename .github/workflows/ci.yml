@@ -35,7 +35,7 @@ jobs:
       - run: make fault-1000
 
   minio:
-    name: MinIO tests, crash test, driver matrix
+    name: MinIO tests, crash test, driver matrix, ORM suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +79,10 @@ jobs:
           sleep 3
           DRV_PORT=3306 scripts/drivers/run.sh
           DRV_PORT=3307 DRV_USER=app@acme DRV_PASSWORD=s3cret scripts/drivers/run.sh
+      - name: ORM suite (SQLAlchemy + Alembic) on sqld and proxyd
+        run: |
+          ORM_PORT=3306 scripts/orm/run.sh
+          ORM_PORT=3307 ORM_USER=app@acme ORM_PASSWORD=s3cret scripts/orm/run.sh
       - name: logs
         if: failure()
         run: tail -n 50 /tmp/s2z/*.log || true

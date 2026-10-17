@@ -1,4 +1,4 @@
-.PHONY: build test test-minio fault-1000 crash-test wake-demo wake-time cold-start slt drivers
+.PHONY: build test test-minio fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
 
 build:
 	go build -o bin/ ./cmd/...
@@ -35,3 +35,7 @@ slt:
 # Driver matrix against DRV_HOST:DRV_PORT (see scripts/drivers/README.md).
 drivers:
 	scripts/drivers/run.sh
+
+# ORM suites against ORM_HOST:ORM_PORT (see scripts/orm/README.md).
+orm:
+	scripts/orm/run.sh

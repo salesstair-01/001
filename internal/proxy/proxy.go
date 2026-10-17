@@ -166,6 +166,9 @@ func (p *Proxy) NewConnection(c *mysql.Conn) {
 	p.mu.Lock()
 	p.sessions[c.ConnectionID] = &session{lastUsed: time.Now()}
 	p.mu.Unlock()
+	// Sessions start in autocommit mode, as MySQL announces in the handshake;
+	// drivers decide from it whether to send SET autocommit = 0.
+	c.StatusFlags = mysql.ServerStatusAutocommit
 }
 
 func (p *Proxy) ConnectionClosed(c *mysql.Conn) {

@@ -1,8 +1,13 @@
 package sqlengine
 
 import (
+	"bytes"
+	"encoding/binary"
+	"io"
+	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Fixes found by the MySQL differential tests (mysqldiff_test.go).
@@ -35,5 +40,39 @@ func TestMySQLCompatFixes(t *testing.T) {
 	check("SELECT CONCAT('[', c, ']') FROM ch", "[a]")
 	if _, err := db.Exec("INSERT INTO ch VALUES ('a')"); mysqlCode(err) != 1062 {
 		t.Errorf("'a' after 'a  ' in a CHAR key: %v", err)
+	}
+}
+
+// handshakeStatus reads the status flags of a MySQL server's initial
+// handshake (protocol v10).
+func handshakeStatus(t *testing.T, addr string) uint16 {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	hdr := make([]byte, 4)
+	if _, err := io.ReadFull(conn, hdr); err != nil {
+		t.Fatal(err)
+	}
+	body := make([]byte, int(hdr[0])|int(hdr[1])<<8|int(hdr[2])<<16)
+	if _, err := io.ReadFull(conn, body); err != nil {
+		t.Fatal(err)
+	}
+	// protocol(1) version(NUL-terminated) connection id(4) auth data(8)
+	// filler(1) capabilities(2) charset(1) status(2)
+	i := 1 + bytes.IndexByte(body[1:], 0) + 1 + 4 + 8 + 1 + 2 + 1
+	return binary.LittleEndian.Uint16(body[i:])
+}
+
+// Drivers such as PyMySQL send SET autocommit = 0 only when the handshake
+// says autocommit is on; without the flag their transactions autocommitted.
+func TestHandshakeAnnouncesAutocommit(t *testing.T) {
+	c := startCluster(t)
+	c.db(t)
+	if st := handshakeStatus(t, c.addr); st&0x0002 == 0 {
+		t.Fatalf("handshake status %#x lacks SERVER_STATUS_AUTOCOMMIT", st)
 	}
 }

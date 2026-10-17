@@ -135,7 +135,20 @@ func (e *Engine) SessionBuilder() server.SessionBuilder {
 // NewServer returns a MySQL protocol server for the engine.
 func (e *Engine) NewServer(addr string) (*server.Server, error) {
 	cfg := server.Config{Protocol: "tcp", Address: addr}
-	return server.NewServer(cfg, e.SQL, sql.NewContext, e.SessionBuilder(), nil)
+	return server.NewServerWithHandler(cfg, e.SQL, sql.NewContext, e.SessionBuilder(), nil,
+		func(h mysql.Handler) (mysql.Handler, error) { return autocommitHandler{h}, nil })
+}
+
+// autocommitHandler announces SERVER_STATUS_AUTOCOMMIT in the handshake, as
+// MySQL does. go-mysql-server sends no status, and drivers that compare it
+// with the autocommit mode they want (PyMySQL, and so SQLAlchemy) then
+// believe autocommit is already off, never send SET autocommit = 0, and every
+// statement of their "transactions" commits on its own.
+type autocommitHandler struct{ mysql.Handler }
+
+func (h autocommitHandler) NewConnection(c *mysql.Conn) {
+	h.Handler.NewConnection(c)
+	c.StatusFlags |= mysql.ServerStatusAutocommit
 }
 
 // EnsureDatabase creates a database in a single-tenant engine's tenant.

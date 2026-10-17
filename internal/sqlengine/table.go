@@ -36,6 +36,8 @@ type Table struct {
 	instantAdd bool
 	// keyless tables have no primary key and are keyed by a hidden rowid.
 	keyless bool
+	// refCheck marks a foreign-key reference check (fk.go).
+	refCheck bool
 }
 
 var (
@@ -310,7 +312,14 @@ func (t *Table) PartitionRows(ctx *sql.Context, part sql.Partition) (sql.RowIter
 		return nil, fmt.Errorf("unexpected partition %T", part)
 	}
 	txn, done := sessionTxn(ctx, t.store)
-	it := &rowIter{t: t, txn: txn, opts: readOpts(ctx, t.info.Name), done: done, spans: p.spans, index: p.index}
+	opts := readOpts(ctx, t.info.Name)
+	if t.refCheck {
+		opts.IncludeStmt = true
+		if opts.Lock == kv.LockNone {
+			opts.Lock, opts.LockWaitMs = refCheckLock, lockWait(ctx).Milliseconds()
+		}
+	}
+	it := &rowIter{t: t, txn: txn, opts: opts, done: done, spans: p.spans, index: p.index}
 	if c, stmt, ok := cacheable(ctx, it); ok {
 		key := cacheKey(t, p.index, p.spans)
 		if rows, hit := c.get(stmt, key); hit {

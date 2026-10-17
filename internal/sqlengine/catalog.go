@@ -12,7 +12,11 @@ import (
 	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/analyzer"
+	"github.com/dolthub/go-mysql-server/sql/expression"
+	"github.com/dolthub/go-mysql-server/sql/plan"
 	"github.com/dolthub/go-mysql-server/sql/planbuilder"
+	"github.com/dolthub/vitess/go/vt/sqlparser"
 
 	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/kv"
@@ -43,6 +47,9 @@ type ColumnInfo struct {
 	Type          string `json:"type"`
 	Nullable      bool   `json:"nullable"`
 	Default       string `json:"default,omitempty"`
+	OnUpdate      string `json:"on_update,omitempty"` // ON UPDATE expression
+	Generated     string `json:"generated,omitempty"` // generated column expression
+	Virtual       bool   `json:"virtual,omitempty"`   // VIRTUAL rather than STORED
 	AutoIncrement bool   `json:"auto_increment,omitempty"`
 	Comment       string `json:"comment,omitempty"`
 	// OriginalDefault is the encoded value a row without this column's id
@@ -91,6 +98,8 @@ type TableInfo struct {
 	Version   uint64 `json:"version,omitempty"`
 	Collation string `json:"collation,omitempty"`
 	Comment   string `json:"comment,omitempty"`
+	// ForeignKeys are the constraints this table declares (fk.go).
+	ForeignKeys []ForeignKeyInfo `json:"foreign_keys,omitempty"`
 }
 
 // clone deep-copies a table so the cached original is never mutated.
@@ -593,10 +602,62 @@ func columnInfo(col *sql.Column, id uint32) (ColumnInfo, error) {
 		ID: id, Name: col.Name, Type: typ, Nullable: col.Nullable,
 		AutoIncrement: col.AutoIncrement, Comment: col.Comment,
 	}
+	if col.OnUpdate != nil {
+		ci.OnUpdate = col.OnUpdate.String()
+	}
+	if col.Generated != nil {
+		ci.Generated, ci.Virtual = col.Generated.String(), col.Virtual
+	}
 	if col.Default != nil {
 		ci.Default = col.Default.String()
 	}
 	return ci, nil
+}
+
+// functionCatalog resolves function names (now(), CURRENT_TIMESTAMP) in
+// stored column expressions; it has no databases.
+var functionCatalog = analyzer.NewCatalog(NewProvider(nil))
+
+// parseColumnExpr parses a stored DEFAULT, ON UPDATE or generated
+// expression. It is planbuilder.StringToColumnDefaultValue, except that the
+// second parse gets the original text: go-mysql-server 0.20 formats the
+// parsed AST with %s there, which is not SQL for function calls
+// (CURRENT_TIMESTAMP, now()) and fails to parse.
+func parseColumnExpr(ctx *sql.Context, text string) (*sql.ColumnDefaultValue, error) {
+	stmt, err := sqlparser.Parse("SELECT " + text)
+	if err != nil {
+		return nil, err
+	}
+	sel, ok := stmt.(*sqlparser.Select)
+	if !ok || len(sel.SelectExprs) != 1 {
+		return nil, fmt.Errorf("not a single expression")
+	}
+	ae, ok := sel.SelectExprs[0].(*sqlparser.AliasedExpr)
+	if !ok {
+		return nil, fmt.Errorf("not an expression")
+	}
+	proj, _, err := planbuilder.Parse(ctx, functionCatalog, "SELECT "+text)
+	if err != nil {
+		return nil, err
+	}
+	p, ok := proj.(*plan.Project)
+	if !ok || len(p.Projections) != 1 {
+		return nil, fmt.Errorf("not a single expression")
+	}
+	e := p.Projections[0]
+	if a, ok := e.(*expression.Alias); ok {
+		e = a.Child
+	}
+	_, paren := ae.Expr.(*sqlparser.ParenExpr)
+	var literal bool
+	switch x := e.(type) {
+	case *expression.UnaryMinus:
+		_, literal = x.Child.(*expression.Literal)
+	case *expression.UnresolvedFunction:
+	default:
+		literal = len(e.Children()) == 0 && !strings.HasPrefix(text, "(")
+	}
+	return planbuilder.ExpressionToColumnDefaultValue(e, literal, paren), nil
 }
 
 // sqlColumn converts a stored column back.
@@ -616,15 +677,30 @@ func sqlColumn(ctx *sql.Context, t *TableInfo, ci *ColumnInfo, pk bool) (*sql.Co
 		Name: ci.Name, Type: typ, Nullable: ci.Nullable, Source: t.Name, DatabaseSource: t.DB,
 		PrimaryKey: pk, AutoIncrement: ci.AutoIncrement, Comment: ci.Comment,
 	}
-	if ci.Default != "" {
-		def, err := planbuilder.StringToColumnDefaultValue(ctx, ci.Default)
+	for _, d := range []struct {
+		text string
+		dst  **sql.ColumnDefaultValue
+		what string
+	}{{ci.Default, &col.Default, "default"}, {ci.OnUpdate, &col.OnUpdate, "on update"}, {ci.Generated, &col.Generated, "generated"}} {
+		if d.text == "" {
+			continue
+		}
+		if d.dst == &col.Generated {
+			// It names other columns: go-mysql-server resolves it when it
+			// plans each statement, against the table.
+			*d.dst = sql.NewUnresolvedColumnDefaultValue(d.text)
+			continue
+		}
+		def, err := parseColumnExpr(ctx, d.text)
 		if err == nil {
 			def, err = sql.NewColumnDefaultValue(def.Expr, typ, def.IsLiteral(), def.IsParenthesized(), ci.Nullable)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("column %s.%s: default %q: %w", t.Name, ci.Name, ci.Default, err)
+			*d.dst = sql.NewUnresolvedColumnDefaultValue(d.text)
+			continue
 		}
-		col.Default = def
+		*d.dst = def
 	}
+	col.Virtual = ci.Virtual
 	return col, nil
 }

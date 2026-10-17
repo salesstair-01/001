@@ -16,7 +16,7 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | 2 | Fencing, takeover and checkpoints | done — numbered manifests and WAL segments with put-if-absent, compare-on-412, checkpoints + GC, txn ids; fault tests pass 1,000 seeded runs |
 | 3 | Transactions and MVCC | done — snapshot reads, statement layers, read-your-writes, RR/RC, SERIALIZABLE refused, MVCC GC, 64 MiB cap |
 | 4 | Locks | done — X/S row locks in owner memory, locking reads of the latest version for UPDATE/DELETE/`FOR UPDATE`/`LOCK IN SHARE MODE`, FIFO wait queue with `innodb_lock_wait_timeout` (1205), wait-for-graph deadlock detection with the youngest victim (1213), 2 s heartbeat / 10 s lease; the slice-3 stopgap is gone |
-| 5 | Indexes, types, collations | mostly — secondary indexes (non-unique, unique, the NULL rule, unique-key locks, prefix `col(N)`, CREATE/DROP/RENAME INDEX with backfill), AUTO_INCREMENT counters in system table 3, every type round-trips, memcomparable keys incl. DECIMAL and collation weights. MySQL 8 differential property tests (`internal/sqlengine/mysqldiff_test.go`; they found and fixed four bugs, the rest are listed as known gaps in docs/compatibility.md). Not yet: DESC index columns (accepted, stored ascending), the ORM suite |
+| 5 | Indexes, types, collations | mostly — secondary indexes (non-unique, unique, the NULL rule, unique-key locks, prefix `col(N)`, CREATE/DROP/RENAME INDEX with backfill), AUTO_INCREMENT counters in system table 3, every type round-trips, memcomparable keys incl. DECIMAL and collation weights. MySQL 8 differential property tests (`internal/sqlengine/mysqldiff_test.go`; they found and fixed four bugs, the rest are listed as known gaps in docs/compatibility.md). ORM suite: SQLAlchemy 2.0 + Alembic, 16/16 on `sqld`, through `proxyd` and on MySQL 8 (`scripts/orm`; it found and fixed expression defaults lost on reload, foreign keys — now stored and enforced — and the handshake's missing autocommit flag). Not yet: DESC index columns (accepted, stored ascending) |
 | 6 | KV scale-to-zero | done — directory service (`dird`, SQLite partition table, node heartbeats), idle suspend (checkpoint → release → exit), wake on demand by spawning a per-tenant `kvd` or placing on a pooled node, query engines route through the directory and re-resolve on EpochChanged, local SST cache across restarts; wake time measured below |
 | 7 | Proxy and query-engine scale-to-zero | done — `proxyd`: TLS, `caching_sha2_password` (and native) auth, tenant from `user@tenant` or the TLS hostname `<tenant>.<domain>`; holds client sockets while compute starts; pings and `SELECT 1` answered locally; `USE`/`SET` tracked and replayed onto a new query engine; prepared statements kept at the proxy, so nothing needs re-preparing; transactions, temp tables, `GET_LOCK`, `LOCK TABLES` pin the session; idle backends released; generic `sqld -generic` engines started on demand with a pre-warmed pool; cold starts measured below |
 | 8 | Schema changes across query engines | done — per-table schema versions guard every writing commit, so no write commits with a stale schema; catalog caches refresh under a 2 s lease; index builds go write-only → backfill (locking batches, progress in a catalog job row, resumed by any engine after a KV or engine restart) → public; index drops go write-only and wait out the lease; instant ADD/DROP COLUMN with original defaults; compatible MODIFY/RENAME COLUMN; row counts in system table 2 from ANALYZE and a background auto-analyze that never keeps a tenant awake |
@@ -164,6 +164,7 @@ make wake-demo            # slice 6: tenant kvd exits when idle, next query wake
 make cold-start           # slice 7: pooled app through proxyd, p50/p99 from all-zero
 make slt                  # sqllogictest subset, writes scripts/slt/results.md
 make drivers              # driver matrix against DRV_HOST:DRV_PORT (scripts/drivers/README.md)
+make orm                  # SQLAlchemy + Alembic suite against ORM_HOST:ORM_PORT (scripts/orm/README.md)
 S2Z_MYSQL_DSN=... go test ./internal/sqlengine -run MySQLDiff   # differential tests against a MySQL 8
 ```
 
@@ -180,7 +181,7 @@ replay even when goroutines interleave differently.
 The full list, with how each item is checked, is in
 [docs/compatibility.md](docs/compatibility.md). The ones most likely to matter:
 
-- No triggers, stored procedures, foreign keys, CHECK constraints, temporary
+- No triggers, stored procedures, CHECK constraints, temporary
   tables, savepoints, FULLTEXT or spatial types.
 - No gap or next-key locks: a range `FOR UPDATE` doesn't block inserts into
   the range; use a unique key for check-then-insert.

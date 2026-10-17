@@ -5,3 +5,5 @@
 scripts/drivers/.deps/
 scripts/slt/test/
 /slt
+scripts/orm/.deps/
+__pycache__/

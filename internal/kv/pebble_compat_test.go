@@ -33,16 +33,16 @@ import (
 
 // Features the owner does not have; a case using one is skipped.
 const (
-	featReverse    = "reverse iteration (prev, last, seek-lt)"
-	featLimit      = "iteration limits (next-limit, seek-ge-limit)"
-	featMerge      = "merge operator"
-	featSingleDel  = "single delete"
-	featRangeDel   = "range deletion (DeleteRange)"
-	featRangeKeys  = "range keys"
-	featIterOpts   = "iterator options and cloning (set-options, clone)"
-	featIterAPI    = "owner-side iterator API (errors on misuse; the owner pages scans)"
+	featReverse    = "reverse iteration (prev, last, seek-lt) #1"
+	featLimit      = "iteration limits (next-limit, seek-ge-limit) #4"
+	featMerge      = "merge operator #5"
+	featSingleDel  = "single delete #6"
+	featRangeDel   = "range deletion (DeleteRange) #2"
+	featRangeKeys  = "range keys #10"
+	featIterOpts   = "iterator options and cloning (set-options, clone) #4"
+	featIterAPI    = "owner-side iterator API (errors on misuse; the owner pages scans) #4"
 	featInternal   = "internal keys and LSM introspection"
-	featIterStats  = "iterator statistics"
+	featIterStats  = "iterator statistics #4"
 	featUnknownCmd = "unrecognized test command"
 )
 
@@ -66,8 +66,8 @@ var compatPrefix = encoding.Prefix(pid, encoding.FirstUserTableID, 0)
 
 // ck maps a Pebble key to an owner key. Owner keys are memcomparable
 // encodings, which never have one key as a prefix of another (D2): the MVCC
-// timestamp suffix would otherwise sort "a"@ts after "a\x00" (see the issue
-// on a user-key-aware comparer). Pebble's raw keys ("a", "aa") are encoded
+// timestamp suffix would otherwise sort "a"@ts after "a\x00" (issue #3: a
+// user-key-aware comparer). Pebble's raw keys ("a", "aa") are encoded
 // the way the SQL layer encodes strings.
 func ck(s string) []byte {
 	return encoding.AppendBytes(append([]byte(nil), compatPrefix...), []byte(s), false)

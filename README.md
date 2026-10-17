@@ -159,6 +159,8 @@ within the GC grace (1 h):
 make test                 # unit + in-process SQL tests (MinIO tests skip)
 make test-minio           # also runs the MinIO tests (MINIO_ENDPOINT, default 127.0.0.1:9000)
 make fault-1000           # slice 2 bar: 1,000 seeded fault-injection runs
+go test ./internal/kv -run Metamorphic -meta-runs 100   # Pebble-style metamorphic test of the KV owner
+go test ./internal/kv -run PebbleCompat -v              # Pebble's own datadriven tests against the owner
 make crash-test           # slice 1: write loop, kill -9 kvd 5 times, verify every acknowledged row
 make wake-demo            # slice 6: tenant kvd exits when idle, next query wakes it
 make cold-start           # slice 7: pooled app through proxyd, p50/p99 from all-zero

@@ -459,3 +459,28 @@ func TestAutoIncrementSurvivesRestart(t *testing.T) {
 		t.Fatalf("counter after restart: %d", v)
 	}
 }
+
+// A snapshot taken before anything was committed has timestamp 0, which once
+// also meant "no snapshot yet": the next read took a new one, so reads on a
+// fresh partition were not repeatable (found by the metamorphic test).
+func TestSnapshotOnEmptyPartitionIsRepeatable(t *testing.T) {
+	for _, iso := range []Isolation{RepeatableRead, ReadCommitted} {
+		p := open(t, objstore.NewMem(), "kv-a")
+		reader := txnID()
+		if err := p.Begin(p.epoch, reader, BeginOptions{Isolation: iso}); err != nil {
+			t.Fatal(err)
+		}
+		k := key(int(iso) + 100)
+		if vs, err := p.Get(p.epoch, reader, [][]byte{k}, ReadOptions{Stmt: 1}); err != nil || vs[0] != nil {
+			t.Fatalf("first read: %q %v", vs, err)
+		}
+		if _, err := put(p, int(iso)+100, "later"); err != nil {
+			t.Fatal(err)
+		}
+		// Same statement: neither RR nor RC may see the later commit.
+		if vs, err := p.Get(p.epoch, reader, [][]byte{k}, ReadOptions{Stmt: 1}); err != nil || vs[0] != nil {
+			t.Fatalf("isolation %d: second read in the statement saw %q (%v)", iso, vs[0], err)
+		}
+		_ = p.Rollback(p.epoch, reader)
+	}
+}

@@ -162,7 +162,10 @@ func mergeSpans(spans []keySpan) []keySpan {
 	}
 	end := func(s keySpan) []byte {
 		if s.point {
-			return append(append([]byte(nil), s.start...), 0) // just past the key
+			// Just past the key: keys are prefix-free (D2), so no other key
+			// lies in [key, PrefixEnd(key)). key+"\x00" would not do: the
+			// owner compares MVCC keys bytewise, and key@ts sorts after it.
+			return encoding.PrefixEnd(s.start)
 		}
 		return s.end
 	}

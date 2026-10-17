@@ -101,7 +101,8 @@ type Txn struct {
 	id         TxnID
 	iso        Isolation
 	began      time.Time // for picking the youngest deadlock victim
-	snapshotTS uint64    // 0 until the first consistent read (RR) or statement (RC)
+	snapshotTS uint64    // read timestamp, once hasSnap
+	hasSnap    bool      // a snapshot was taken (snapshotTS can be 0: nothing committed yet)
 	snapStmt   uint64    // statement the RC snapshot belongs to
 	layers     []*stmtLayer
 	bytes      int
@@ -230,7 +231,7 @@ func (p *Partition) Begin(epoch uint64, id TxnID, opts BeginOptions) error {
 	now := time.Now()
 	t := &Txn{id: id, iso: opts.Isolation, began: now, lastSeen: now}
 	if opts.ConsistentSnapshot {
-		t.snapshotTS = p.visibleTS.Load()
+		t.snapshotTS, t.hasSnap = p.visibleTS.Load(), true
 	}
 	p.txns[id] = t
 	return nil
@@ -239,10 +240,10 @@ func (p *Partition) Begin(epoch uint64, id TxnID, opts BeginOptions) error {
 // snapshotLocked returns the read timestamp for a consistent read in stmt.
 func (p *Partition) snapshotLocked(t *Txn, stmt uint64) uint64 {
 	switch {
-	case t.iso == ReadCommitted && (t.snapshotTS == 0 || t.snapStmt != stmt):
-		t.snapshotTS, t.snapStmt = p.visibleTS.Load(), stmt
-	case t.snapshotTS == 0:
-		t.snapshotTS = p.visibleTS.Load()
+	case t.iso == ReadCommitted && (!t.hasSnap || t.snapStmt != stmt):
+		t.snapshotTS, t.snapStmt, t.hasSnap = p.visibleTS.Load(), stmt, true
+	case !t.hasSnap:
+		t.snapshotTS, t.hasSnap = p.visibleTS.Load(), true
 	}
 	return t.snapshotTS
 }
@@ -620,7 +621,7 @@ func (p *Partition) TxnStatus(epoch uint64, id TxnID) (TxnState, uint64, error) 
 func (p *Partition) oldestSnapshotLocked() uint64 {
 	safe := p.visibleTS.Load()
 	for _, t := range p.txns {
-		if t.snapshotTS != 0 && t.snapshotTS < safe {
+		if t.hasSnap && t.snapshotTS < safe {
 			safe = t.snapshotTS
 		}
 	}

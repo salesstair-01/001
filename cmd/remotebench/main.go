@@ -142,6 +142,12 @@ func main() {
 			p.Rollback(p.Epoch(), id)
 			must(p.Close())
 			os.RemoveAll(filepath.Join(dir, "wake"))
+			// Drop the run's objects, so repeated runs do not fill the disk.
+			keys, err := minio.List(ctx, "", "")
+			must(err)
+			for _, k := range keys {
+				must(minio.Delete(ctx, k))
+			}
 
 			fmt.Printf("| %d MB | %s | %v | %d/%d | %.0f | %d/%d | %v | %d | %.1f | %v | %v/%v | %v/%v | %v | %d | %.0f MB |\n",
 				mb, mode, load.Round(time.Millisecond),

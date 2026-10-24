@@ -31,6 +31,7 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | `internal/wal` | WAL segment format with CRC-32C |
 | `internal/kv` | the KV owner: takeover, group commit, fencing, checkpoints, transactions, MVCC GC |
 | `internal/kv/engine.go` | the local LSM behind an interface: Pebble v2, WAL off, MVCC comparer `s2z.mvcc.v2`, format pinned |
+| `internal/kv/engine_remote.go`, `cmd/remotebench` | spike: SSTs written by Pebble straight to MinIO and read lazily (`Config.RemoteSSTs`, off by default); see [docs/remote-ssts.md](docs/remote-ssts.md) |
 | `internal/kvrpc` | gRPC API (gob codec, no codegen) and error mapping |
 | `internal/sqlengine` | go-mysql-server provider, catalog in system table 1, tables, PK index, `TransactionSession` |
 | `internal/directory` | the directory service, its client, the engine's `Router`, and the node `Agent` |

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sync"
+	"time"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/cockroachdb/pebble/v2/objstorage/remote"
@@ -130,10 +132,13 @@ func openEngine(dir string, o engineOptions) (engine, error) {
 			opts.Experimental.CreateOnSharedLocator = remoteLocator(r.epoch)
 		}
 	}
+	sched := newGatedScheduler()
+	opts.Experimental.CompactionScheduler = sched
 	db, err := pebble.Open(dir, opts)
 	if err != nil {
 		return nil, err
 	}
+	defer sched.open()
 	if o.remote != nil {
 		if err := db.SetCreatorID(o.remote.creatorID); err != nil {
 			db.Close()
@@ -171,3 +176,121 @@ func (b pebbleBatch) Delete(k []byte) error         { return b.b.Delete(k, nil) 
 func (b pebbleBatch) DeleteRange(s, e []byte) error { return b.b.DeleteRange(s, e, nil) }
 func (b pebbleBatch) Len() int                      { return b.b.Len() }
 func (b pebbleBatch) Commit() error                 { return b.b.Commit(pebble.NoSync) }
+
+// gatedScheduler runs one compaction at a time, like Pebble's default
+// scheduler, but none until open() is called. Pebble's Open waits for every
+// compaction running when it scans for obsolete files, so a compaction that
+// starts during Open (an L0 backlog left by the previous owner) would delay
+// the wake by its whole run, which on remote SSTs is GETs and PUTs of the
+// tables it rewrites. openEngine opens the gate once Open has returned.
+type gatedScheduler struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	db      pebble.DBForCompaction
+	gateOn  bool
+	gone    bool
+	busy    bool // granting
+	running int
+	poke    chan struct{}
+	stop    chan struct{}
+}
+
+func newGatedScheduler() *gatedScheduler {
+	s := &gatedScheduler{poke: make(chan struct{}, 1), stop: make(chan struct{})}
+	s.cond = sync.NewCond(&s.mu)
+	return s
+}
+
+func (s *gatedScheduler) Register(_ int, db pebble.DBForCompaction) {
+	s.db = db
+	go func() {
+		t := time.NewTicker(100 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+			case <-s.poke:
+			case <-s.stop:
+				return
+			}
+			s.grant()
+		}
+	}()
+}
+
+func (s *gatedScheduler) Unregister() {
+	close(s.stop)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gone = true
+	for s.busy {
+		s.cond.Wait()
+	}
+}
+
+func (s *gatedScheduler) TrySchedule() (bool, pebble.CompactionGrantHandle) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.gateOn || s.gone || s.db.GetAllowedWithoutPermission() <= s.running {
+		return false, nil
+	}
+	s.running++
+	return true, s
+}
+
+func (s *gatedScheduler) UpdateGetAllowedWithoutPermission() { s.nudge() }
+
+func (s *gatedScheduler) nudge() {
+	select {
+	case s.poke <- struct{}{}:
+	default:
+	}
+}
+
+// open lets compactions run.
+func (s *gatedScheduler) open() {
+	s.mu.Lock()
+	s.gateOn = true
+	s.mu.Unlock()
+	s.nudge()
+}
+
+// grant starts waiting compactions up to the allowed number.
+func (s *gatedScheduler) grant() {
+	s.mu.Lock()
+	if !s.gateOn || s.gone || s.busy {
+		s.mu.Unlock()
+		return
+	}
+	n := s.db.GetAllowedWithoutPermission() - s.running
+	if n <= 0 {
+		s.mu.Unlock()
+		return
+	}
+	s.busy = true
+	s.mu.Unlock()
+	for ; n > 0; n-- {
+		if ok, _ := s.db.GetWaitingCompaction(); !ok || !s.db.Schedule(s) {
+			break
+		}
+		s.mu.Lock()
+		s.running++
+		s.mu.Unlock()
+	}
+	s.mu.Lock()
+	s.busy = false
+	s.cond.Broadcast()
+	s.mu.Unlock()
+}
+
+// The scheduler is its own grant handle.
+func (s *gatedScheduler) Started()                                          {}
+func (s *gatedScheduler) MeasureCPU(pebble.CompactionGoroutineKind)         {}
+func (s *gatedScheduler) CumulativeStats(pebble.CompactionGrantHandleStats) {}
+
+func (s *gatedScheduler) Done() {
+	s.mu.Lock()
+	s.running--
+	s.mu.Unlock()
+	s.nudge()
+}

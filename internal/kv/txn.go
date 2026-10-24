@@ -7,8 +7,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/cockroachdb/pebble"
-
 	"github.com/salesstair-01/001/internal/encoding"
 )
 
@@ -310,8 +308,7 @@ func (p *Partition) readVersion(userKey []byte, ts uint64) ([]byte, uint64, erro
 		return nil, 0, err
 	}
 	defer release()
-	upper := append(encoding.MVCCKey(userKey, 0), 0)
-	it, err := p.db.NewIter(&pebble.IterOptions{LowerBound: encoding.MVCCKey(userKey, ts), UpperBound: upper})
+	it, err := p.db.NewIter(encoding.MVCCKey(userKey, ts), pastVersions(userKey))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -404,7 +401,7 @@ func (p *Partition) scanMerged(start, end []byte, limit int, ts uint64, ikeys []
 		return nil, nil, nil, err
 	}
 	defer release()
-	it, err := p.db.NewIter(&pebble.IterOptions{LowerBound: start, UpperBound: end})
+	it, err := p.db.NewIter(lowerBound(start), lowerBound(end))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -419,7 +416,7 @@ func (p *Partition) scanMerged(start, end []byte, limit int, ts uint64, ikeys []
 				return nil, nil, false, err
 			}
 			if bytes.Compare(uk, start) < 0 {
-				valid = it.SeekGE(append(encoding.MVCCKey(uk, 0), 0))
+				valid = it.SeekGE(pastVersions(uk))
 				continue
 			}
 			if vts > ts {
@@ -431,7 +428,7 @@ func (p *Partition) scanMerged(start, end []byte, limit int, ts uint64, ikeys []
 				k = append([]byte(nil), uk...)
 				v = append([]byte{}, it.Value()...)
 			}
-			valid = it.SeekGE(append(encoding.MVCCKey(uk, 0), 0))
+			valid = it.SeekGE(pastVersions(uk))
 			if k != nil {
 				return k, v, true, nil
 			}

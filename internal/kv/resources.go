@@ -6,8 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/pebble"
-
 	"github.com/salesstair-01/001/internal/objstore"
 )
 
@@ -20,35 +18,26 @@ import (
 
 // nodeResources are shared by the partitions of a node.
 type nodeResources struct {
-	cache    *pebble.Cache // nil = Pebble's default per instance
+	cache    *blockCache // nil = a private cache per engine
 	putSlots chan struct{}
 }
 
 func newNodeResources(c *Config) *nodeResources {
 	r := &nodeResources{putSlots: make(chan struct{}, c.PutConcurrency)}
 	if c.BlockCacheBytes > 0 {
-		r.cache = pebble.NewCache(c.BlockCacheBytes)
+		r.cache = newBlockCache(c.BlockCacheBytes)
 	}
 	return r
 }
 
 func (r *nodeResources) close() {
 	if r.cache != nil {
-		r.cache.Unref()
+		r.cache.unref()
 	}
 }
 
-func (p *Partition) pebbleOptions() *pebble.Options {
-	o := &pebble.Options{
-		Comparer:                    pebbleComparer,
-		DisableWAL:                  true, // the object-store WAL is the source of truth
-		Logger:                      quietLogger{},
-		Cache:                       p.cfg.res.cache,
-		MemTableSize:                uint64(p.cfg.MemTableBytes),
-		MemTableStopWritesThreshold: 4,
-		MaxConcurrentCompactions:    func() int { return 1 },
-	}
-	return o
+func (p *Partition) engineOptions() engineOptions {
+	return engineOptions{cache: p.cfg.res.cache, memTableBytes: p.cfg.MemTableBytes}
 }
 
 // fairStore is a partition's view of the object store: PUTs take a node-wide

@@ -64,23 +64,15 @@ type pebbleCompat struct {
 
 var compatPrefix = encoding.Prefix(pid, encoding.FirstUserTableID, 0)
 
-// ck maps a Pebble key to an owner key. Owner keys are memcomparable
-// encodings, which never have one key as a prefix of another (D2): the MVCC
-// timestamp suffix would otherwise sort "a"@ts after "a\x00" (issue #3: a
-// user-key-aware comparer). Pebble's raw keys ("a", "aa") are encoded
-// the way the SQL layer encodes strings.
+// ck maps a Pebble key to an owner key: the raw key under a table prefix.
+// Raw keys may be prefixes of one another ("a", "aa"), which the comparer
+// must order by user key before version (issue #3).
 func ck(s string) []byte {
-	return encoding.AppendBytes(append([]byte(nil), compatPrefix...), []byte(s), false)
+	return append(append([]byte(nil), compatPrefix...), s...)
 }
 
 // uk recovers the Pebble key.
-func uk(k []byte) string {
-	b, _, err := encoding.DecodeBytes(k[len(compatPrefix):], false)
-	if err != nil {
-		panic(err)
-	}
-	return string(b)
-}
+func uk(k []byte) string { return string(k[len(compatPrefix):]) }
 
 func (c *pebbleCompat) reset() {
 	if c.p != nil {
@@ -370,7 +362,7 @@ func (c *pebbleCompat) iter(d *datadriven.TestData) (string, string) {
 			// A bounded scan of exactly the key: Pebble's default Split makes
 			// the whole key the prefix.
 			pos, prefix = len(rows), true
-			if exact := c.scanAll(id, ck(f[1]), encoding.PrefixEnd(ck(f[1]))); len(exact) == 1 {
+			if exact := c.scanAll(id, ck(f[1]), ck(f[1]+"\x00")); len(exact) == 1 {
 				for i, kv := range rows {
 					if string(kv.Key) == string(exact[0].Key) {
 						pos = i

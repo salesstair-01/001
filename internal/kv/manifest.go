@@ -45,8 +45,16 @@ type FileRef struct {
 	Size   int64  `json:"size"`
 }
 
+// manifestFormat is the format of the engine files a manifest lists. It
+// changes whenever a new build cannot open files written by an older one.
+//
+//	0 (absent): Pebble v1, comparer s2z.mvcc.v1 (byte-wise; issue #3)
+//	2:          Pebble v2 at FormatValueSeparation, comparer s2z.mvcc.v2
+const manifestFormat = 2
+
 // Manifest is the durable root of a partition.
 type Manifest struct {
+	Format            int       `json:"format,omitempty"`
 	Epoch             uint64    `json:"epoch"`
 	Owner             string    `json:"owner"`
 	Files             []FileRef `json:"files"` // live SSTs plus Pebble metadata files
@@ -56,6 +64,20 @@ type Manifest struct {
 	// CreatedAt is when the manifest was written (unix µs), so point-in-time
 	// restore can pick the newest state before a given time.
 	CreatedAt int64 `json:"created_at,omitempty"`
+}
+
+// checkFormat refuses a manifest whose files this build cannot open. A
+// manifest without files (a partition that only has WAL) has nothing to
+// open, so any format passes: the WAL format has not changed.
+func (m *Manifest) checkFormat() error {
+	if m.Format > manifestFormat {
+		return fmt.Errorf("manifest format %d is newer than this build's %d", m.Format, manifestFormat)
+	}
+	if m.Format < manifestFormat && len(m.Files) > 0 {
+		return fmt.Errorf("manifest format %d lists engine files this build cannot open (it writes format %d); "+
+			"dump the database with the old build and load it into a new one", m.Format, manifestFormat)
+	}
+	return nil
 }
 
 func (m *Manifest) encode() []byte {

@@ -13,8 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/pebble"
-
 	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/objstore"
 )
@@ -110,7 +108,7 @@ func (p *Partition) Checkpoint(ctx context.Context) error {
 
 	old := p.manifest
 	next := Manifest{
-		Epoch: p.epoch, Owner: p.cfg.OwnerID, Files: files,
+		Format: manifestFormat, Epoch: p.epoch, Owner: p.cfg.OwnerID, Files: files,
 		ReplayAfterWALSeq: seq, MaxCommitTS: maxTS, CheckpointID: ckptID,
 		CreatedAt: time.Now().UnixMicro(),
 	}
@@ -197,7 +195,7 @@ func (p *Partition) saveTxnIDs() error {
 	// Rewrite the table: the range delete drops expired ids, and the sets that
 	// follow it in the same batch win over it.
 	prefix := p.txnIDPrefix()
-	_ = b.DeleteRange(prefix, encoding.PrefixEnd(prefix), nil)
+	_ = b.DeleteRange(lowerBound(prefix), lowerBound(encoding.PrefixEnd(prefix)))
 	for id, c := range p.recent {
 		k := p.txnIDKey(id)
 		if c.wall.Before(cutoff) {
@@ -206,16 +204,16 @@ func (p *Partition) saveTxnIDs() error {
 		}
 		v := binary.BigEndian.AppendUint64(nil, c.ts)
 		v = binary.BigEndian.AppendUint64(v, uint64(c.wall.UnixMicro()))
-		_ = b.Set(k, v, nil)
+		_ = b.Set(k, v)
 	}
 	p.mu.Unlock()
-	return b.Commit(pebble.NoSync)
+	return b.Commit()
 }
 
 // loadTxnIDs reads system table 4 during takeover, dropping expired ids.
 func (p *Partition) loadTxnIDs() error {
 	prefix := p.txnIDPrefix()
-	it, err := p.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: encoding.PrefixEnd(prefix)})
+	it, err := p.db.NewIter(lowerBound(prefix), lowerBound(encoding.PrefixEnd(prefix)))
 	if err != nil {
 		return err
 	}
@@ -254,7 +252,7 @@ func (p *Partition) gcVersions() (int, error) {
 		return 0, nil
 	}
 	lower := encoding.PartitionPrefix(p.id)
-	it, err := p.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: encoding.PrefixEnd(lower)})
+	it, err := p.db.NewIter(lowerBound(lower), lowerBound(encoding.PrefixEnd(lower)))
 	if err != nil {
 		return 0, err
 	}
@@ -284,10 +282,10 @@ func (p *Partition) gcVersions() (int, error) {
 				continue
 			}
 		}
-		_ = b.Delete(it.Key(), nil)
+		_ = b.Delete(it.Key())
 		dropped++
 		if b.Len() > 4<<20 {
-			if err := b.Commit(pebble.NoSync); err != nil {
+			if err := b.Commit(); err != nil {
 				return dropped, err
 			}
 			b = p.db.NewBatch()
@@ -296,7 +294,7 @@ func (p *Partition) gcVersions() (int, error) {
 	if err := it.Error(); err != nil {
 		return dropped, err
 	}
-	return dropped, b.Commit(pebble.NoSync)
+	return dropped, b.Commit()
 }
 
 // background runs periodic work: checkpoints, lease expiry, id expiry,

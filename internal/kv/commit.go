@@ -6,8 +6,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/cockroachdb/pebble"
-
 	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/objstore"
 	"github.com/salesstair-01/001/internal/wal"
@@ -219,10 +217,10 @@ func (p *Partition) flush(batch []*commitReq) error {
 	pb := p.db.NewBatch()
 	for _, r := range batch {
 		for _, w := range r.rec.Writes {
-			_ = pb.Set(encoding.MVCCKey(w.Key, r.rec.CommitTS), w.Value, nil)
+			_ = pb.Set(encoding.MVCCKey(w.Key, r.rec.CommitTS), w.Value)
 		}
 	}
-	if aerr := pb.Commit(pebble.NoSync); aerr != nil {
+	if aerr := pb.Commit(); aerr != nil {
 		p.applyMu.Unlock()
 		// The commit is durable but this owner can no longer serve it; a new
 		// owner will replay it. Report the outcome as unknown.

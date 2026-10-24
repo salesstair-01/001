@@ -484,3 +484,36 @@ func TestSnapshotOnEmptyPartitionIsRepeatable(t *testing.T) {
 		_ = p.Rollback(p.epoch, reader)
 	}
 }
+
+// A manifest listing engine files from before the v2 comparer (format 0) is
+// refused at takeover and restore, without fencing its owner; one that only
+// has WAL is taken over and upgraded.
+func TestManifestFormat(t *testing.T) {
+	ctx := context.Background()
+	s := objstore.NewMem()
+	old := Manifest{Epoch: 3, Owner: "v1", Files: []FileRef{{Name: "000005.sst", Object: "x"}}}
+	if err := s.PutIfAbsent(ctx, manifestKey(pid, 1), old.encode()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Takeover(ctx, testConfig(t, s, "a"), pid)
+	if err == nil || !strings.Contains(err.Error(), "manifest format 0") {
+		t.Fatalf("takeover of a format-0 manifest: %v", err)
+	}
+	if _, err := s.Get(ctx, manifestKey(pid, 2)); !errors.Is(err, objstore.ErrNotFound) {
+		t.Fatalf("refused takeover wrote manifest 2: %v", err)
+	}
+
+	s = objstore.NewMem()
+	walOnly := Manifest{Epoch: 3, Owner: "v1"}
+	if err := s.PutIfAbsent(ctx, manifestKey(pid, 1), walOnly.encode()); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Takeover(ctx, testConfig(t, s, "a"), pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if p.manifest.Format != manifestFormat {
+		t.Fatalf("format %d after takeover", p.manifest.Format)
+	}
+}

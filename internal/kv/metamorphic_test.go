@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/objstore"
 )
 
@@ -490,7 +491,7 @@ func (r *metaRunner) run(op metaOp) string {
 	case opGet:
 		keys := make([][]byte, len(op.keys))
 		for i, k := range op.keys {
-			keys[i] = key(k)
+			keys[i] = metaUserKey(k)
 		}
 		vs, err := p.Get(p.Epoch(), id, keys, ro)
 		if err != nil {
@@ -504,7 +505,7 @@ func (r *metaRunner) run(op metaOp) string {
 	case opScan:
 		// Page through with the limit, as query engines do.
 		var rows []string
-		start, end := key(op.lo), key(op.hi)
+		start, end := metaUserKey(op.lo), metaUserKey(op.hi)
 		for {
 			kvs, resume, err := p.Scan(p.Epoch(), id, start, end, op.limit, ro)
 			if err != nil {
@@ -528,7 +529,7 @@ func (r *metaRunner) run(op metaOp) string {
 	case opMutate:
 		muts := make([]Mutation, len(op.muts))
 		for i, mu := range op.muts {
-			muts[i] = Mutation{Op: mu.op, Key: key(mu.key)}
+			muts[i] = Mutation{Op: mu.op, Key: metaUserKey(mu.key)}
 			if mu.op != OpDelete {
 				muts[i].Value = []byte(mu.val)
 			}
@@ -576,9 +577,21 @@ func (r *metaRunner) run(op metaOp) string {
 	return "?"
 }
 
+// metaUserKey returns user key i of the run: raw bytes, each key a prefix of
+// the next ("", "\x00", "a", "a\x00", "aa", ...), so every version of a key
+// must sort before the longer keys (issue #3), and "a\x00" sits right
+// where a seek past "a"'s versions lands.
+func metaUserKey(i int) []byte {
+	k := append(encoding.Prefix(pid, encoding.FirstUserTableID, 0), strings.Repeat("a", i/2)...)
+	if i%2 == 1 {
+		k = append(k, 0)
+	}
+	return k
+}
+
 func keyIndex(k []byte) int {
 	for i := 0; i < metaKeys+1; i++ {
-		if bytes.Equal(k, key(i)) {
+		if bytes.Equal(k, metaUserKey(i)) {
 			return i
 		}
 	}

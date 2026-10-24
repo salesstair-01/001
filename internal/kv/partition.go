@@ -12,8 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/pebble"
-
 	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/objstore"
 	"github.com/salesstair-01/001/internal/wal"
@@ -124,21 +122,6 @@ func (c *Config) withDefaults() Config {
 	return d
 }
 
-// pebbleComparer is the default byte-wise comparer with Split marking the
-// 8-byte commit_ts suffix, so bloom filters and prefix seeks ignore versions.
-var pebbleComparer = func() *pebble.Comparer {
-	c := *pebble.DefaultComparer
-	c.Split = encoding.Split
-	c.Name = "s2z.mvcc.v1"
-	return &c
-}()
-
-type quietLogger struct{}
-
-func (quietLogger) Infof(string, ...interface{})      {}
-func (quietLogger) Errorf(f string, a ...interface{}) { slog.Error(fmt.Sprintf(f, a...)) }
-func (quietLogger) Fatalf(f string, a ...interface{}) { panic(fmt.Sprintf(f, a...)) }
-
 type pendingWrite struct {
 	ts    uint64
 	value []byte
@@ -156,7 +139,7 @@ type Partition struct {
 	cfg   Config
 	store objstore.Store
 	log   *slog.Logger
-	db    *pebble.DB
+	db    engine
 	dir   string
 
 	// mu protects everything below it except where noted.
@@ -235,8 +218,12 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	if err != nil {
 		return nil, fmt.Errorf("takeover: read manifest: %w", err)
 	}
+	if err := m.checkFormat(); err != nil {
+		return nil, fmt.Errorf("takeover: manifest %d: %w", n, err)
+	}
 	// 2. Write manifest/N+1: same content, epoch + 1, put-if-absent.
 	next := *m
+	next.Format = manifestFormat
 	next.Epoch = m.Epoch + 1
 	next.Owner = cfg.OwnerID
 	next.CreatedAt = time.Now().UnixMicro()
@@ -276,9 +263,9 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	downloaded := time.Since(start)
 	p.cacheHits = hits
 	p.cache.evict()
-	p.db, err = pebble.Open(p.dir, p.pebbleOptions())
+	p.db, err = openEngine(p.dir, p.engineOptions())
 	if err != nil {
-		return nil, fmt.Errorf("takeover: open pebble: %w", err)
+		return nil, fmt.Errorf("takeover: open engine: %w", err)
 	}
 	p.maxCommitTS = next.MaxCommitTS
 	if err := p.loadTxnIDs(); err != nil {
@@ -392,7 +379,7 @@ func (p *Partition) replaySegment(b []byte) error {
 	batch := p.db.NewBatch()
 	for _, r := range seg.Records {
 		for _, w := range r.Writes {
-			if err := batch.Set(encoding.MVCCKey(w.Key, r.CommitTS), w.Value, nil); err != nil {
+			if err := batch.Set(encoding.MVCCKey(w.Key, r.CommitTS), w.Value); err != nil {
 				return err
 			}
 		}
@@ -401,7 +388,7 @@ func (p *Partition) replaySegment(b []byte) error {
 		}
 		p.recent[r.TxnID] = committedTxn{ts: r.CommitTS, wall: time.UnixMicro(r.WallMicros)}
 	}
-	return batch.Commit(pebble.NoSync)
+	return batch.Commit()
 }
 
 // putWithRetry writes a put-if-absent object, retrying the same content on

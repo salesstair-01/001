@@ -30,6 +30,7 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | `internal/objstore` | object-store client: MinIO, in-memory, seeded fault injection |
 | `internal/wal` | WAL segment format with CRC-32C |
 | `internal/kv` | the KV owner: takeover, group commit, fencing, checkpoints, transactions, MVCC GC |
+| `internal/kv/engine.go` | the local LSM behind an interface: Pebble v2, WAL off, MVCC comparer `s2z.mvcc.v2`, format pinned |
 | `internal/kvrpc` | gRPC API (gob codec, no codegen) and error mapping |
 | `internal/sqlengine` | go-mysql-server provider, catalog in system table 1, tables, PK index, `TransactionSession` |
 | `internal/directory` | the directory service, its client, the engine's `Router`, and the node `Agent` |
@@ -48,6 +49,16 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 
 Object layout per partition: `p/<id>/manifest/<N>`, `p/<id>/wal/<seq>`,
 `p/<id>/sst/<uuid>.sst`, `p/<id>/meta/<checkpoint>/<pebble file>`.
+
+The engine is Pebble v2, used only through `internal/kv/engine.go`, so it can
+be replaced by an object-store-aware LSM later. Its comparer orders keys by
+user key and then by version, so one user key may be a prefix of another. Every
+manifest records the format of the files it lists (`"format": 2`). A build
+refuses a manifest whose files it cannot open, rather than misreading them.
+Manifests written before Pebble v2 (no `format` field) list files made with the
+old byte-wise comparer. Those partitions have to be dumped with the old build
+and loaded into new ones. A partition that only has WAL is taken over and
+upgraded as it is.
 
 ## Run it
 

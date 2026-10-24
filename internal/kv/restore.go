@@ -12,8 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/pebble"
-
 	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/objstore"
 	"github.com/salesstair-01/001/internal/wal"
@@ -114,6 +112,9 @@ func Restore(ctx context.Context, s objstore.Store, src, dst uint64, at time.Tim
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
 	}
+	if err := m.checkFormat(); err != nil {
+		return nil, fmt.Errorf("restore: manifest %d: %w", from.N, err)
+	}
 
 	work, err := os.MkdirTemp(dataDir, fmt.Sprintf("restore-%d-", dst))
 	if err != nil {
@@ -135,10 +136,7 @@ func Restore(ctx context.Context, s objstore.Store, src, dst uint64, at time.Tim
 			return nil, err
 		}
 	}
-	opts := func() *pebble.Options {
-		return &pebble.Options{Comparer: pebbleComparer, DisableWAL: true, Logger: quietLogger{}}
-	}
-	sdb, err := pebble.Open(srcDir, opts())
+	sdb, err := openEngine(srcDir, engineOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("restore: open checkpoint: %w", err)
 	}
@@ -167,7 +165,7 @@ func Restore(ctx context.Context, s objstore.Store, src, dst uint64, at time.Tim
 				break
 			}
 			for _, w := range r.Writes {
-				if err := batch.Set(encoding.MVCCKey(w.Key, r.CommitTS), w.Value, nil); err != nil {
+				if err := batch.Set(encoding.MVCCKey(w.Key, r.CommitTS), w.Value); err != nil {
 					return nil, err
 				}
 			}
@@ -177,20 +175,20 @@ func Restore(ctx context.Context, s objstore.Store, src, dst uint64, at time.Tim
 				res.MaxCommitTS = r.CommitTS
 			}
 		}
-		if err := batch.Commit(pebble.NoSync); err != nil {
+		if err := batch.Commit(); err != nil {
 			return nil, err
 		}
 	}
 
 	// 2. Copy every version under the new partition id.
 	dstDir := filepath.Join(work, "dst")
-	ddb, err := pebble.Open(dstDir, opts())
+	ddb, err := openEngine(dstDir, engineOptions{})
 	if err != nil {
 		return nil, err
 	}
 	defer ddb.Close()
 	oldP, newP := encoding.PartitionPrefix(src), encoding.PartitionPrefix(dst)
-	it, err := sdb.NewIter(nil)
+	it, err := sdb.NewIter(nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -202,12 +200,12 @@ func Restore(ctx context.Context, s objstore.Store, src, dst uint64, at time.Tim
 			return nil, fmt.Errorf("restore: key %x is not in partition %d", k, src)
 		}
 		nk := append(append([]byte(nil), newP...), k[len(oldP):]...)
-		if err := batch.Set(nk, it.Value(), nil); err != nil {
+		if err := batch.Set(nk, it.Value()); err != nil {
 			it.Close()
 			return nil, err
 		}
 		if batch.Len() > 4<<20 {
-			if err := batch.Commit(pebble.NoSync); err != nil {
+			if err := batch.Commit(); err != nil {
 				it.Close()
 				return nil, err
 			}
@@ -217,7 +215,7 @@ func Restore(ctx context.Context, s objstore.Store, src, dst uint64, at time.Tim
 	if err := it.Close(); err != nil {
 		return nil, err
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := batch.Commit(); err != nil {
 		return nil, err
 	}
 	if err := ddb.Flush(); err != nil {
@@ -253,7 +251,7 @@ func Restore(ctx context.Context, s objstore.Store, src, dst uint64, at time.Tim
 		}
 		files = append(files, FileRef{Name: name, Object: obj, Size: int64(len(data))})
 	}
-	nm := Manifest{Owner: "restore", Files: files, MaxCommitTS: res.MaxCommitTS, CheckpointID: ckptID, CreatedAt: time.Now().UnixMicro()}
+	nm := Manifest{Format: manifestFormat, Owner: "restore", Files: files, MaxCommitTS: res.MaxCommitTS, CheckpointID: ckptID, CreatedAt: time.Now().UnixMicro()}
 	if err := s.PutIfAbsent(ctx, manifestKey(dst, 1), nm.encode()); err != nil {
 		return nil, fmt.Errorf("restore: write manifest of partition %d: %w", dst, err)
 	}

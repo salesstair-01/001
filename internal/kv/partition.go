@@ -64,6 +64,13 @@ type Config struct {
 	// partition whose manifest lists remote SSTs reads them either way.
 	RemoteSSTs       bool
 	RemoteCacheBytes int64
+	// RemoteLowerLevelsOnly keeps L0–L4 local, so recent data is read from
+	// local files, and puts only L5–L6, most of the data, on the store.
+	RemoteLowerLevelsOnly bool
+	// RemoteWarmers is how many tables a wake warms at once in the
+	// background, loading their index blocks so that a first read costs one
+	// GET (default 8, <0 disables warming).
+	RemoteWarmers int
 
 	res *nodeResources // shared by a node's partitions; set by NewNode
 
@@ -113,6 +120,9 @@ func (c *Config) withDefaults() Config {
 	}
 	if d.RemoteCacheBytes == 0 {
 		d.RemoteCacheBytes = 64 << 20
+	}
+	if d.RemoteWarmers == 0 {
+		d.RemoteWarmers = 8
 	}
 	if d.BlockCacheBytes == 0 {
 		d.BlockCacheBytes = 256 << 20
@@ -191,6 +201,7 @@ type Partition struct {
 	remoteMu   sync.Mutex
 	remoteObjs map[uint64]RemoteRef
 	obsolete   []string
+	warmed     chan struct{} // closed when warmRemote is done
 
 	queueSignal chan struct{}
 	stopCh      chan struct{}
@@ -345,6 +356,12 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	p.wg.Add(2)
 	go p.flusher()
 	go p.background()
+	p.warmed = make(chan struct{})
+	if (p.cfg.RemoteSSTs || len(next.Remote) > 0) && p.cfg.RemoteWarmers > 0 {
+		go p.warmRemote()
+	} else {
+		close(p.warmed)
+	}
 	p.log.Info("took over partition", "manifest", p.manifestN, "replayed_through", seq-1, "max_commit_ts", p.maxCommitTS,
 		"files", len(next.Files), "cache_hits", hits, "download", downloaded.Round(time.Millisecond))
 	cache := "warm"

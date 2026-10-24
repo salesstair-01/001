@@ -32,6 +32,9 @@ type engine interface {
 	Flush() error
 	// Checkpoint hard-links a consistent copy of the engine's files into dir.
 	Checkpoint(dir string) error
+	// RemoteTables returns the key span [first, last] of every table kept
+	// on the object store.
+	RemoteTables() ([][2][]byte, error)
 	Close() error
 }
 
@@ -129,6 +132,9 @@ func openEngine(dir string, o engineOptions) (engine, error) {
 		opts.Experimental.SecondaryCacheSizeBytes = r.cacheBytes
 		if r.epoch != 0 {
 			opts.Experimental.CreateOnShared = remote.CreateOnSharedAll
+			if r.lowerOnly {
+				opts.Experimental.CreateOnShared = remote.CreateOnSharedLower
+			}
 			opts.Experimental.CreateOnSharedLocator = remoteLocator(r.epoch)
 		}
 	}
@@ -168,6 +174,22 @@ func (e pebbleEngine) NewBatch() engineBatch       { return pebbleBatch{e.db.New
 func (e pebbleEngine) Flush() error                { return e.db.Flush() }
 func (e pebbleEngine) Checkpoint(dir string) error { return e.db.Checkpoint(dir) }
 func (e pebbleEngine) Close() error                { return e.db.Close() }
+
+func (e pebbleEngine) RemoteTables() ([][2][]byte, error) {
+	levels, err := e.db.SSTables()
+	if err != nil {
+		return nil, err
+	}
+	var out [][2][]byte
+	for _, level := range levels {
+		for _, t := range level {
+			if t.BackingType != pebble.BackingTypeLocal {
+				out = append(out, [2][]byte{t.Smallest.UserKey, t.Largest.UserKey})
+			}
+		}
+	}
+	return out, nil
+}
 
 type pebbleBatch struct{ b *pebble.Batch }
 

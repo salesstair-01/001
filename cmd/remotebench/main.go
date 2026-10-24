@@ -35,6 +35,8 @@ func main() {
 	work := flag.String("work", "", "local working directory (default: a temp dir)")
 	rowSize := flag.Int("row", 1024, "bytes per row value")
 	reads := flag.Int("reads", 200, "random point reads after wake")
+	warmers := flag.Int("warmers", 0, "tables warmed at once after a wake (0 = the default)")
+	only := flag.String("modes", "", "run only modes whose name contains this")
 	latency := flag.Duration("latency", 0, "added to every object-store request, to model S3 (MinIO on loopback answers in well under 1 ms)")
 	flag.Parse()
 
@@ -46,15 +48,23 @@ func main() {
 	}
 	defer os.RemoveAll(dir)
 
-	fmt.Println("| size | mode | load | load PUTs (SST/other) | load MB up | files local/remote | cold wake | wake GETs | wake MB down | first read | point p50/p99 cold | point p50/p99 warm | scan 1000 | read GETs | local disk |")
+	fmt.Println("| size | mode | load | SST PUTs | MB up | files local/remote | cold wake | MB down at wake | warmed after | point p50/p99 at wake | point p50/p99 after warming | repeat p50 | scan 1000 | read GETs | local disk |")
 	fmt.Println("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+	modes := []struct {
+		name          string
+		remote, lower bool
+	}{
+		{"upload at checkpoint", false, false},
+		{"remote SSTs", true, false},
+		{"remote L5–L6 only", true, true},
+	}
 	for _, field := range strings.Split(*sizes, ",") {
 		var mb int
 		fmt.Sscan(field, &mb)
-		for _, remote := range []bool{false, true} {
-			mode := "upload at checkpoint"
-			if remote {
-				mode = "remote SSTs"
+		for _, md := range modes {
+			mode, remote := md.name, md.remote
+			if !strings.Contains(mode, *only) {
+				continue
 			}
 			minio, err := objstore.NewMinIO(ctx, objstore.MinIOConfig{
 				Endpoint: *endpoint, AccessKey: "minioadmin", SecretKey: "minioadmin", Bucket: *bucket,
@@ -66,6 +76,7 @@ func main() {
 				return kv.Config{
 					Store: store, DataDir: filepath.Join(dir, name), Logger: quiet, GCGrace: time.Hour,
 					OwnerID: name, CacheMaxBytes: -1, RemoteSSTs: remote, PutRate: -1,
+					RemoteLowerLevelsOnly: md.lower, RemoteWarmers: *warmers,
 				}
 			}
 
@@ -101,6 +112,8 @@ func main() {
 			p, err = kv.Takeover(ctx, cfg("wake"), 1)
 			must(err)
 			wake := time.Since(start)
+			warmedCh := make(chan time.Duration, 1)
+			go func(c <-chan struct{}) { <-c; warmedCh <- time.Since(start) }(p.RemoteWarmed())
 			wakeOps := store.snapshot()
 			files, remoteFiles := p.FileCount(), p.RemoteCount()
 
@@ -117,18 +130,27 @@ func main() {
 				}
 				return time.Since(t)
 			}
-			first := readAt(rows / 2)
 			rng := mrand.New(mrand.NewSource(1))
-			picks := make([]int, *reads)
-			for i := range picks {
-				picks[i] = rng.Intn(rows)
+			pick := func() []int {
+				out := make([]int, *reads)
+				for i := range out {
+					out[i] = rng.Intn(rows)
+				}
+				return out
 			}
-			var cold, warm []time.Duration
-			for _, i := range picks {
-				cold = append(cold, readAt(i))
+			// Reads right after the wake, while warming runs; then, once
+			// warming is done, reads of other rows; then the first rows again.
+			first := pick()
+			var atWake, afterWarm, repeat []time.Duration
+			for _, i := range first {
+				atWake = append(atWake, readAt(i))
 			}
-			for _, i := range picks {
-				warm = append(warm, readAt(i))
+			warmedAfter := <-warmedCh
+			for _, i := range pick() {
+				afterWarm = append(afterWarm, readAt(i))
+			}
+			for _, i := range first {
+				repeat = append(repeat, readAt(i))
 			}
 			t := time.Now()
 			kvs, _, err := p.Scan(p.Epoch(), id, key(rows/3), key(rows), 1000, kv.ReadOptions{Stmt: 1})
@@ -149,13 +171,12 @@ func main() {
 				must(minio.Delete(ctx, k))
 			}
 
-			fmt.Printf("| %d MB | %s | %v | %d/%d | %.0f | %d/%d | %v | %d | %.1f | %v | %v/%v | %v/%v | %v | %d | %.0f MB |\n",
+			fmt.Printf("| %d MB | %s | %v | %d | %.0f | %d/%d | %v | %.1f | %v | %v/%v | %v/%v | %v | %v | %d | %.0f MB |\n",
 				mb, mode, load.Round(time.Millisecond),
-				loadOps.puts["sst"], loadOps.puts["other"], float64(loadOps.upBytes)/(1<<20),
+				loadOps.puts["sst"], float64(loadOps.upBytes)/(1<<20),
 				files, remoteFiles, wake.Round(time.Millisecond),
-				wakeOps.gets+wakeOps.ranges, float64(wakeOps.downBytes)/(1<<20),
-				first.Round(time.Microsecond),
-				pct(cold, 50), pct(cold, 99), pct(warm, 50), pct(warm, 99),
+				float64(wakeOps.downBytes)/(1<<20), warmedAfter.Round(time.Millisecond),
+				pct(atWake, 50), pct(atWake, 99), pct(afterWarm, 50), pct(afterWarm, 99), pct(repeat, 50),
 				scan.Round(time.Microsecond), readOps.gets+readOps.ranges, float64(disk)/(1<<20))
 		}
 	}

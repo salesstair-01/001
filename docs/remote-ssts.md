@@ -94,6 +94,49 @@ Uploads are paced by the per-partition PUT quota in both modes.
 - **An owed compaction now runs after the wake, in the background.** It
   costs GETs and PUTs, and it replaces cached tables with new, uncached ones.
 
+### Warming and hybrid placement (20 ms per request)
+
+Two follow-ups aimed at the cold-read cost:
+
+- **Background warming** (`RemoteWarmers`, default 8). After a wake, the
+  owner opens every remote table, eight at a time, so that their footers and
+  index blocks are in the block cache. Reads are served meanwhile.
+- **Hybrid placement** (`RemoteLowerLevelsOnly`). Pebble's
+  `CreateOnSharedLower` keeps L0–L4 local, uploaded at checkpoints as
+  before, and puts only L5–L6 on the store.
+
+| size | mode | cold wake | MB down at wake | warming done | point p50 / p99 at wake | point p50 / p99 after warming | repeat p50 | scan 1,000 rows | local disk |
+|---|---|---|---|---|---|---|---|---|---|
+| 100 MB | upload at checkpoint | 440 ms | 58 | – | 31 / 101 µs | 19 / 98 µs | 5 µs | 9 ms | 62 MB |
+| 100 MB | remote SSTs | 192 ms | 0.2 | 0.5 s | 23 / 72 ms | 23 / 72 ms * | 23 ms * | 53 ms | 64 MB |
+| 100 MB | remote L5–L6 only | 364 ms | 58 | – | 16 / 73 µs | 14 / 58 µs | 5 µs | 2.6 ms | 58 MB |
+| 500 MB | upload at checkpoint | 1,117 ms | 289 | – | 39 / 306 µs | 28 / 140 µs | 6 µs | 6.8 ms | 289 MB |
+| 500 MB | remote SSTs | 271 ms | 0.8 | 1.6 s | 23 / 78 ms | 23 / 48 ms | 8 µs | 188 ms | 64 MB |
+| 500 MB | remote L5–L6 only | 677 ms | 119 | 1.1 s | 23 / 70 ms | 0.14 / 26 ms | 12 µs | 126 ms | 182 MB |
+| 1,000 MB | upload at checkpoint | 1,920 ms | 578 | – | 30 / 80 µs | 30 / 229 µs | 6 µs | 3.3 ms | 578 MB |
+| 1,000 MB | remote SSTs | 264 ms | 0.9 | 3.2 s | 26 / 77 ms | 24 / 48 ms | 9 µs | 101 ms | 64 MB |
+| 1,000 MB | remote L5–L6 only | 1,432 ms | 418 | 1.8 s | 0.06 / 80 ms | 0.06 / 25 ms | 9 µs | 2.8 ms | 481 MB |
+
+\* The compaction owed at this wake rewrote the tables after they had been
+warmed.
+
+- **Warming roughly halves cold reads.** A cold point read costs one GET
+  (about 23 ms p50 at 20 ms per request) instead of two or three in
+  sequence (47–49 ms before warming), even while warming is still running.
+  The p99 drops from about 75 ms to 48 ms. Warming finishes 0.5–3.2 s after
+  the wake.
+  - With 32 warmers it finishes in 1.5 s at 1 GB, but reads made during
+    warming slow to 45 ms p50 because they compete for the store. Eight is
+    the default.
+- **Hybrid placement doesn't pay off for our load pattern.** After a bulk
+  load, with one compaction at a time, most data still sits in L0–L4:
+  - at 100 MB nothing was remote;
+  - at 1 GB, 278 of 321 SSTs were local.
+
+  A wake then downloads most of the database anyway (418 MB, 1.4 s at 1 GB).
+  Which data goes remote follows Pebble's level layout, not the data's age.
+  The option remains, but all-remote with warming is the better choice.
+
 ## Pebble findings
 
 1. **Open waited for compactions (fixed for both modes).** `pebble.Open`
@@ -139,7 +182,9 @@ Uploads are paced by the per-partition PUT quota in both modes.
   - restarts with GC (every stored object is listed or scheduled);
   - a fenced owner that keeps flushing under its own epoch;
   - the sweep;
-  - restore.
+  - restore;
+  - warming (first reads cost at most one GET each);
+  - hybrid placement (a wake reads both local and remote SSTs).
 - A `remote-ssts` configuration in the metamorphic test.
 - `TestFaultInjectionRemoteSSTs`, where faults also hit flushes and
   compactions.
@@ -161,13 +206,17 @@ Uploads are paced by the per-partition PUT quota in both modes.
 - **The Pebble options are experimental and can change between releases.**
   They are confined to `engine.go` and `engine_remote.go`.
 
-## Options worth trying next
+## Recommendation and next steps
 
-- **Hybrid placement.** `CreateOnSharedLower` keeps L0–L4 local and puts
-  only L5–L6 (most of the data) remote. Recent data stays local and cheap to
-  read, and wake stays small. Our checkpoint already handles a mix of local
-  and remote SSTs.
-- **Warm the cache in the background.** Prefetch index and filter blocks
-  after a wake, so that a cold point read costs one GET, not three.
-- **Per-tenant policy.** Choose the mode per tenant by size and wake
-  frequency.
+- **Keep downloading on wake as the default.** Offer remote SSTs with
+  warming as a per-tenant setting for tenants that are large, or that wake
+  rarely and are read lightly. For those tenants, wake time and node
+  density matter more than about 25 ms on the first read of each block.
+  - At 20 ms per request the crossover is roughly 100–200 MB: below that,
+    downloading the whole tenant is about as fast as a remote wake.
+- **Before using it in production:**
+  - stream uploads instead of buffering whole SSTs;
+  - store the GC schedule durably;
+  - report the catalog bug to Pebble.
+- **Not pursued: hybrid placement.** It would need a placement rule based on
+  data age rather than Pebble levels.

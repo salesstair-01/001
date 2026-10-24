@@ -56,6 +56,7 @@ func (p *Partition) engineOptions() engineOptions {
 		}
 		if p.cfg.RemoteSSTs {
 			r.epoch = p.epoch
+			r.lowerOnly = p.cfg.RemoteLowerLevelsOnly
 		}
 		for _, ref := range p.manifest.Remote {
 			r.sizes[ref.Object] = ref.Size

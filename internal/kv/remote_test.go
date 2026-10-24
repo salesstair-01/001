@@ -329,3 +329,97 @@ func TestRemoteSSTsRestore(t *testing.T) {
 		}
 	}
 }
+
+// After the background warming, a first read of a row costs at most one
+// ranged GET (its data block): table footers and index blocks are cached.
+// (On data this small, the compaction a wake runs also warms the cache, so
+// this checks the property, not warming's share of it; cmd/remotebench
+// measures that.)
+func TestRemoteSSTsWarming(t *testing.T) {
+	ctx := context.Background()
+	mem := objstore.NewMem()
+	p, err := Takeover(ctx, remoteTestConfig(t, mem, "a"), pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fill(t, p, 0, 20000, "v")
+	checkpoint(t, p)
+	if len(p.manifest.Remote) < 4 {
+		t.Fatalf("only %d remote SSTs; the test needs several", len(p.manifest.Remote))
+	}
+	p.Close()
+
+	cs := newCounting(mem, "/rsst/")
+	p, err = Takeover(ctx, remoteTestConfig(t, cs, "b"), pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	select {
+	case <-p.RemoteWarmed():
+	case <-time.After(10 * time.Second):
+		t.Fatal("warming did not finish")
+	}
+	if cs.get("range") == 0 {
+		t.Fatal("warming made no reads")
+	}
+	before := cs.get("range")
+	reads := 0
+	for i := 17; i < 20000; i += 997 {
+		if got := get(t, p, i); got != val("v", i) {
+			t.Fatalf("key %d = %.20q", i, got)
+		}
+		reads++
+	}
+	if n := cs.get("range") - before; n > reads {
+		t.Fatalf("%d first reads made %d ranged GETs, want at most one each", reads, n)
+	}
+}
+
+// With only the lower levels remote, recent data stays in local SSTs that
+// checkpoints upload as before, and a wake reads both kinds.
+func TestRemoteSSTsLowerLevelsOnly(t *testing.T) {
+	ctx := context.Background()
+	s := objstore.NewMem()
+	cfg := remoteTestConfig(t, s, "a")
+	cfg.RemoteLowerLevelsOnly = true
+	p, err := Takeover(ctx, cfg, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fill(t, p, 0, 3000, "old")
+	// Data reaches L5–L6 only once compactions have moved it down, which
+	// takes a while under -race: checkpoint until both kinds are listed.
+	var local int
+	for deadline := time.Now().Add(30 * time.Second); ; {
+		fill(t, p, 0, 10, "new")
+		checkpoint(t, p)
+		local = 0
+		for _, f := range p.manifest.Files {
+			if strings.HasSuffix(f.Name, ".sst") {
+				local++
+			}
+		}
+		if local > 0 && len(p.manifest.Remote) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("want local and remote SSTs, got %d local, %d remote", local, len(p.manifest.Remote))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	p.Close()
+
+	cfg = remoteTestConfig(t, s, "b")
+	cfg.RemoteLowerLevelsOnly = true
+	p, err = Takeover(ctx, cfg, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	for i, want := range map[int]string{0: val("new", 0), 9: val("new", 9), 10: val("old", 10), 2999: val("old", 2999)} {
+		if got := get(t, p, i); got != want {
+			t.Fatalf("key %d = %.20q, want %.20q", i, got, want)
+		}
+	}
+}

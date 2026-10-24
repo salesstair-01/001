@@ -47,6 +47,7 @@ type remoteConfig struct {
 	// nothing remotely (restore reads remote objects but writes locally).
 	epoch      uint64
 	cacheBytes int64 // local cache of remote blocks; 0 = none
+	lowerOnly  bool  // only L5 and L6 remote; L0–L4 stay local (uploaded at checkpoints)
 	sizes      map[string]int64
 	onCreate   func(RemoteRef)
 	onObsolete func(object string)

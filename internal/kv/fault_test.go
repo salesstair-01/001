@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,14 +29,33 @@ func TestFaultInjection(t *testing.T) {
 		}
 	}
 	for _, seed := range seeds {
-		if err := faultRun(t, seed); err != nil {
+		if err := faultRun(t, seed, false); err != nil {
 			t.Fatalf("seed %d: %v (replay with -fault-seed=%d)", seed, err, seed)
 		}
 	}
 }
 
-func takeoverRetry(t *testing.T, s objstore.Store, owner string) (*Partition, error) {
+// TestFaultInjectionRemoteSSTs is the same load with SSTs on the object store
+// (and small memtables, so faults also hit flushes and compactions).
+func TestFaultInjectionRemoteSSTs(t *testing.T) {
+	runs := *faultRuns / 4
+	for seed := int64(0); seed < int64(runs); seed++ {
+		if *faultSeed >= 0 && seed != *faultSeed {
+			continue
+		}
+		if err := faultRun(t, seed, true); err != nil {
+			t.Fatalf("seed %d: %v (replay with -run RemoteSSTs -fault-seed=%d)", seed, err, seed)
+		}
+	}
+}
+
+func takeoverRetry(t *testing.T, s objstore.Store, owner string, remote bool) (*Partition, error) {
 	cfg := testConfig(t, s, owner)
+	if remote {
+		cfg.RemoteSSTs = true
+		cfg.CacheMaxBytes = -1
+		cfg.MemTableBytes = 16 << 10
+	}
 	cfg.CommitRetryTimeout = 500 * time.Millisecond
 	cfg.Logger = discardLogger
 	var err error
@@ -48,13 +68,13 @@ func takeoverRetry(t *testing.T, s objstore.Store, owner string) (*Partition, er
 	return nil, fmt.Errorf("takeover %s: %w", owner, err)
 }
 
-func faultRun(t *testing.T, seed int64) error {
+func faultRun(t *testing.T, seed int64, remote bool) error {
 	rng := rand.New(rand.NewSource(seed))
 	mem := objstore.NewMem()
 	f := objstore.NewFaulty(mem, objstore.FaultConfig{
 		Seed: seed, FailProb: 0.1, DropResponseProb: 0.1, DelayProb: 0.5, MaxDelay: time.Millisecond,
 	})
-	a, err := takeoverRetry(t, f, "a")
+	a, err := takeoverRetry(t, f, "a", remote)
 	if err != nil {
 		return err
 	}
@@ -64,6 +84,9 @@ func faultRun(t *testing.T, seed int64) error {
 	acked := map[int]string{}
 	write := func(p *Partition, k int) bool {
 		v := fmt.Sprintf("v%d-%d", k, p.epoch)
+		if remote {
+			v += strings.Repeat("x", 1000) // fill memtables
+		}
 		if _, err := put(p, k, v); err != nil {
 			return false
 		}
@@ -95,7 +118,7 @@ func faultRun(t *testing.T, seed int64) error {
 		}
 	}()
 	time.Sleep(time.Duration(rng.Intn(4)) * time.Millisecond)
-	b, err := takeoverRetry(t, f, "b") // the second owner starts mid-load
+	b, err := takeoverRetry(t, f, "b", remote) // the second owner starts mid-load
 	if err != nil {
 		return err
 	}
@@ -111,7 +134,7 @@ func faultRun(t *testing.T, seed int64) error {
 	b.Close()
 
 	// Verify from a clean store view.
-	c, err := takeoverRetry(t, mem, "verify")
+	c, err := takeoverRetry(t, mem, "verify", remote)
 	if err != nil {
 		return err
 	}

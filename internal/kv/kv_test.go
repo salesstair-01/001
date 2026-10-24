@@ -196,6 +196,10 @@ func (s storeSwitch) List(ctx context.Context, p, a string) ([]string, error) {
 	return s.rest.List(ctx, p, a)
 }
 func (s storeSwitch) Delete(ctx context.Context, k string) error { return s.rest.Delete(ctx, k) }
+func (s storeSwitch) GetRange(ctx context.Context, k string, off, n int64) ([]byte, error) {
+	return s.rest.GetRange(ctx, k, off, n)
+}
+func (s storeSwitch) Size(ctx context.Context, k string) (int64, error) { return s.rest.Size(ctx, k) }
 
 func TestCrashBetweenSSTUploadAndManifest(t *testing.T) {
 	mem := objstore.NewMem()

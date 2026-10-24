@@ -24,6 +24,7 @@ func walPrefix(pid uint64) string         { return partitionRoot(pid) + "wal/" }
 func manifestKey(pid, n uint64) string    { return manifestPrefix(pid) + pad(n) }
 func walKey(pid, seq uint64) string       { return walPrefix(pid) + pad(seq) }
 func sstKey(pid uint64, id string) string { return partitionRoot(pid) + "sst/" + id + ".sst" }
+func remotePrefix(pid uint64) string      { return partitionRoot(pid) + "rsst/" }
 func metaKey(pid uint64, ckpt, name string) string {
 	return partitionRoot(pid) + "meta/" + ckpt + "/" + name
 }
@@ -54,13 +55,16 @@ const manifestFormat = 2
 
 // Manifest is the durable root of a partition.
 type Manifest struct {
-	Format            int       `json:"format,omitempty"`
-	Epoch             uint64    `json:"epoch"`
-	Owner             string    `json:"owner"`
-	Files             []FileRef `json:"files"` // live SSTs plus Pebble metadata files
-	ReplayAfterWALSeq uint64    `json:"replay_after_wal_seq"`
-	MaxCommitTS       uint64    `json:"max_commit_ts"`
-	CheckpointID      string    `json:"checkpoint_id,omitempty"`
+	Format int       `json:"format,omitempty"`
+	Epoch  uint64    `json:"epoch"`
+	Owner  string    `json:"owner"`
+	Files  []FileRef `json:"files"` // live SSTs plus Pebble metadata files
+	// Remote lists the SSTs Pebble keeps on the object store (RemoteSSTs);
+	// they are read in place, never downloaded.
+	Remote            []RemoteRef `json:"remote,omitempty"`
+	ReplayAfterWALSeq uint64      `json:"replay_after_wal_seq"`
+	MaxCommitTS       uint64      `json:"max_commit_ts"`
+	CheckpointID      string      `json:"checkpoint_id,omitempty"`
 	// CreatedAt is when the manifest was written (unix µs), so point-in-time
 	// restore can pick the newest state before a given time.
 	CreatedAt int64 `json:"created_at,omitempty"`

@@ -97,6 +97,34 @@ func (m *MinIO) Delete(ctx context.Context, key string) error {
 	return translate(m.c.RemoveObject(ctx, m.bucket, m.prefix+key, minio.RemoveObjectOptions{}))
 }
 
+func (m *MinIO) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
+	if n == 0 {
+		return []byte{}, nil
+	}
+	opts := minio.GetObjectOptions{}
+	if err := opts.SetRange(off, off+n-1); err != nil {
+		return nil, err
+	}
+	obj, err := m.c.GetObject(ctx, m.bucket, m.prefix+key, opts)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer obj.Close()
+	b := make([]byte, n)
+	if _, err := io.ReadFull(obj, b); err != nil {
+		return nil, translate(err)
+	}
+	return b, nil
+}
+
+func (m *MinIO) Size(ctx context.Context, key string) (int64, error) {
+	info, err := m.c.StatObject(ctx, m.bucket, m.prefix+key, minio.StatObjectOptions{})
+	if err != nil {
+		return 0, translate(err)
+	}
+	return info.Size, nil
+}
+
 func translate(err error) error {
 	if err == nil {
 		return nil

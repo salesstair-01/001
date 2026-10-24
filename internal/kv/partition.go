@@ -58,6 +58,13 @@ type Config struct {
 	PutRate         float64
 	PutBurst        int
 
+	// RemoteSSTs (spike) has Pebble write SSTs straight to the object store
+	// and read them lazily on wake (engine_remote.go); RemoteCacheBytes is
+	// the local cache of their blocks per partition (default 64 MiB). A
+	// partition whose manifest lists remote SSTs reads them either way.
+	RemoteSSTs       bool
+	RemoteCacheBytes int64
+
 	res *nodeResources // shared by a node's partitions; set by NewNode
 
 	Logger *slog.Logger
@@ -103,6 +110,9 @@ func (c *Config) withDefaults() Config {
 	}
 	if d.CacheMaxBytes == 0 {
 		d.CacheMaxBytes = 10 << 30
+	}
+	if d.RemoteCacheBytes == 0 {
+		d.RemoteCacheBytes = 64 << 20
 	}
 	if d.BlockCacheBytes == 0 {
 		d.BlockCacheBytes = 256 << 20
@@ -175,6 +185,12 @@ type Partition struct {
 	puts      *atomic.Int64      // object-store PUTs made
 	ownRes    bool               // cfg.res is this partition's own, closed with it
 	garbage   []garbageItem
+
+	// Remote SSTs, guarded by remoteMu: every known object by file number
+	// (from the manifest and from uploads), and objects Pebble dropped.
+	remoteMu   sync.Mutex
+	remoteObjs map[uint64]RemoteRef
+	obsolete   []string
 
 	queueSignal chan struct{}
 	stopCh      chan struct{}
@@ -263,6 +279,10 @@ func Takeover(ctx context.Context, cfg Config, pid uint64) (*Partition, error) {
 	downloaded := time.Since(start)
 	p.cacheHits = hits
 	p.cache.evict()
+	p.remoteObjs = map[uint64]RemoteRef{}
+	for _, r := range next.Remote {
+		p.remoteObjs[r.FileNum] = r
+	}
 	p.db, err = openEngine(p.dir, p.engineOptions())
 	if err != nil {
 		return nil, fmt.Errorf("takeover: open engine: %w", err)
@@ -505,6 +525,13 @@ func (p *Partition) FileCount() int {
 	p.ckptMu.Lock()
 	defer p.ckptMu.Unlock()
 	return len(p.manifest.Files)
+}
+
+// RemoteCount returns how many remote SSTs the current manifest lists.
+func (p *Partition) RemoteCount() int {
+	p.ckptMu.Lock()
+	defer p.ckptMu.Unlock()
+	return len(p.manifest.Remote)
 }
 
 // CacheHits returns how many checkpoint files the takeover took from the local cache.

@@ -37,7 +37,32 @@ func (r *nodeResources) close() {
 }
 
 func (p *Partition) engineOptions() engineOptions {
-	return engineOptions{cache: p.cfg.res.cache, memTableBytes: p.cfg.MemTableBytes}
+	o := engineOptions{cache: p.cfg.res.cache, memTableBytes: p.cfg.MemTableBytes}
+	if p.cfg.RemoteSSTs || len(p.manifest.Remote) > 0 {
+		r := &remoteConfig{
+			store: p.store, prefix: remotePrefix(p.id), creatorID: p.id + 1,
+			cacheBytes: p.cfg.RemoteCacheBytes, sizes: map[string]int64{},
+			timeout: p.cfg.CommitRetryTimeout,
+			onCreate: func(ref RemoteRef) {
+				p.remoteMu.Lock()
+				p.remoteObjs[ref.FileNum] = ref
+				p.remoteMu.Unlock()
+			},
+			onObsolete: func(obj string) {
+				p.remoteMu.Lock()
+				p.obsolete = append(p.obsolete, obj)
+				p.remoteMu.Unlock()
+			},
+		}
+		if p.cfg.RemoteSSTs {
+			r.epoch = p.epoch
+		}
+		for _, ref := range p.manifest.Remote {
+			r.sizes[ref.Object] = ref.Size
+		}
+		o.remote = r
+	}
+	return o
 }
 
 // fairStore is a partition's view of the object store: PUTs take a node-wide

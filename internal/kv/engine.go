@@ -7,6 +7,7 @@ import (
 	"math"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/objstorage/remote"
 
 	"github.com/salesstair-01/001/internal/encoding"
 )
@@ -53,8 +54,9 @@ type engineBatch interface {
 
 // engineOptions tune one engine instance.
 type engineOptions struct {
-	cache         *blockCache // nil = a private cache
-	memTableBytes int64       // 0 = the engine's default
+	cache         *blockCache   // nil = a private cache
+	memTableBytes int64         // 0 = the engine's default
+	remote        *remoteConfig // nil = every SST is local
 }
 
 // engineFormat is the on-disk format major version, pinned so that a Pebble
@@ -114,9 +116,29 @@ func openEngine(dir string, o engineOptions) (engine, error) {
 	if o.memTableBytes > 0 {
 		opts.MemTableSize = uint64(o.memTableBytes)
 	}
+	if r := o.remote; r != nil {
+		if err := fixCatalogMarker(dir); err != nil {
+			return nil, err
+		}
+		if r.sizes == nil {
+			r.sizes = map[string]int64{}
+		}
+		opts.Experimental.RemoteStorage = r
+		opts.Experimental.SecondaryCacheSizeBytes = r.cacheBytes
+		if r.epoch != 0 {
+			opts.Experimental.CreateOnShared = remote.CreateOnSharedAll
+			opts.Experimental.CreateOnSharedLocator = remoteLocator(r.epoch)
+		}
+	}
 	db, err := pebble.Open(dir, opts)
 	if err != nil {
 		return nil, err
+	}
+	if o.remote != nil {
+		if err := db.SetCreatorID(o.remote.creatorID); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return pebbleEngine{db}, nil
 }

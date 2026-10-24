@@ -62,3 +62,54 @@ func TestMinIOTakeoverAndFencing(t *testing.T) {
 		t.Fatal("the fenced owner's write must not exist")
 	}
 }
+
+// TestMinIORemoteSSTs runs remote SSTs against a real MinIO: SSTs written by
+// flushes and compactions, a wake that reads them with ranged GETs, and a
+// fenced owner flushing under its own epoch.
+func TestMinIORemoteSSTs(t *testing.T) {
+	ep := os.Getenv("MINIO_ENDPOINT")
+	if ep == "" {
+		t.Skip("MINIO_ENDPOINT not set")
+	}
+	ctx := context.Background()
+	s, err := objstore.NewMinIO(ctx, objstore.MinIOConfig{
+		Endpoint: ep, AccessKey: "minioadmin", SecretKey: "minioadmin", Bucket: "s2z-test",
+		Prefix: fmt.Sprintf("kv-remote-test-%d/", time.Now().UnixNano()),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := Takeover(ctx, remoteTestConfig(t, s, "a"), pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	fill(t, a, 0, 1000, "a")
+	checkpoint(t, a)
+	if len(a.manifest.Remote) == 0 {
+		t.Fatal("no remote SSTs")
+	}
+	b, err := Takeover(ctx, remoteTestConfig(t, s, "b"), pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	for _, i := range []int{0, 500, 999} {
+		if got := get(t, b, i); got != val("a", i) {
+			t.Fatalf("key %d = %.20q", i, got)
+		}
+	}
+	fill(t, b, 0, 1000, "b")
+	checkpoint(t, b)
+	if err := a.Checkpoint(ctx); err == nil {
+		t.Fatal("fenced owner wrote a manifest")
+	}
+	for _, r := range b.manifest.Remote {
+		if n, err := s.Size(ctx, r.Object); err != nil || n != r.Size {
+			t.Fatalf("%s: size %d (want %d), %v", r.Object, n, r.Size, err)
+		}
+	}
+	if got := get(t, b, 999); got != val("b", 999) {
+		t.Fatalf("key 999 = %.20q", got)
+	}
+}

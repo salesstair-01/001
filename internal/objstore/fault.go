@@ -22,6 +22,8 @@ const (
 	OpGet    Op = "get"
 	OpList   Op = "list"
 	OpDelete Op = "delete"
+	OpRange  Op = "range"
+	OpSize   Op = "size"
 )
 
 // FaultConfig sets fault probabilities. Each decision is derived from the seed,
@@ -148,6 +150,24 @@ func (f *Faulty) List(ctx context.Context, prefix, startAfter string) (keys []st
 		return e
 	})
 	return keys, err
+}
+
+func (f *Faulty) GetRange(ctx context.Context, key string, off, n int64) (b []byte, err error) {
+	err = f.run(ctx, OpRange, key, false, func() error {
+		var e error
+		b, e = f.inner.GetRange(ctx, key, off, n)
+		return e
+	})
+	return b, err
+}
+
+func (f *Faulty) Size(ctx context.Context, key string) (n int64, err error) {
+	err = f.run(ctx, OpSize, key, false, func() error {
+		var e error
+		n, e = f.inner.Size(ctx, key)
+		return e
+	})
+	return n, err
 }
 
 func (f *Faulty) Delete(ctx context.Context, key string) error {

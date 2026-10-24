@@ -38,6 +38,19 @@ func testStore(t *testing.T, s Store) {
 	if err := s.PutIfAbsent(ctx, "a/1", []byte("other")); err != ErrPreconditionFailed {
 		t.Fatalf("want 412, got %v", err)
 	}
+	// Ranged reads and sizes (remote SSTs read blocks in place).
+	if b, err := s.GetRange(ctx, "a/1", 1, 2); err != nil || string(b) != "ne" {
+		t.Fatalf("range: %q %v", b, err)
+	}
+	if _, err := s.GetRange(ctx, "a/1", 2, 5); err == nil {
+		t.Fatal("range past the end succeeded")
+	}
+	if n, err := s.Size(ctx, "a/1"); err != nil || n != 3 {
+		t.Fatalf("size: %d %v", n, err)
+	}
+	if _, err := s.Size(ctx, "a/missing"); err != ErrNotFound {
+		t.Fatalf("size of missing: want not found, got %v", err)
+	}
 	// Compare-on-412: GET returns the first writer's content.
 	b, err := s.Get(ctx, "a/1")
 	if err != nil || string(b) != "one" {

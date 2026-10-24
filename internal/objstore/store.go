@@ -25,4 +25,9 @@ type Store interface {
 	List(ctx context.Context, prefix, startAfter string) ([]string, error)
 	// Delete removes key; deleting a missing key is not an error.
 	Delete(ctx context.Context, key string) error
+	// GetRange returns n bytes of the object starting at off. A range past
+	// the end of the object is an error.
+	GetRange(ctx context.Context, key string, off, n int64) ([]byte, error)
+	// Size returns the object's length.
+	Size(ctx context.Context, key string) (int64, error)
 }

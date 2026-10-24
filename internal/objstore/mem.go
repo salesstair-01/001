@@ -2,6 +2,7 @@ package objstore
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -54,6 +55,29 @@ func (m *Mem) Delete(_ context.Context, key string) error {
 	defer m.mu.Unlock()
 	delete(m.objs, key)
 	return nil
+}
+
+func (m *Mem) GetRange(_ context.Context, key string, off, n int64) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.objs[key]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if off < 0 || n < 0 || off+n > int64(len(b)) {
+		return nil, fmt.Errorf("objstore: range %d+%d past the end of %s (%d bytes)", off, n, key, len(b))
+	}
+	return append([]byte(nil), b[off:off+n]...), nil
+}
+
+func (m *Mem) Size(_ context.Context, key string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.objs[key]
+	if !ok {
+		return 0, ErrNotFound
+	}
+	return int64(len(b)), nil
 }
 
 // Keys returns every stored key (for tests).

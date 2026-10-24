@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -106,9 +107,15 @@ func (p *Partition) Checkpoint(ctx context.Context) error {
 		files = append(files, ref)
 	}
 
+	remoteRefs, err := p.liveRemote(tmp)
+	if err != nil {
+		restore()
+		return err
+	}
+
 	old := p.manifest
 	next := Manifest{
-		Format: manifestFormat, Epoch: p.epoch, Owner: p.cfg.OwnerID, Files: files,
+		Format: manifestFormat, Epoch: p.epoch, Owner: p.cfg.OwnerID, Files: files, Remote: remoteRefs,
 		ReplayAfterWALSeq: seq, MaxCommitTS: maxTS, CheckpointID: ckptID,
 		CreatedAt: time.Now().UnixMicro(),
 	}
@@ -140,11 +147,39 @@ func (p *Partition) Checkpoint(ctx context.Context) error {
 	for _, f := range files {
 		live[f.Object] = true
 	}
+	for _, r := range remoteRefs {
+		live[r.Object] = true
+	}
 	for _, f := range old.Files {
 		if !live[f.Object] {
 			p.garbage = append(p.garbage, garbageItem{f.Object, after})
 		}
 	}
+	p.remoteMu.Lock()
+	for _, r := range old.Remote {
+		if !live[r.Object] {
+			p.garbage = append(p.garbage, garbageItem{r.Object, after})
+			delete(p.remoteObjs, r.FileNum)
+		}
+	}
+	// Objects Pebble dropped that no manifest lists any more, including
+	// compaction outputs that never reached one. One still listed (dropped
+	// after the checkpoint was taken) waits for the next checkpoint.
+	kept := p.obsolete[:0]
+	for _, obj := range p.obsolete {
+		if live[obj] {
+			kept = append(kept, obj)
+			continue
+		}
+		p.garbage = append(p.garbage, garbageItem{obj, after})
+	}
+	p.obsolete = kept
+	for fn, r := range p.remoteObjs {
+		if !live[r.Object] && isGarbage(p.garbage, r.Object) {
+			delete(p.remoteObjs, fn)
+		}
+	}
+	p.remoteMu.Unlock()
 	for name, ref := range p.uploaded {
 		if !live[ref.Object] {
 			delete(p.uploaded, name)
@@ -154,6 +189,87 @@ func (p *Partition) Checkpoint(ctx context.Context) error {
 		p.garbage = append(p.garbage, garbageItem{manifestKey(p.id, p.manifestN-2), after})
 	}
 	p.log.Debug("checkpoint", "manifest", p.manifestN, "replay_after", seq, "files", len(files))
+	return nil
+}
+
+func isGarbage(g []garbageItem, key string) bool {
+	for i := len(g) - 1; i >= 0; i-- {
+		if g[i].key == key {
+			return true
+		}
+	}
+	return false
+}
+
+// liveRemote returns the remote SSTs a Pebble checkpoint directory references.
+func (p *Partition) liveRemote(dir string) ([]RemoteRef, error) {
+	fns, err := checkpointRemoteFiles(dir)
+	if err != nil || len(fns) == 0 {
+		return nil, err
+	}
+	p.remoteMu.Lock()
+	defer p.remoteMu.Unlock()
+	// Pebble adds an object to its catalog when it starts writing it, and
+	// any version edit can sync the catalog meanwhile, so a checkpoint's
+	// catalog can list outputs still being written. Those are not in the
+	// checkpoint's LSM (a table joins a version only once finished, and
+	// finishing reports it to onCreate), so unknown entries are skipped.
+	// Finished outputs not yet in the version are listed anyway: they are
+	// kept a little longer, never lost.
+	refs := make([]RemoteRef, 0, len(fns))
+	for _, fn := range fns {
+		if r, ok := p.remoteObjs[fn]; ok {
+			refs = append(refs, r)
+		}
+	}
+	return refs, nil
+}
+
+// sweepRemote schedules remote objects of earlier epochs that no manifest in
+// the store lists: compaction outputs of owners that crashed or were fenced
+// before a checkpoint, and aborted uploads. Those epochs can no longer write a
+// manifest, so nothing can come to reference them. Runs once after takeover.
+func (p *Partition) sweepRemote(ctx context.Context) error {
+	keys, err := p.store.List(ctx, remotePrefix(p.id), "")
+	if err != nil || len(keys) == 0 {
+		return err
+	}
+	mkeys, err := p.store.List(ctx, manifestPrefix(p.id), "")
+	if err != nil {
+		return err
+	}
+	listed := map[string]bool{}
+	for _, mk := range mkeys {
+		b, err := p.store.Get(ctx, mk)
+		if errors.Is(err, objstore.ErrNotFound) {
+			continue // collected meanwhile
+		}
+		if err != nil {
+			return err
+		}
+		var m Manifest
+		if err := json.Unmarshal(b, &m); err != nil {
+			return fmt.Errorf("sweep: %s: %w", mk, err)
+		}
+		for _, r := range m.Remote {
+			listed[r.Object] = true
+		}
+	}
+	mine := remotePrefix(p.id) + string(remoteLocator(p.epoch)) + "/"
+	after := time.Now().Add(p.cfg.GCGrace)
+	p.ckptMu.Lock()
+	defer p.ckptMu.Unlock()
+	n := 0
+	for _, k := range keys {
+		if strings.HasPrefix(k, mine) || listed[k] {
+			continue
+		}
+		p.garbage = append(p.garbage, garbageItem{k, after})
+		n++
+	}
+	if n > 0 {
+		p.log.Info("remote sweep", "unlisted", n)
+	}
 	return nil
 }
 
@@ -305,6 +421,7 @@ func (p *Partition) background() {
 	defer tick.Stop()
 	lastCkpt, lastGC := time.Now(), time.Now()
 	var gcAtTS uint64
+	swept := false
 	for {
 		select {
 		case <-p.stopCh:
@@ -328,6 +445,13 @@ func (p *Partition) background() {
 				p.log.Warn("mvcc gc failed", "err", err)
 			}
 			lastGC, gcAtTS = time.Now(), vis
+		}
+		if !swept {
+			if err := p.sweepRemote(ctx); err != nil {
+				p.log.Warn("remote sweep failed", "err", err)
+			} else {
+				swept = true
+			}
 		}
 		p.collectGarbage(ctx)
 	}

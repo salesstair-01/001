@@ -607,6 +607,14 @@ var metaConfigs = []struct {
 	{"checkpoint-often", func(c *Config) { c.CheckpointBytes = 1; c.CheckpointInterval = 10 * time.Millisecond }},
 	{"no-cache-small-memtable", func(c *Config) { c.CacheMaxBytes = -1; c.MemTableBytes = 64 << 10; c.BlockCacheBytes = 1 << 20 }},
 	{"no-group-window", func(c *Config) { c.GroupWindow = time.Microsecond; c.GroupMaxBytes = 64 }},
+	{"remote-ssts", func(c *Config) {
+		c.RemoteSSTs = true
+		c.CacheMaxBytes = -1
+		c.MemTableBytes = 64 << 10
+		c.CheckpointBytes = 1
+		c.CheckpointInterval = 10 * time.Millisecond
+		c.GCGrace = time.Millisecond
+	}},
 }
 
 func TestMetamorphic(t *testing.T) {

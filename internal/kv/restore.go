@@ -136,7 +136,15 @@ func Restore(ctx context.Context, s objstore.Store, src, dst uint64, at time.Tim
 			return nil, err
 		}
 	}
-	sdb, err := openEngine(srcDir, engineOptions{})
+	// Remote SSTs of the source are read in place; replayed writes stay local.
+	var so engineOptions
+	if len(m.Remote) > 0 {
+		so.remote = &remoteConfig{store: s, prefix: remotePrefix(src), creatorID: src + 1, sizes: map[string]int64{}}
+		for _, r := range m.Remote {
+			so.remote.sizes[r.Object] = r.Size
+		}
+	}
+	sdb, err := openEngine(srcDir, so)
 	if err != nil {
 		return nil, fmt.Errorf("restore: open checkpoint: %w", err)
 	}

@@ -117,7 +117,21 @@ The Rust owner reached parity and replaced the Go owner (phase 6).
   collector start after the partition serves instead of inside the open
   (takeover 100 ms → 56 ms), and the partition's epoch is SlateDB's writer
   epoch, which the open already raises durably, instead of a durable write
-  of its own (→ about 45–50 ms).
+  of its own (→ about 45–50 ms). What is left is SlateDB's open, about 10
+  sequential requests (`cargo run --release --example opentrace` prints
+  them, with a fixed delay per request): list and read the manifest, read
+  the GC boundary object (four times: SlateDB checks it around every
+  manifest read and write), probe the WAL, write the fencing manifest and
+  WAL object, read the manifest again; then the first read fetches an SST's
+  index and one block. Fewer would need changes in SlateDB.
+- **Catalog reloads** (found by the sqllogictest job, 48 min against 9):
+  every query reloaded `sqld`'s catalog (go-mysql-server looks up the
+  absent `mysql` database), which the restore window made expensive: each
+  scan walks the versions and tombstones of the last hour, at 1–1.5 µs per
+  entry in SlateDB. A miss now checks the catalog version, and scans seek
+  past runs of versions they don't need. DDL-heavy workloads still reload
+  the catalog once per schema-change step, walking the dropped tables of
+  the last hour.
 - **Store outages**: a failing object-store operation is retried
   `-store-retries` times (60, about a minute) before SlateDB gives up; the
   commit then fails and the partition stops serving, as the Go owner did

@@ -70,6 +70,24 @@ make wake-demo-rs                                         # dird spawns the Rust
 `-cache-dir`, `-put-concurrency`, `-put-rate` and `-put-burst` are accepted
 and have no effect.
 
+## Point-in-time restore (phase 5)
+
+```sh
+kvd-rs/target/release/kvd restore-points -partition 42
+kvd-rs/target/release/kvd restore -src 42 -dst 1042 -at 2026-10-16T09:30:00Z
+```
+
+A partition keeps every MVCC version for `-restore-window` (1 h by default):
+GC's safe point never passes the last commit older than the window. Each
+commit also writes a record of its wall time and commit_ts. A restore finds
+the last commit at or before the time, reads the source through a SlateDB
+reader (it holds a checkpoint, so nothing it reads is collected, and it does
+not fence the live owner), and writes each key's newest version at or below
+that commit into a new partition, with the partition id in the keys
+rewritten. Point the tenant at the new partition, as with `s2zctl restore`
+for the Go owner (whose storage format differs).
+`scripts/kvd-rs/restore-test.sh` checks it end to end through `sqld`.
+
 ## Results so far (Ceph RGW, loopback)
 
 | | Go owner | Rust owner |
@@ -85,5 +103,6 @@ and have no effect.
 | sqllogictest, the four `index/*/10` files (40,173 records) | 100% | 100%, the same counts (other files: run pending) |
 | scale-to-zero demo: suspend and exit after 3 s idle, wake on the next query | wake 80–95 ms | wake ~170 ms (SlateDB open 70–85 ms + durable epoch write) |
 | drivers and ORM through `proxyd` + `dird` spawning `kvd` | 4/4, 16/16 | 4/4, 16/16 |
+| point-in-time restore (`scripts/kvd-rs/restore-test.sh`) | (`s2zctl restore`) | pass; ~300 ms for a small partition |
 
 The crash-test counts depend on the random kill timing; both pass.

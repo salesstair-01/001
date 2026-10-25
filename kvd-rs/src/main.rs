@@ -10,6 +10,7 @@ mod locks;
 mod metrics;
 mod node;
 mod partition;
+mod restore;
 mod service;
 
 pub mod pb {
@@ -28,18 +29,9 @@ use object_store::aws::AmazonS3Builder;
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use tokio::sync::Notify;
 
-#[derive(Parser, Debug)]
-#[command(about = "KV owner on SlateDB")]
-struct Args {
-    /// gRPC listen address
-    #[arg(long, env = "KVD_LISTEN", default_value = "127.0.0.1:7070")]
-    listen: String,
-    /// local data directory (unused: SlateDB keeps no local state)
-    #[arg(long, env = "KVD_DATA", default_value = "./data/kv")]
-    data: String,
-    /// owner id (default: random)
-    #[arg(long, env = "KVD_OWNER", default_value = "")]
-    owner: String,
+/// The object store (S3 API; Ceph RGW in development).
+#[derive(clap::Args, Debug)]
+struct StoreArgs {
     /// S3 endpoint host:port
     #[arg(long = "minio-endpoint", env = "MINIO_ENDPOINT", default_value = "127.0.0.1:9000")]
     endpoint: String,
@@ -54,6 +46,65 @@ struct Args {
     /// use TLS to the object store
     #[arg(long = "minio-ssl", num_args = 0..=1, default_missing_value = "true", default_value = "false")]
     ssl: bool,
+}
+
+impl StoreArgs {
+    fn open(&self) -> Result<Arc<dyn object_store::ObjectStore>, Box<dyn std::error::Error>> {
+        let scheme = if self.ssl { "https" } else { "http" };
+        let store = AmazonS3Builder::new()
+            .with_endpoint(format!("{scheme}://{}", self.endpoint))
+            .with_allow_http(!self.ssl)
+            .with_access_key_id(&self.access_key)
+            .with_secret_access_key(&self.secret_key)
+            .with_bucket_name(&self.bucket)
+            .with_region(&self.region)
+            .with_virtual_hosted_style_request(false)
+            .build()?;
+        Ok(Arc::new(store))
+    }
+}
+
+/// kvd restore: write partition dst as partition src was at a time.
+#[derive(Parser, Debug)]
+#[command(name = "kvd restore")]
+struct RestoreArgs {
+    #[command(flatten)]
+    store: StoreArgs,
+    /// partition to restore from
+    #[arg(long)]
+    src: u64,
+    /// partition to write (must never have been used)
+    #[arg(long)]
+    dst: u64,
+    /// time to restore to, RFC 3339 (e.g. 2026-10-16T09:30:00Z)
+    #[arg(long)]
+    at: String,
+}
+
+/// kvd restore-points: the times a partition can be restored to.
+#[derive(Parser, Debug)]
+#[command(name = "kvd restore-points")]
+struct PointsArgs {
+    #[command(flatten)]
+    store: StoreArgs,
+    #[arg(long)]
+    partition: u64,
+}
+
+#[derive(Parser, Debug)]
+#[command(about = "KV owner on SlateDB; also `kvd restore` and `kvd restore-points`")]
+struct Args {
+    /// gRPC listen address
+    #[arg(long, env = "KVD_LISTEN", default_value = "127.0.0.1:7070")]
+    listen: String,
+    /// local data directory (unused: SlateDB keeps no local state)
+    #[arg(long, env = "KVD_DATA", default_value = "./data/kv")]
+    data: String,
+    /// owner id (default: random)
+    #[arg(long, env = "KVD_OWNER", default_value = "")]
+    owner: String,
+    #[command(flatten)]
+    store: StoreArgs,
     /// take this partition over at startup (0 = none)
     #[arg(long, default_value_t = 0)]
     partition: u64,
@@ -88,6 +139,9 @@ struct Args {
     /// memtable size per partition before it is flushed to an SST, MiB
     #[arg(long = "memtable-mb", default_value_t = 4)]
     memtable_mb: usize,
+    /// how far back a point-in-time restore can go (MVCC history kept)
+    #[arg(long = "restore-window", value_parser = go_duration, default_value = "1h")]
+    restore_window: Duration,
     /// unflushed data a partition may hold in memory before writes wait, MiB
     #[arg(long = "max-unflushed-mb", default_value_t = 64)]
     max_unflushed_mb: usize,
@@ -151,24 +205,50 @@ async fn main() {
         .with_writer(std::io::stderr)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
-    let args = Args::parse_from(go_style_args());
-    if let Err(e) = run(args).await {
+    let argv = go_style_args();
+    let res = match argv.get(1).map(String::as_str) {
+        Some("restore") => run_restore(RestoreArgs::parse_from(argv.iter().skip(1))).await,
+        Some("restore-points") => run_points(PointsArgs::parse_from(argv.iter().skip(1))).await,
+        _ => run(Args::parse_from(argv)).await,
+    };
+    if let Err(e) = res {
         tracing::error!("{e}");
         std::process::exit(1);
     }
 }
 
+async fn run_restore(a: RestoreArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let at = humantime::parse_rfc3339_weak(&a.at)?;
+    let t0 = std::time::Instant::now();
+    let r = restore::restore(a.store.open()?, a.src, a.dst, at).await?;
+    println!(
+        "restored partition {} at {} into partition {} in {:?}\n  {} rows, as of commit {} ({})",
+        a.src,
+        a.at,
+        a.dst,
+        t0.elapsed(),
+        r.rows,
+        r.commit_ts,
+        humantime::format_rfc3339_micros(r.commit_time)
+    );
+    Ok(())
+}
+
+async fn run_points(a: PointsArgs) -> Result<(), Box<dyn std::error::Error>> {
+    match restore::restore_points(a.store.open()?, a.partition).await? {
+        None => println!("no restore points"),
+        Some((from, to)) => println!(
+            "partition {} can be restored to any time from {} on (last commit {})",
+            a.partition,
+            humantime::format_rfc3339_micros(from),
+            humantime::format_rfc3339_micros(to)
+        ),
+    }
+    Ok(())
+}
+
 async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    let scheme = if args.ssl { "https" } else { "http" };
-    let store = AmazonS3Builder::new()
-        .with_endpoint(format!("{scheme}://{}", args.endpoint))
-        .with_allow_http(!args.ssl)
-        .with_access_key_id(&args.access_key)
-        .with_secret_access_key(&args.secret_key)
-        .with_bucket_name(&args.bucket)
-        .with_region(&args.region)
-        .with_virtual_hosted_style_request(false)
-        .build()?;
+    let store = args.store.open()?;
     let mut owner = args.owner.clone();
     if owner.is_empty() {
         owner = format!("kv-{:012x}", rand::random::<u64>() & 0xffff_ffff_ffff);
@@ -183,11 +263,12 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         flush_interval: args.flush_interval,
         l0_sst_bytes: args.memtable_mb << 20,
         max_unflushed_bytes: args.max_unflushed_mb << 20,
+        restore_window: args.restore_window,
         ..Default::default()
     };
     let (events_tx, events) = tokio::sync::mpsc::unbounded_channel();
     let with_dir = !args.directory.is_empty();
-    let node = node::Node::new(cfg, Arc::new(store), with_dir.then_some(events_tx));
+    let node = node::Node::new(cfg, store, with_dir.then_some(events_tx));
     if !args.idle_suspend.is_zero() {
         node.spawn_idle_loop(args.idle_suspend);
     }
@@ -229,7 +310,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         };
         tokio::spawn(a.run(args.directory.clone(), node.clone(), events));
     }
-    tracing::info!(addr = %advertise, owner, bucket = args.bucket, directory = args.directory, "kvd listening");
+    tracing::info!(addr = %advertise, owner, bucket = args.store.bucket, directory = args.directory, "kvd listening");
     let svc = service::Service {
         node: node.clone(),
         auto_open: args.auto_open,

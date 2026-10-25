@@ -91,6 +91,18 @@ both are tested against the same suites.
   scale-to-zero demo and the driver and ORM suites through `proxyd` pass
   on the Rust owner. A wake takes about 170 ms against 80–95 ms for the Go
   owner: SlateDB's open is 70–85 ms of it.
+- **Phase 5**: point-in-time restore is done (`kvd restore`,
+  `kvd restore-points`), on the MVCC history kept for a restore window
+  rather than on SlateDB checkpoints and WAL replay: it reads the source
+  through a checkpointed SlateDB reader and needs no replay. Not done: a
+  restore to a time before the first commit still in the window fails
+  rather than restoring an empty partition, and `s2zctl` does not drive
+  it yet.
+
+Found along the way, in the SQL layer and so for both owners:
+go-mysql-server v0.20.0 skips an UPDATE whose new row equals the old one
+under the column's collation, so `UPDATE t SET v='B'` on a row holding `b`
+(case-insensitive collation) changes nothing, where MySQL stores `B`.
 
 ## Open questions carried from the spike
 

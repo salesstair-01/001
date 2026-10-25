@@ -1485,6 +1485,7 @@ dependencies = [
  "bytes",
  "clap",
  "hex",
+ "humantime",
  "object_store",
  "parking_lot",
  "prost",

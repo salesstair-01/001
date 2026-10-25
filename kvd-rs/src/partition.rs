@@ -46,6 +46,9 @@ pub struct Config {
     pub txn_id_window: Duration,
     pub intent_cap: usize,
     pub mvcc_gc_interval: Duration,
+    /// How far back a point-in-time restore can go: MVCC GC keeps every
+    /// version newer than this (zero = only what open snapshots need).
+    pub restore_window: Duration,
 }
 
 impl Default for Config {
@@ -60,6 +63,7 @@ impl Default for Config {
             txn_id_window: Duration::from_secs(600),
             intent_cap: 64 << 20,
             mvcc_gc_interval: Duration::from_secs(60),
+            restore_window: Duration::from_secs(3600),
         }
     }
 }
@@ -213,6 +217,24 @@ fn be64(v: &Option<Bytes>) -> u64 {
 const META_EPOCH: &[u8] = b"epoch";
 const META_MAXTS: &[u8] = b"maxts";
 const META_TXN: &[u8] = b"txn/";
+/// time/<wall micros><commit_ts>, both big-endian: when each commit happened,
+/// for point-in-time restore (restore.rs).
+pub(crate) const META_TIME: &[u8] = b"time/";
+
+pub(crate) fn time_key(wall: u64, ts: u64) -> Vec<u8> {
+    let mut k = keys::meta_key(META_TIME);
+    k.extend_from_slice(&wall.to_be_bytes());
+    k.extend_from_slice(&ts.to_be_bytes());
+    k
+}
+
+/// Splits a time record's key into its wall time and commit_ts.
+pub(crate) fn split_time_key(k: &[u8]) -> Option<(u64, u64)> {
+    let rest = k.strip_prefix(keys::meta_key(META_TIME).as_slice())?;
+    let wall = u64::from_be_bytes(rest.get(..8)?.try_into().ok()?);
+    let ts = u64::from_be_bytes(rest.get(8..16)?.try_into().ok()?);
+    Some((wall, ts))
+}
 
 fn txn_key(id: &TxnId) -> Vec<u8> {
     let mut k = keys::meta_key(META_TXN);
@@ -855,6 +877,7 @@ impl Partition {
         let mut rec = ts.to_be_bytes().to_vec();
         rec.extend_from_slice(&wall.to_be_bytes());
         b.put(txn_key(&id), rec);
+        b.put(time_key(wall, ts), b"");
         b.put(keys::meta_key(META_MAXTS), ts.to_be_bytes());
         let written = self.db.write(b).await;
         drop(ordered);
@@ -928,11 +951,11 @@ impl Partition {
     /// if it is a delete marker. The deletes need not be durable: versions
     /// that come back after a crash are equally invisible.
     async fn gc_versions(&self, forget: &[TxnId]) -> Result<usize> {
-        let safe = self.oldest_snapshot();
         let mut b = WriteBatch::new();
         for id in forget {
             b.delete(txn_key(id));
         }
+        let safe = self.oldest_snapshot().min(self.restore_safe_point(&mut b).await?);
         let mut dropped = 0;
         if safe > 0 {
             let mut it = self
@@ -968,11 +991,36 @@ impl Partition {
     }
 }
 
+impl Partition {
+    /// The newest commit_ts a restore no longer needs history before: that
+    /// of the last commit at least restore_window old (0 when there is
+    /// none). Time records older than that commit are deleted into b.
+    async fn restore_safe_point(&self, b: &mut WriteBatch) -> Result<u64> {
+        let Some(cutoff) = wall_micros().checked_sub(self.cfg.restore_window.as_micros() as u64) else {
+            return Ok(0);
+        };
+        let start = keys::meta_key(META_TIME);
+        let end = time_key(cutoff, u64::MAX);
+        let mut it = self.db.scan_with_options(start..=end, &point_opts()).await?;
+        let mut last: Option<(Vec<u8>, u64)> = None;
+        while let Some(kv) = it.next().await? {
+            let Some((_, ts)) = split_time_key(&kv.key) else {
+                continue;
+            };
+            if let Some((k, _)) = last.replace((kv.key.to_vec(), ts)) {
+                b.delete(k);
+            }
+        }
+        Ok(last.map_or(0, |(_, ts)| ts))
+    }
+}
+
 /// Lease expiry and MVCC GC, until the partition stops.
 async fn background(p: Weak<Partition>) {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut last_gc = Instant::now();
     let mut gc_at_ts = 0;
+    let mut last_change = Instant::now();
     let mut forget = vec![];
     loop {
         tick.tick().await;
@@ -982,7 +1030,12 @@ async fn background(p: Weak<Partition>) {
         }
         forget.extend(p.expire_txns());
         let vis = p.visible_ts();
-        if vis != gc_at_ts && last_gc.elapsed() >= p.cfg.mvcc_gc_interval {
+        if vis != gc_at_ts {
+            last_change = Instant::now();
+        }
+        // Versions age out of the restore window after the last commit too.
+        let aging = last_change.elapsed() < p.cfg.restore_window + 2 * p.cfg.mvcc_gc_interval;
+        if (vis != gc_at_ts || aging) && last_gc.elapsed() >= p.cfg.mvcc_gc_interval {
             match p.gc_versions(&forget).await {
                 Ok(n) => {
                     forget.clear();

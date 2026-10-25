@@ -37,7 +37,7 @@ an in-memory store. Longer runs: `KVD_FAULT_SEEDS=200` for `durability`,
 | `src/agent.rs` | the directory agent: register, heartbeat, release, exit when idle |
 | `src/restore.rs` | point-in-time restore |
 | `src/localstore.rs` | the local-directory store (`-store-dir`) |
-| `src/metrics.rs` | Prometheus metrics |
+| `src/metrics.rs` | Prometheus metrics, and the store wrapper that counts PUTs by partition |
 
 ## How it maps onto SlateDB
 

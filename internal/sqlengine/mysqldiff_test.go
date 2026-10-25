@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 var (
@@ -57,7 +58,9 @@ func newDiffPair(t *testing.T) *diffPair {
 			t.Fatalf("mysql: %s: %v", q, err)
 		}
 	}
-	c := startCluster(t)
+	// S2Z_KVD_ADDR runs our side against an external kvd (either owner), on
+	// a fresh partition.
+	c := startClusterOn(t, os.Getenv("S2Z_KVD_ADDR"), uint64(time.Now().UnixNano()%(1<<40))+1<<20)
 	c.db(t)                                                    // waits for the server
 	ours, err := sql.Open("mysql", "root@tcp("+c.addr+")/app") // text values, as from MySQL
 	if err != nil {

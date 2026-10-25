@@ -81,9 +81,12 @@ both are tested against the same suites.
   owner over gRPC found a bug that predates the Rust work: an empty value
   (a secondary-index entry) written in a transaction read back as absent
   until commit, because the wire turns it into nil; fixed in `kvrpc`.
-  On the Rust owner, the sqllogictest files counted so far give the same
-  results as on the Go owner (run by hand). Still to do: the Pebble compatibility test and sqllogictest
-  against the Rust owner in CI, and the MySQL differential test over gRPC.
+  The MySQL differential tests run against an external `kvd` too
+  (`S2Z_KVD_ADDR`), and pass on the Rust owner; CI runs them there, with
+  the sqllogictest files that pass in full on the Go owner (`select1`–`3`,
+  `evidence/*`), which must pass in full on the Rust owner too. The other
+  sqllogictest files gave the same counts by hand. Not ported: the Pebble
+  compatibility test, which checks the Go owner's Pebble format.
 - **Phase 4** is done except for per-partition PUT accounting: directory
   registration and heartbeats, idle suspend with release, exit-when-idle
   (so `dird -spawn-kvd` works with the Rust binary), a shared block cache

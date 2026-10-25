@@ -58,14 +58,23 @@ func startKV(t *testing.T, store objstore.Store, owner, addr string) (*kv.Node, 
 }
 
 func startCluster(t *testing.T) *cluster {
+	return startClusterOn(t, "", 1)
+}
+
+// startClusterOn runs the query engine against the KV owner at kvAddr, on
+// partition, or against an in-process node (kvAddr empty).
+func startClusterOn(t *testing.T, kvAddr string, partition uint64) *cluster {
 	t.Helper()
-	c := &cluster{t: t, store: objstore.NewMem()}
-	c.node, c.grpc, c.kvAddr = startKV(t, c.store, "kv-a", "127.0.0.1:0")
+	c := &cluster{t: t, kvAddr: kvAddr}
+	if kvAddr == "" {
+		c.store = objstore.NewMem()
+		c.node, c.grpc, c.kvAddr = startKV(t, c.store, "kv-a", "127.0.0.1:0")
+	}
 	cc, err := grpc.NewClient(c.kvAddr, append(kvrpc.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := NewStore(kvrpc.NewClient(cc), 1)
+	st := NewStore(kvrpc.NewClient(cc), partition)
 	c.engine = NewEngine(st)
 	if err := c.engine.EnsureDatabase(context.Background(), "app"); err != nil {
 		t.Fatal(err)
@@ -85,8 +94,10 @@ func startCluster(t *testing.T) *cluster {
 		srv.Close()
 		st.Close()
 		cc.Close()
-		c.grpc.Stop()
-		c.node.Close()
+		if c.node != nil {
+			c.grpc.Stop()
+			c.node.Close()
+		}
 	})
 	return c
 }

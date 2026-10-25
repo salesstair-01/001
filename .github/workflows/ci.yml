@@ -150,7 +150,7 @@ jobs:
           ./slatespike bench -sizes 100
 
   kvd-rs:
-    name: "Rust kvd (SlateDB) on MicroCeph: KV suites, crash test, restore, scale to zero, drivers, ORM"
+    name: "Rust kvd (SlateDB) on MicroCeph: KV suites, MySQL diff, sqllogictest, crash test, restore, scale to zero, drivers, ORM"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -190,6 +190,26 @@ jobs:
           eval "$(scripts/ceph/microceph.sh env)"
           KVSUITE_KVD=$PWD/bin/kvd go test ./internal/kvsuite -count=1 -v -meta-runs 20 -meta-ops 500
           KVSUITE_KVD=$PWD/kvd-rs/target/release/kvd go test ./internal/kvsuite -count=1 -v -meta-runs 20 -meta-ops 500
+      # The runner image ships MySQL 8.0 (root/root), stopped.
+      - name: differential tests against MySQL 8 and sqllogictest, on the Rust owner
+        run: |
+          set -o pipefail
+          eval "$(scripts/ceph/microceph.sh env)"
+          sudo systemctl start mysql
+          mkdir -p /tmp/s2z-sql
+          kvd-rs/target/release/kvd -listen 127.0.0.1:7170 > /tmp/s2z-sql/kvd.log 2>&1 &
+          sleep 1
+          S2Z_KVD_ADDR=127.0.0.1:7170 S2Z_MYSQL_DSN='root:root@tcp(127.0.0.1:3306)/' \
+            go test ./internal/sqlengine -run MySQLDiff -diff-rounds 5 -count=1 -timeout 30m
+          ./bin/sqld -listen 127.0.0.1:3370 -kv 127.0.0.1:7170 -partition 5101 > /tmp/s2z-sql/sqld.log 2>&1 &
+          scripts/slt/fetch.sh
+          # Each file in its own database, as each gets its own cluster in process.
+          n=0
+          for f in $(grep -v '^#' scripts/slt/files.txt | grep -E '^(select[123]|evidence/)'); do
+            n=$((n+1))
+            mysql -h127.0.0.1 -P3370 -uroot -e "CREATE DATABASE slt$n"
+            ./bin/slt -dsn "root@tcp(127.0.0.1:3370)/slt$n" -min-pass-rate 100 "scripts/slt/test/$f" 2>/dev/null | grep '^| [a-z]'
+          done
       - name: point-in-time restore with the Rust owner
         run: |
           eval "$(scripts/ceph/microceph.sh env)"
@@ -216,7 +236,7 @@ jobs:
           ORM_PORT=3307 ORM_USER=app@acme ORM_PASSWORD=s3cret scripts/orm/run.sh
       - name: logs
         if: failure()
-        run: tail -n 50 /tmp/s2z/*.log /tmp/s2z/spawned/*.log || true
+        run: tail -n 50 /tmp/s2z/*.log /tmp/s2z/spawned/*.log /tmp/s2z-sql/*.log || true
 
   mysql-diff:
     name: differential tests against MySQL 8

@@ -6,6 +6,7 @@
 mod agent;
 mod error;
 mod keys;
+mod localstore;
 mod locks;
 mod metrics;
 mod node;
@@ -32,6 +33,10 @@ use tokio::sync::Notify;
 /// The object store (S3 API; Ceph RGW in development).
 #[derive(clap::Args, Debug)]
 struct StoreArgs {
+    /// keep the data in this local directory instead of an S3 store
+    /// (development and tests; processes on one host may share it)
+    #[arg(long = "store-dir", env = "KVD_STORE_DIR", default_value = "")]
+    store_dir: String,
     /// S3 endpoint host:port
     #[arg(long = "minio-endpoint", env = "MINIO_ENDPOINT", default_value = "127.0.0.1:9000")]
     endpoint: String,
@@ -50,6 +55,9 @@ struct StoreArgs {
 
 impl StoreArgs {
     fn open(&self) -> Result<Arc<dyn object_store::ObjectStore>, Box<dyn std::error::Error>> {
+        if !self.store_dir.is_empty() {
+            return Ok(Arc::new(localstore::LocalStore::new(&self.store_dir)?));
+        }
         let scheme = if self.ssl { "https" } else { "http" };
         let store = AmazonS3Builder::new()
             .with_endpoint(format!("{scheme}://{}", self.endpoint))

@@ -986,7 +986,9 @@ impl Partition {
                 }
             }
         }
-        self.db.write(b).await?;
+        if !b.is_empty() {
+            self.db.write(b).await?;
+        }
         Ok(dropped)
     }
 }

@@ -114,6 +114,41 @@ jobs:
           scripts/ceph/microceph.sh status || true
           sudo journalctl -u snap.microceph.rgw --no-pager -n 50 || true
 
+  slatedb-spike:
+    name: SlateDB spike on MicroCeph (spikes/slatedb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: spikes/slatedb/go.mod
+          cache-dependency-path: spikes/slatedb/go.sum
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.rustup/toolchains
+            spikes/slatedb/.slatedb
+          key: slatedb-uniffi-v0.17.0
+      - run: scripts/ceph/microceph.sh up
+      - name: build the SlateDB library and the spike
+        run: |
+          L=$(spikes/slatedb/build-lib.sh)
+          echo "LD_LIBRARY_PATH=$L" >> "$GITHUB_ENV"
+          CGO_LDFLAGS="-L$L" go build -C spikes/slatedb -o slatespike .
+      - name: smoke, fencing, kill -9 with injected faults, FFI cost, density, benchmark
+        run: |
+          eval "$(scripts/ceph/microceph.sh env)"
+          cd spikes/slatedb
+          ./slatespike smoke
+          ./slatespike fence
+          ./slatespike crash -kills 5
+          ./slatespike crash -kills 5 -fail 0.05 -drop 0.05
+          ./slatespike ffi
+          ./slatespike density -n 50
+          ./slatespike bench -sizes 100
+
   mysql-diff:
     name: differential tests against MySQL 8
     runs-on: ubuntu-latest

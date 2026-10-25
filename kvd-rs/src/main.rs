@@ -277,7 +277,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
     let (events_tx, events) = tokio::sync::mpsc::unbounded_channel();
     let with_dir = !args.directory.is_empty();
-    let node = node::Node::new(cfg, store, with_dir.then_some(events_tx));
+    let node = node::Node::new(cfg, metrics::count_puts(store), with_dir.then_some(events_tx));
     if !args.idle_suspend.is_zero() {
         node.spawn_idle_loop(args.idle_suspend);
     }

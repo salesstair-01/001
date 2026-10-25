@@ -1,11 +1,20 @@
 //! Prometheus metrics, with the Go owner's names (internal/kv/metrics.go):
-//! `s2z_kv_commit_seconds`, `s2z_kv_takeover_seconds` and the
-//! `s2z_kv_partitions` gauge, served as text at /metrics.
+//! `s2z_kv_commit_seconds`, `s2z_kv_takeover_seconds`,
+//! `s2z_kv_puts_total{partition}` and the `s2z_kv_partitions` gauge, served
+//! as text at /metrics.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use object_store::path::Path;
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
+    PutOptions, PutPayload, PutResult,
+};
 use parking_lot::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -83,10 +92,100 @@ pub static COMMIT: LazyLock<Histogram> = LazyLock::new(|| {
 pub static TAKEOVER: LazyLock<Histogram> =
     LazyLock::new(|| Histogram::new("s2z_kv_takeover_seconds", "Partition takeover time.", "cache=\"none\""));
 
-fn render(node: &Node) -> String {
+/// Object-store PUTs by partition: SlateDB makes them (WAL objects, SSTs,
+/// manifests), so they are counted at the store, by the partition's prefix
+/// `p/<id>/`. A multipart upload counts once.
+static PUTS: LazyLock<Mutex<BTreeMap<u64, u64>>> = LazyLock::new(Default::default);
+
+/// The PUTs counted so far for partition pid.
+pub fn puts(pid: u64) -> u64 {
+    PUTS.lock().get(&pid).copied().unwrap_or(0)
+}
+
+fn count_put(location: &Path) {
+    let mut parts = location.parts();
+    if parts.next().is_some_and(|p| p.as_ref() == "p")
+        && let Some(pid) = parts.next().and_then(|p| p.as_ref().parse::<u64>().ok())
+    {
+        *PUTS.lock().entry(pid).or_default() += 1;
+    }
+}
+
+/// Wraps store so that its PUTs count in s2z_kv_puts_total.
+pub fn count_puts(store: Arc<dyn ObjectStore>) -> Arc<dyn ObjectStore> {
+    Arc::new(CountingStore(store))
+}
+
+#[derive(Debug)]
+struct CountingStore(Arc<dyn ObjectStore>);
+
+impl std::fmt::Display for CountingStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CountingStore({})", self.0)
+    }
+}
+
+#[async_trait]
+impl ObjectStore for CountingStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        count_put(location);
+        self.0.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        count_put(location);
+        self.0.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
+        self.0.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.0.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.0.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.0.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> object_store::Result<()> {
+        count_put(to);
+        self.0.copy_opts(from, to, options).await
+    }
+}
+
+/// The metrics as Prometheus text; node adds its partition gauge.
+pub fn render(node: Option<&Node>) -> String {
     let mut out = String::new();
     COMMIT.write(&mut out);
     TAKEOVER.write(&mut out);
+    let _ = writeln!(
+        out,
+        "# HELP s2z_kv_puts_total Object-store PUTs by partition (WAL objects, SSTs, manifests).\n# TYPE s2z_kv_puts_total counter"
+    );
+    for (pid, n) in PUTS.lock().iter() {
+        let _ = writeln!(out, "s2z_kv_puts_total{{partition=\"{pid}\"}} {n}");
+    }
+    let Some(node) = node else {
+        return out;
+    };
     let _ = writeln!(
         out,
         "# HELP s2z_kv_partitions Partitions this node serves.\n# TYPE s2z_kv_partitions gauge\ns2z_kv_partitions {}",
@@ -108,7 +207,7 @@ pub async fn serve(addr: &str, node: Arc<Node>) -> std::io::Result<()> {
                 let n = conn.read(&mut buf).await.unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
                 let (status, body) = if req.starts_with("GET /metrics") {
-                    ("200 OK", render(&node))
+                    ("200 OK", render(Some(&node)))
                 } else {
                     ("404 Not Found", String::from("not found\n"))
                 };

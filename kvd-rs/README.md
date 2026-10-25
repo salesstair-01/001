@@ -78,8 +78,10 @@ an in-memory store. Longer runs: `KVD_FAULT_SEEDS=200` for `durability`,
   `-max-unflushed-mb` caps the data a partition holds in memory before
   writes wait.
 - **Metrics.** `-metrics-listen` serves `s2z_kv_commit_seconds`,
-  `s2z_kv_takeover_seconds{cache="none"}` and `s2z_kv_partitions`.
-  `s2z_kv_puts_total` is not there: SlateDB makes its own PUTs.
+  `s2z_kv_takeover_seconds{cache="none"}`, `s2z_kv_partitions` and
+  `s2z_kv_puts_total{partition}`: SlateDB makes its own PUTs, so they are
+  counted at the object store, by the partition's prefix (`p/<id>/`). An
+  idle partition makes none.
 
 `-cache-dir`, `-put-concurrency`, `-put-rate` and `-put-burst` are accepted
 and have no effect.

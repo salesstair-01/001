@@ -137,7 +137,8 @@ The Rust owner reached parity and replaced the Go owner (phase 6).
   `-store-retries` times (60, about a minute) before SlateDB gives up; the
   commit then fails and the partition stops serving, as the Go owner did
   after its 60 s commit timeout. Before, commits waited forever.
-- **Open:** per-partition PUT accounting (SlateDB makes its own PUTs).
+- **PUT accounting**: `s2z_kv_puts_total{partition}` again, counted at the
+  object store by the partition's prefix, since SlateDB makes the PUTs.
 
 Found along the way, in the SQL layer and so for both owners:
 go-mysql-server v0.20.0 skips an UPDATE whose new row equals the old one

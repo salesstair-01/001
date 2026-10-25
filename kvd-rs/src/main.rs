@@ -3,25 +3,7 @@
 //! can spawn it; flags for features it doesn't have are accepted and
 //! reported.
 
-mod agent;
-mod error;
-mod keys;
-mod localstore;
-mod locks;
-mod metrics;
-mod node;
-mod partition;
-mod restore;
-mod service;
-
-pub mod pb {
-    tonic::include_proto!("s2z.kv");
-
-    pub mod dir {
-        tonic::include_proto!("s2z.directory");
-    }
-}
-
+use kvd::{agent, localstore, metrics, node, partition, pb, restore, service};
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -950,6 +950,11 @@ impl Partition {
     /// older than the newest one at or below the safe point, and that one too
     /// if it is a delete marker. The deletes need not be durable: versions
     /// that come back after a crash are equally invisible.
+    /// Runs MVCC GC now and reports how many versions it dropped.
+    pub async fn collect_garbage(&self) -> Result<usize> {
+        self.gc_versions(&[]).await
+    }
+
     async fn gc_versions(&self, forget: &[TxnId]) -> Result<usize> {
         let mut b = WriteBatch::new();
         for id in forget {

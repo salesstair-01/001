@@ -113,7 +113,8 @@ The Rust owner reached parity and replaced the Go owner (phase 6).
   store. Not ported: the Pebble compatibility test (it tested Pebble's
   format), the Go owner's remote-SST and checkpoint-cache tests.
 - **Wake latency**, about 170 ms through the stack at the switch, is now
-  90–100 ms (the Go owner: 80–95 ms): SlateDB's compactor and garbage
+  90–100 ms on a local MicroCeph and 56–59 ms in CI's Ceph job (the Go
+  owner: 80–95 ms): SlateDB's compactor and garbage
   collector start after the partition serves instead of inside the open
   (takeover 100 ms → 56 ms), and the partition's epoch is SlateDB's writer
   epoch, which the open already raises durably, instead of a durable write

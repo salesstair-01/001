@@ -1,4 +1,4 @@
-.PHONY: proto kvd-rs crash-test-rs kvsuite build test test-minio ceph-up ceph-down test-s3 fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
+.PHONY: proto kvd-rs crash-test-rs kvsuite wake-demo-rs build test test-minio ceph-up ceph-down test-s3 fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
 
 build:
 	go build -o bin/ ./cmd/...
@@ -63,6 +63,10 @@ kvd-rs:
 crash-test-rs: kvd-rs
 	go build -o bin/ ./cmd/sqld ./cmd/crashtest
 	./bin/crashtest -kvd kvd-rs/target/release/kvd -sqld bin/sqld
+
+# The scale-to-zero demo with dird spawning the Rust owner.
+wake-demo-rs: build kvd-rs
+	./bin/wakedemo -bin ./bin -kvd kvd-rs/target/release/kvd -idle 3s -rounds 3
 
 # The KV suites over gRPC against both owners (needs MINIO_*).
 kvsuite: kvd-rs

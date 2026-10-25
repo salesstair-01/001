@@ -18,6 +18,7 @@ use bytes::Bytes;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 use slatedb::config::{DurabilityLevel, ScanOptions, Settings};
+use slatedb::db_cache::DbCache;
 use slatedb::{Db, WriteBatch};
 
 use crate::error::{Kind, KvError, Result};
@@ -33,9 +34,11 @@ pub fn is_delete(v: &[u8]) -> bool {
     v.len() == 1 && v[0] == DELETE_MARKER
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub owner_id: String,
+    /// The block cache shared by the node's partitions (None = SlateDB's own per database).
+    pub cache: Option<Arc<dyn DbCache>>,
     pub flush_interval: Duration,
     pub l0_sst_bytes: usize,
     pub max_unflushed_bytes: usize,
@@ -49,6 +52,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             owner_id: String::new(),
+            cache: None,
             flush_interval: Duration::from_millis(10),
             l0_sst_bytes: 16 << 20,
             max_unflushed_bytes: 256 << 20,
@@ -251,15 +255,18 @@ impl Partition {
             manifest_poll_interval: Duration::from_secs(1),
             ..Settings::default()
         };
-        let db = Db::builder(format!("p/{pid}"), store)
-            .with_settings(settings)
-            .build()
-            .await?;
+        let mut builder = Db::builder(format!("p/{pid}"), store).with_settings(settings);
+        if let Some(cache) = &cfg.cache {
+            builder = builder.with_db_cache(cache.clone(), pid);
+        }
+        let db = builder.build().await?;
+        let opened = t0.elapsed();
         let epoch = be64(&db.get(keys::meta_key(META_EPOCH)).await?) + 1;
         let max_ts = be64(&db.get(keys::meta_key(META_MAXTS)).await?);
         let mut b = WriteBatch::new();
         b.put(keys::meta_key(META_EPOCH), epoch.to_be_bytes());
         db.write(b).await?.await_durable().await?;
+        let epoch_written = t0.elapsed();
 
         // Committed ids from the window, so a commit whose response was lost is recognised.
         let mut recent = HashMap::new();
@@ -300,7 +307,8 @@ impl Partition {
             last_active: Mutex::new(Instant::now()),
         });
         tokio::spawn(background(Arc::downgrade(&p)));
-        tracing::info!(partition = pid, epoch, max_commit_ts = max_ts, took = ?t0.elapsed(), "took over partition");
+        crate::metrics::TAKEOVER.observe(t0.elapsed());
+        tracing::info!(partition = pid, epoch, max_commit_ts = max_ts, took = ?t0.elapsed(), ?opened, ?epoch_written, "took over partition");
         Ok(p)
     }
 
@@ -310,6 +318,27 @@ impl Partition {
 
     pub fn touch(&self) {
         *self.last_active.lock() = Instant::now();
+    }
+
+    pub fn idle_for(&self) -> Duration {
+        self.last_active.lock().elapsed()
+    }
+
+    /// Suspends the partition if it has had no open transactions and no
+    /// requests for idle: new requests get EpochChanged from here on, and
+    /// the database is closed with a memtable flush, so the next wake has
+    /// little WAL to replay. Reports whether it suspended.
+    pub async fn try_suspend(&self, idle: Duration) -> Result<bool> {
+        {
+            let mut st = self.state.lock();
+            if st.stop_err.is_some() || !st.txns.is_empty() || self.idle_for() < idle {
+                return Ok(false);
+            }
+            st.stop_err = Some(KvError::suspended());
+        }
+        let _g = self.commit_lock.lock().await;
+        self.db.close().await?;
+        Ok(true)
     }
 
     pub fn stopped(&self) -> Option<KvError> {
@@ -756,6 +785,7 @@ impl Partition {
     /// A transaction without writes commits at 0.
     pub async fn commit(&self, epoch: u64, id: TxnId, guards: Vec<Guard>) -> Result<u64> {
         self.check_epoch(epoch)?;
+        let t0 = Instant::now();
         let (writes, autoinc) = {
             let mut st = self.state.lock();
             if let Some((ts, _)) = st.recent.get(&id) {
@@ -812,7 +842,10 @@ impl Partition {
             let ts = st.max_commit_ts;
             for table in &autoinc {
                 // saved with the commit, so values are never reused
-                b.put(keys::version_key(&self.auto_inc_key(*table), ts), st.autoinc[table].to_be_bytes());
+                b.put(
+                    keys::version_key(&self.auto_inc_key(*table), ts),
+                    st.autoinc[table].to_be_bytes(),
+                );
             }
             ts
         };
@@ -841,6 +874,7 @@ impl Partition {
             self.stop(err.clone());
             return Err(err);
         }
+        crate::metrics::COMMIT.observe(t0.elapsed());
         self.visible.fetch_max(ts, Ordering::AcqRel);
         {
             let mut st = self.state.lock();

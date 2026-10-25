@@ -28,16 +28,20 @@ import (
 
 func main() {
 	bin := flag.String("bin", "./bin", "directory with dird, kvd and sqld")
+	kvd := flag.String("kvd", "", "kvd binary to spawn (default: kvd in -bin; kvd-rs/target/release/kvd for the Rust owner)")
 	idle := flag.Duration("idle", 5*time.Second, "idle time before the tenant's kvd suspends and exits (the v1 default is 5m)")
 	rounds := flag.Int("rounds", 3, "sleep/wake rounds")
 	flag.Parse()
+	if *kvd == "" {
+		*kvd = filepath.Join(*bin, "kvd")
+	}
 
 	dir, _ := os.MkdirTemp("", "wakedemo")
 	dirAddr, sqlAddr := freeAddr(), freeAddr()
 	partition := fmt.Sprint(time.Now().UnixNano()%(1<<40) + 1000)
 
 	dird := start(dir, "dird", filepath.Join(*bin, "dird"), "-listen", dirAddr, "-db", filepath.Join(dir, "dir.db"),
-		"-spawn-kvd", filepath.Join(*bin, "kvd"), "-spawn-data", filepath.Join(dir, "kv"),
+		"-spawn-kvd", *kvd, "-spawn-data", filepath.Join(dir, "kv"),
 		"-spawn-args", "-idle-suspend "+idle.String())
 	defer dird.Process.Kill()
 	sqld := start(dir, "sqld", filepath.Join(*bin, "sqld"), "-listen", sqlAddr, "-directory", dirAddr, "-partition", partition, "-create-db", "demo")

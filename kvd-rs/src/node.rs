@@ -1,6 +1,9 @@
 //! A KV process serving many partitions, each its own SlateDB database
 //! (`internal/kv/node.go`). Concurrent opens of one partition share a
-//! single takeover.
+//! single takeover. With an idle-suspend time, partitions without open
+//! transactions or requests for that long are suspended; the node reports
+//! each suspension, and that it serves nothing any more, as events (the
+//! directory agent releases the partition and may exit the process).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -8,29 +11,55 @@ use std::time::Duration;
 
 use object_store::ObjectStore;
 use parking_lot::Mutex;
+use tokio::sync::mpsc;
 
 use crate::error::{Kind, KvError, Result};
 use crate::partition::{Config, Partition};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Event {
+    /// The node suspended a partition and no longer serves it.
+    Suspended { partition: u64, epoch: u64 },
+    /// The node served partitions and now serves none.
+    Empty,
+}
 
 pub struct Node {
     cfg: Config,
     store: Arc<dyn ObjectStore>,
     partitions: Mutex<HashMap<u64, Arc<Partition>>>,
     opening: Mutex<HashMap<u64, Arc<tokio::sync::Mutex<()>>>>,
+    events: Option<mpsc::UnboundedSender<Event>>,
 }
 
 impl Node {
-    pub fn new(cfg: Config, store: Arc<dyn ObjectStore>) -> Arc<Node> {
+    /// A node; events, if given, receive suspensions and emptiness.
+    pub fn new(cfg: Config, store: Arc<dyn ObjectStore>, events: Option<mpsc::UnboundedSender<Event>>) -> Arc<Node> {
         Arc::new(Node {
             cfg,
             store,
             partitions: Mutex::default(),
             opening: Mutex::default(),
+            events,
         })
     }
 
     pub fn owner_id(&self) -> &str {
         &self.cfg.owner_id
+    }
+
+    /// The partitions this node serves, with their epochs.
+    pub fn partitions(&self) -> Vec<(u64, u64)> {
+        self.partitions
+            .lock()
+            .values()
+            .filter(|p| p.stopped().is_none())
+            .map(|p| (p.id, p.epoch))
+            .collect()
+    }
+
+    fn opening_count(&self) -> usize {
+        self.opening.lock().values().filter(|g| g.try_lock().is_err()).count()
     }
 
     /// The served partition pid, or EpochChanged.
@@ -48,12 +77,17 @@ impl Node {
         Ok(p)
     }
 
-    fn forget(&self, p: &Arc<Partition>) {
+    fn remove(&self, p: &Arc<Partition>) -> bool {
         let mut ps = self.partitions.lock();
         if ps.get(&p.id).is_some_and(|q| Arc::ptr_eq(q, p)) {
             ps.remove(&p.id);
+            return true;
         }
-        drop(ps);
+        false
+    }
+
+    fn forget(&self, p: &Arc<Partition>) {
+        self.remove(p);
         let p = p.clone();
         tokio::spawn(async move { p.close().await });
     }
@@ -84,6 +118,65 @@ impl Node {
         };
         self.partitions.lock().insert(pid, p.clone());
         Ok(p)
+    }
+
+    /// Suspends idle partitions every second until the process exits.
+    pub fn spawn_idle_loop(self: &Arc<Self>, idle: Duration) {
+        let node = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            let mut had_partitions = false;
+            loop {
+                tick.tick().await;
+                let Some(n) = node.upgrade() else { return };
+                had_partitions |= n.idle_pass(idle).await;
+                let empty = n.partitions.lock().is_empty() && n.opening_count() == 0;
+                if empty && had_partitions {
+                    had_partitions = false;
+                    n.emit(Event::Empty);
+                }
+            }
+        });
+    }
+
+    /// One pass of the idle loop; reports whether the node served anything.
+    async fn idle_pass(&self, idle: Duration) -> bool {
+        let ps: Vec<Arc<Partition>> = self.partitions.lock().values().cloned().collect();
+        let mut served = !ps.is_empty() || self.opening_count() > 0;
+        for p in ps {
+            if p.stopped().is_some() {
+                // fenced by a newer owner, or failed
+                self.forget(&p);
+                continue;
+            }
+            if p.idle_for() < idle {
+                continue;
+            }
+            match p.try_suspend(idle).await {
+                Ok(false) => {}
+                Ok(true) => {
+                    self.remove(&p);
+                    served = true;
+                    tracing::info!(partition = p.id, epoch = p.epoch, "suspended idle partition");
+                    self.emit(Event::Suspended {
+                        partition: p.id,
+                        epoch: p.epoch,
+                    });
+                }
+                Err(e) => {
+                    // The database is closed either way: stop serving it.
+                    tracing::warn!(partition = p.id, err = %e, "idle suspend failed");
+                    self.remove(&p);
+                }
+            }
+        }
+        served
+    }
+
+    fn emit(&self, e: Event) {
+        if let Some(tx) = &self.events {
+            let _ = tx.send(e);
+        }
     }
 
     /// Closes every partition, flushing each memtable.

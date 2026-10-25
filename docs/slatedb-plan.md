@@ -81,8 +81,16 @@ both are tested against the same suites.
   owner over gRPC found a bug that predates the Rust work: an empty value
   (a secondary-index entry) written in a transaction read back as absent
   until commit, because the wire turns it into nil; fixed in `kvrpc`.
-  Still to do: the Pebble compatibility test and sqllogictest against the
-  Rust owner in CI, and the MySQL differential test over gRPC.
+  On the Rust owner, the sqllogictest files counted so far give the same
+  results as on the Go owner (run by hand). Still to do: the Pebble compatibility test and sqllogictest
+  against the Rust owner in CI, and the MySQL differential test over gRPC.
+- **Phase 4** is done except for per-partition PUT accounting: directory
+  registration and heartbeats, idle suspend with release, exit-when-idle
+  (so `dird -spawn-kvd` works with the Rust binary), a shared block cache
+  and per-partition memory limits, and Prometheus metrics. The
+  scale-to-zero demo and the driver and ORM suites through `proxyd` pass
+  on the Rust owner. A wake takes about 170 ms against 80–95 ms for the Go
+  owner: SlateDB's open is 70–85 ms of it.
 
 ## Open questions carried from the spike
 

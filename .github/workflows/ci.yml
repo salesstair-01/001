@@ -150,7 +150,7 @@ jobs:
           ./slatespike bench -sizes 100
 
   kvd-rs:
-    name: "Rust kvd (SlateDB) on MicroCeph: KV suites, crash test, drivers, ORM"
+    name: "Rust kvd (SlateDB) on MicroCeph: KV suites, crash test, scale to zero, drivers, ORM"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -190,18 +190,29 @@ jobs:
           eval "$(scripts/ceph/microceph.sh env)"
           KVSUITE_KVD=$PWD/bin/kvd go test ./internal/kvsuite -count=1 -v -meta-runs 20 -meta-ops 500
           KVSUITE_KVD=$PWD/kvd-rs/target/release/kvd go test ./internal/kvsuite -count=1 -v -meta-runs 20 -meta-ops 500
-      - name: driver matrix and ORM suite on the Rust owner
+      - name: scale to zero with the Rust owner (dird spawns it, it suspends and exits)
+        run: |
+          eval "$(scripts/ceph/microceph.sh env)"
+          ./bin/wakedemo -bin ./bin -kvd kvd-rs/target/release/kvd -idle 3s -rounds 3
+      - name: driver matrix and ORM suite on the Rust owner (sqld, and proxyd + dird)
         run: |
           eval "$(scripts/ceph/microceph.sh env)"
           mkdir -p /tmp/s2z
           kvd-rs/target/release/kvd -listen 127.0.0.1:7070 > /tmp/s2z/kvd.log 2>&1 &
           ./bin/sqld -listen 127.0.0.1:3306 -kv 127.0.0.1:7070 -partition 5001 > /tmp/s2z/sqld.log 2>&1 &
+          ./bin/dird -listen 127.0.0.1:7000 -db /tmp/s2z/dir.db -spawn-kvd kvd-rs/target/release/kvd \
+            -spawn-data /tmp/s2z/spawned > /tmp/s2z/dird.log 2>&1 &
+          echo '[{"name":"acme","partition":5002,"users":{"app":"s3cret"}}]' > /tmp/s2z/tenants.json
+          ./bin/proxyd -listen 127.0.0.1:3307 -tenants /tmp/s2z/tenants.json -domain db.test \
+            -spawn-sqld ./bin/sqld -directory 127.0.0.1:7000 -warm 1 > /tmp/s2z/proxyd.log 2>&1 &
           sleep 3
           DRV_PORT=3306 scripts/drivers/run.sh
+          DRV_PORT=3307 DRV_USER=app@acme DRV_PASSWORD=s3cret scripts/drivers/run.sh
           ORM_PORT=3306 scripts/orm/run.sh
+          ORM_PORT=3307 ORM_USER=app@acme ORM_PASSWORD=s3cret scripts/orm/run.sh
       - name: logs
         if: failure()
-        run: tail -n 50 /tmp/s2z/*.log || true
+        run: tail -n 50 /tmp/s2z/*.log /tmp/s2z/spawned/*.log || true
 
   mysql-diff:
     name: differential tests against MySQL 8

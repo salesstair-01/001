@@ -51,6 +51,10 @@ impl KvError {
         Self::new(Kind::EpochChanged, "partition no longer served by this owner")
     }
 
+    pub fn suspended() -> Self {
+        Self::new(Kind::EpochChanged, "partition suspended; resolve the owner again")
+    }
+
     pub fn abandoned() -> Self {
         Self::new(Kind::Unavailable, "object store unreachable; commit outcome unknown")
     }

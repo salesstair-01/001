@@ -1,16 +1,23 @@
 //! kvd: the KV owner on SlateDB. It serves the same gRPC API as the Go
-//! `cmd/kvd` (proto/s2z/kv/kv.proto) and takes the same flags; flags for
-//! features not ported yet are accepted and reported.
+//! `cmd/kvd` (proto/s2z/kv/kv.proto) and takes the same flags, so `dird`
+//! can spawn it; flags for features it doesn't have are accepted and
+//! reported.
 
+mod agent;
 mod error;
 mod keys;
 mod locks;
+mod metrics;
 mod node;
 mod partition;
 mod service;
 
 pub mod pb {
     tonic::include_proto!("s2z.kv");
+
+    pub mod dir {
+        tonic::include_proto!("s2z.directory");
+    }
 }
 
 use std::sync::Arc;
@@ -18,6 +25,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use object_store::aws::AmazonS3Builder;
+use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
+use tokio::sync::Notify;
 
 #[derive(Parser, Debug)]
 #[command(about = "KV owner on SlateDB")]
@@ -52,28 +61,41 @@ struct Args {
     #[arg(long = "auto-open", num_args = 0..=1, default_missing_value = "true", default_value = "true")]
     auto_open: bool,
     /// group-commit (WAL flush) interval
-    #[arg(long = "flush-interval", value_parser = humantime_ms, default_value = "10ms")]
+    #[arg(long = "flush-interval", value_parser = go_duration, default_value = "10ms")]
     flush_interval: Duration,
 
-    // Node features of the Go owner, not ported yet (phase 4).
+    /// directory service address (empty = run standalone)
     #[arg(long, env = "KVD_DIRECTORY", default_value = "")]
     directory: String,
+    /// node id in the directory (default: the owner id)
     #[arg(long = "node-id", env = "KVD_NODE_ID", default_value = "")]
     node_id: String,
+    /// address query engines reach this node at (default: the listen address)
     #[arg(long, default_value = "")]
     advertise: String,
-    #[arg(long = "idle-suspend", default_value = "0s")]
-    idle_suspend: String,
+    /// suspend a partition idle this long (0 = never)
+    #[arg(long = "idle-suspend", value_parser = go_duration, default_value = "0s")]
+    idle_suspend: Duration,
+    /// exit once no partition is served (a dedicated per-tenant process)
     #[arg(long = "exit-when-idle", num_args = 0..=1, default_missing_value = "true", default_value = "false")]
     exit_when_idle: bool,
+    /// serve Prometheus metrics at http://<addr>/metrics (empty = off)
     #[arg(long = "metrics-listen", default_value = "")]
     metrics_listen: String,
+    /// block cache shared by all partitions, MiB
+    #[arg(long = "block-cache-mb", default_value_t = 256)]
+    block_cache_mb: u64,
+    /// memtable size per partition before it is flushed to an SST, MiB
+    #[arg(long = "memtable-mb", default_value_t = 4)]
+    memtable_mb: usize,
+    /// unflushed data a partition may hold in memory before writes wait, MiB
+    #[arg(long = "max-unflushed-mb", default_value_t = 64)]
+    max_unflushed_mb: usize,
+
+    // Flags of the Go owner without a meaning here: SlateDB keeps no local
+    // file cache and makes its own PUTs.
     #[arg(long = "cache-dir", env = "KVD_CACHE_DIR", default_value = "")]
     cache_dir: String,
-    #[arg(long = "block-cache-mb", default_value_t = 256)]
-    block_cache_mb: i64,
-    #[arg(long = "memtable-mb", default_value_t = 4)]
-    memtable_mb: i64,
     #[arg(long = "put-concurrency", default_value_t = 32)]
     put_concurrency: i64,
     #[arg(long = "put-rate", default_value_t = 100.0)]
@@ -82,15 +104,28 @@ struct Args {
     put_burst: i64,
 }
 
-/// Parses a Go-style duration with an ms or s suffix.
-fn humantime_ms(s: &str) -> Result<Duration, String> {
-    if let Some(n) = s.strip_suffix("ms") {
-        return n.parse().map(Duration::from_millis).map_err(|e| e.to_string());
+/// Parses a Go duration ("10ms", "5m", "1m30s", "0").
+fn go_duration(s: &str) -> Result<Duration, String> {
+    if s == "0" {
+        return Ok(Duration::ZERO);
     }
-    if let Some(n) = s.strip_suffix('s') {
-        return n.parse::<f64>().map(Duration::from_secs_f64).map_err(|e| e.to_string());
+    let mut total = Duration::ZERO;
+    let mut rest = s;
+    while !rest.is_empty() {
+        let n = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .ok_or(format!("bad duration {s:?}"))?;
+        let v: f64 = rest[..n].parse().map_err(|_| format!("bad duration {s:?}"))?;
+        rest = &rest[n..];
+        let (unit, len) = [("ms", 0.001), ("h", 3600.0), ("m", 60.0), ("s", 1.0)]
+            .iter()
+            .find(|(u, _)| rest.starts_with(u))
+            .map(|(u, f)| (*f, u.len()))
+            .ok_or(format!("bad duration {s:?}"))?;
+        total += Duration::from_secs_f64(v * unit);
+        rest = &rest[len..];
     }
-    Err(format!("bad duration {s:?}"))
+    Ok(total)
 }
 
 /// Go flags take one dash (`-listen x`); clap wants two.
@@ -124,10 +159,6 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    if !args.directory.is_empty() || args.exit_when_idle || args.idle_suspend != "0s" || !args.metrics_listen.is_empty()
-    {
-        tracing::warn!("-directory, -idle-suspend, -exit-when-idle and -metrics-listen are not supported yet; ignored");
-    }
     let scheme = if args.ssl { "https" } else { "http" };
     let store = AmazonS3Builder::new()
         .with_endpoint(format!("{scheme}://{}", args.endpoint))
@@ -142,12 +173,27 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if owner.is_empty() {
         owner = format!("kv-{:012x}", rand::random::<u64>() & 0xffff_ffff_ffff);
     }
+    let cache = FoyerCache::new_with_opts(FoyerCacheOptions {
+        max_capacity: args.block_cache_mb << 20,
+        ..Default::default()
+    });
     let cfg = partition::Config {
         owner_id: owner.clone(),
+        cache: Some(Arc::new(cache)),
         flush_interval: args.flush_interval,
+        l0_sst_bytes: args.memtable_mb << 20,
+        max_unflushed_bytes: args.max_unflushed_mb << 20,
         ..Default::default()
     };
-    let node = node::Node::new(cfg, Arc::new(store));
+    let (events_tx, events) = tokio::sync::mpsc::unbounded_channel();
+    let with_dir = !args.directory.is_empty();
+    let node = node::Node::new(cfg, Arc::new(store), with_dir.then_some(events_tx));
+    if !args.idle_suspend.is_zero() {
+        node.spawn_idle_loop(args.idle_suspend);
+    }
+    if !args.metrics_listen.is_empty() {
+        metrics::serve(&args.metrics_listen, node.clone()).await?;
+    }
     if args.partition != 0 {
         let p = node.open(args.partition).await?;
         tracing::info!(partition = args.partition, epoch = p.epoch, "serving partition");
@@ -159,16 +205,41 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("bad -listen")?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
-    tracing::info!(addr = %local, owner, bucket = args.bucket, "kvd listening");
+    let advertise = if args.advertise.is_empty() {
+        local.to_string()
+    } else {
+        args.advertise.clone()
+    };
+    let exit = Arc::new(Notify::new());
+    if with_dir {
+        let a = agent::Agent {
+            node_id: if args.node_id.is_empty() {
+                owner.clone()
+            } else {
+                args.node_id.clone()
+            },
+            addr: advertise.clone(),
+            exit_when_idle: args.exit_when_idle,
+            idle_exit: if args.exit_when_idle {
+                args.idle_suspend + Duration::from_secs(30)
+            } else {
+                Duration::ZERO
+            },
+            exit: exit.clone(),
+        };
+        tokio::spawn(a.run(args.directory.clone(), node.clone(), events));
+    }
+    tracing::info!(addr = %advertise, owner, bucket = args.bucket, directory = args.directory, "kvd listening");
     let svc = service::Service {
         node: node.clone(),
         auto_open: args.auto_open,
     };
-    let shutdown = async {
+    let shutdown = async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
+            _ = exit.notified() => {}
         }
         tracing::info!("shutting down");
     };
@@ -184,4 +255,22 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     node.close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn go_durations() {
+        let ms = Duration::from_millis;
+        assert_eq!(go_duration("0"), Ok(Duration::ZERO));
+        assert_eq!(go_duration("0s"), Ok(Duration::ZERO));
+        assert_eq!(go_duration("10ms"), Ok(ms(10)));
+        assert_eq!(go_duration("3s"), Ok(ms(3000)));
+        assert_eq!(go_duration("5m0s"), Ok(ms(300_000)));
+        assert_eq!(go_duration("1h1m1.5s"), Ok(ms(3_661_500)));
+        assert!(go_duration("5x").is_err());
+        assert!(go_duration("s").is_err());
+    }
 }

@@ -1,0 +1,169 @@
+// The KV owner's API (D7), shared by the Go and Rust owners and the query
+// engine. Method and message names match the original Go structs.
+//
+// Byte fields: proto3 does not keep an empty value apart from an absent
+// one, so GetResp carries `found` flags, and an empty value reads back as
+// empty (the gob codec this replaces behaved the same).
+//
+// Errors: a KV error is a gRPC status with code ABORTED and the message
+// "kv:<Kind>|<hex key>|<message>"; transport failures mean the owner is
+// unreachable (EpochChanged).
+syntax = "proto3";
+
+package s2z.kv;
+
+option go_package = "github.com/salesstair-01/001/internal/kvrpc/kvpb";
+
+service KV {
+  // Open takes a partition over (with auto-open) or reports the epoch it is served at.
+  rpc Open(OpenReq) returns (OpenResp);
+  rpc Begin(BeginReq) returns (Empty);
+  rpc Get(GetReq) returns (GetResp);
+  rpc Scan(ScanReq) returns (ScanResp);
+  rpc Mutate(MutateReq) returns (Empty);
+  rpc RollbackStatement(StmtReq) returns (Empty);
+  rpc Commit(TxnReq) returns (CommitResp);
+  rpc Rollback(TxnReq) returns (Empty);
+  rpc TxnStatus(TxnReq) returns (TxnStatusResp);
+  rpc Ping(Empty) returns (PingResp);
+  rpc AutoIncrement(AutoIncReq) returns (AutoIncResp);
+  rpc Heartbeat(HeartbeatReq) returns (Empty);
+}
+
+// Carried by every request.
+message Header {
+  uint64 partition = 1;
+  uint64 epoch = 2;
+  // Background requests (statistics, maintenance) don't count as activity,
+  // so they don't keep an idle partition awake.
+  bool background = 3;
+}
+
+enum Isolation {
+  REPEATABLE_READ = 0;
+  READ_COMMITTED = 1;
+}
+
+enum LockMode {
+  LOCK_NONE = 0;
+  LOCK_SHARED = 1;
+  LOCK_EXCLUSIVE = 2;
+}
+
+enum MutationOp {
+  OP_PUT = 0;         // write a value
+  OP_DELETE = 1;      // write a delete marker
+  OP_INSERT_ONLY = 2; // write a value; DuplicateKey if a live version exists
+}
+
+enum TxnState {
+  TXN_UNKNOWN = 0; // aborted, or never existed (definitive after a takeover)
+  TXN_ACTIVE = 1;
+  TXN_COMMITTED = 2;
+}
+
+message Empty {}
+
+message OpenReq {
+  uint64 partition = 1;
+}
+message OpenResp {
+  uint64 epoch = 1;
+}
+
+message BeginReq {
+  Header h = 1;
+  bytes txn = 2; // 16 bytes
+  Isolation isolation = 3;
+  // Take the snapshot now (START TRANSACTION WITH CONSISTENT SNAPSHOT).
+  bool consistent_snapshot = 4;
+}
+
+message ReadOpts {
+  uint64 stmt = 1;
+  bool include_stmt = 2; // see the statement's own writes (duplicate-key checks)
+  LockMode lock = 3;
+  int64 lock_wait_ms = 4;
+}
+
+message GetReq {
+  Header h = 1;
+  bytes txn = 2;
+  repeated bytes keys = 3;
+  ReadOpts opts = 4;
+}
+message GetResp {
+  repeated bytes values = 1;
+  repeated bool found = 2;
+}
+
+message ScanReq {
+  Header h = 1;
+  bytes txn = 2;
+  bytes start = 3; // empty = from the first key
+  bytes end = 4;   // empty = to the last key
+  int64 limit = 5; // 0 = no limit
+  ReadOpts opts = 6;
+}
+message ScanResp {
+  repeated bytes keys = 1;
+  repeated bytes values = 2;
+  bytes resume = 3; // where the next page starts; empty at the end
+}
+
+message Mutation {
+  MutationOp op = 1;
+  bytes key = 2;
+  bytes value = 3;
+}
+message MutateReq {
+  Header h = 1;
+  bytes txn = 2;
+  uint64 stmt = 3;
+  repeated Mutation mutations = 4;
+  int64 lock_wait_ms = 5;
+}
+
+message StmtReq {
+  Header h = 1;
+  bytes txn = 2;
+  uint64 stmt = 3;
+}
+
+// A precondition checked at commit time, in commit order.
+message Guard {
+  bytes key = 1;
+  bytes value = 2;
+}
+message TxnReq {
+  Header h = 1;
+  bytes txn = 2;
+  repeated Guard guards = 3; // Commit only
+}
+message CommitResp {
+  uint64 commit_ts = 1;
+}
+message TxnStatusResp {
+  TxnState state = 1;
+  uint64 commit_ts = 2;
+}
+
+message PingResp {
+  string owner = 1;
+}
+
+message AutoIncReq {
+  Header h = 1;
+  bytes txn = 2; // empty = peek
+  uint32 table = 3;
+  uint64 count = 4;
+  uint64 at_least = 5;
+}
+message AutoIncResp {
+  uint64 first = 1;
+}
+
+message HeartbeatReq {
+  Header h = 1;
+  repeated bytes txns = 2;
+}

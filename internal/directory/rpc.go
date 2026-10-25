@@ -10,8 +10,9 @@ import (
 	"github.com/salesstair-01/001/internal/kv"
 )
 
-// The directory API uses the same gob codec as the KV API (kvrpc.ServerOption,
-// kvrpc.DialOptions).
+// The directory API is defined in proto/s2z/directory/directory.proto and
+// uses the KV API's codec (kvrpc.ServerOption, kvrpc.DialOptions), with the
+// converters in pb.go.
 
 type (
 	RegisterReq  struct{ Node, Addr string }

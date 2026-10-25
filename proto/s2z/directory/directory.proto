@@ -1,0 +1,52 @@
+// The directory's API (slice 6): node registration and heartbeats, and the
+// partition-to-owner routes the query engines resolve. Errors are gRPC
+// status UNAVAILABLE.
+syntax = "proto3";
+
+package s2z.directory;
+
+option go_package = "github.com/salesstair-01/001/internal/directory/dirpb";
+
+service Directory {
+  rpc RegisterNode(RegisterReq) returns (Empty);
+  rpc Heartbeat(HeartbeatReq) returns (Empty);
+  rpc Release(ReleaseReq) returns (Empty);
+  rpc Peek(ResolveReq) returns (Route);
+  rpc Resolve(ResolveReq) returns (Route);
+}
+
+message Empty {}
+
+message RegisterReq {
+  string node = 1;
+  string addr = 2;
+}
+
+message PartitionEpoch {
+  uint64 partition = 1;
+  uint64 epoch = 2;
+}
+
+message HeartbeatReq {
+  string node = 1;
+  string addr = 2;
+  repeated PartitionEpoch partitions = 3;
+}
+
+message ReleaseReq {
+  string node = 1;
+  uint64 partition = 2;
+  uint64 epoch = 3;
+  bool exiting = 4;
+}
+
+message ResolveReq {
+  uint64 partition = 1;
+  uint64 stale = 2;
+}
+
+message Route {
+  string node = 1;
+  string addr = 2;
+  uint64 epoch = 3;
+}

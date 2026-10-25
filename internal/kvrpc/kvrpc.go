@@ -1,13 +1,13 @@
 // Package kvrpc is the gRPC API between the query engine and the KV owner
-// (D7). Messages are plain Go structs carried with a gob codec, so the API
-// needs no code generation. Every request carries the partition id and the
-// epoch the caller expects; a mismatch returns EpochChanged.
+// (D7). The API is defined in proto/s2z/kv/kv.proto, so owners can be
+// written in other languages; Go code uses the plain structs below, which
+// codec.go converts to and from the protobuf messages. Every request
+// carries the partition id and the epoch the caller expects; a mismatch
+// returns EpochChanged.
 package kvrpc
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -59,7 +59,7 @@ type (
 	}
 	GetResp struct {
 		Values [][]byte
-		Found  []bool // gob does not keep nil apart from empty
+		Found  []bool // the wire does not keep nil apart from empty
 	}
 
 	ScanReq struct {
@@ -133,31 +133,15 @@ func (o ReadOpts) kv() kv.ReadOptions {
 
 // ---- codec -------------------------------------------------------------------
 
-type gobCodec struct{}
+// ServerOption makes a grpc.Server use the protobuf codec over the Go structs.
+func ServerOption() grpc.ServerOption { return grpc.ForceServerCodec(protoCodec{}) }
 
-func (gobCodec) Name() string { return "gob" }
-
-func (gobCodec) Marshal(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(v); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func (gobCodec) Unmarshal(data []byte, v any) error {
-	return gob.NewDecoder(bytes.NewReader(data)).Decode(v)
-}
-
-// ServerOption makes a grpc.Server use the gob codec.
-func ServerOption() grpc.ServerOption { return grpc.ForceServerCodec(gobCodec{}) }
-
-// DialOptions make a client connection use the gob codec and reconnect
+// DialOptions make a client connection use the protobuf codec and reconnect
 // quickly. Calls fail fast when the owner is unreachable: the query engine
 // then re-resolves the owner (which wakes or moves the partition) and retries.
 func DialOptions() []grpc.DialOption {
 	return []grpc.DialOption{
-		grpc.WithDefaultCallOptions(grpc.ForceCodec(gobCodec{})),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(protoCodec{})),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff:           backoff.Config{BaseDelay: 50 * time.Millisecond, Multiplier: 1.6, Jitter: 0.2, MaxDelay: time.Second},
 			MinConnectTimeout: time.Second,

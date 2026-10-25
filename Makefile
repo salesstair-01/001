@@ -1,4 +1,4 @@
-.PHONY: build test test-minio ceph-up ceph-down test-s3 fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
+.PHONY: proto build test test-minio ceph-up ceph-down test-s3 fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
 
 build:
 	go build -o bin/ ./cmd/...
@@ -50,3 +50,10 @@ ceph-down:
 test-s3:
 	eval "$$(scripts/ceph/microceph.sh env)" && \
 	go test ./internal/objstore -run 'S3Compat|MinIO' -v && go test ./internal/kv -run MinIO -v
+
+# Regenerate the Go protobuf code (internal/kvrpc/kvpb, internal/directory/dirpb)
+# from proto/s2z. Needs buf and protoc-gen-go on PATH:
+#   go install github.com/bufbuild/buf/cmd/buf@v1.57.2
+#   go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+proto:
+	cd proto && buf lint && buf generate

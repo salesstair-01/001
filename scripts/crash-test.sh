@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Slice 1 crash script: write loop, random kill -9 of kvd, then verify every
-# acknowledged row. Needs MinIO on $MINIO_ENDPOINT (default 127.0.0.1:9000),
-# e.g. `docker compose up -d minio`.
+# Crash script: write loop, random kill -9 of kvd, then verify every
+# acknowledged row. Needs an object store on $MINIO_ENDPOINT, e.g.
+# `make ceph-up && eval "$(scripts/ceph/microceph.sh env)"`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-mkdir -p bin
-go build -o bin/ ./cmd/kvd ./cmd/sqld ./cmd/crashtest
+make -s kvd
+go build -o bin/ ./cmd/sqld ./cmd/crashtest
 exec ./bin/crashtest -kvd bin/kvd -sqld bin/sqld "$@"

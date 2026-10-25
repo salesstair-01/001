@@ -1,5 +1,9 @@
 # Remote SSTs (spike)
 
+> Historical: this spike was on the Go owner (Pebble), which has been
+> removed. The owner is now kvd-rs on SlateDB, which reads SSTs from the
+> object store lazily by design (docs/slatedb-plan.md).
+
 `kv.Config.RemoteSSTs` has Pebble v2 write the SSTs of flushes and compactions
 straight to the object store and read them back lazily, through a local block
 cache. A wake then downloads only Pebble's metadata files instead of the whole

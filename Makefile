@@ -1,34 +1,52 @@
-.PHONY: proto kvd-rs crash-test-rs kvsuite wake-demo-rs restore-test-rs build test test-minio ceph-up ceph-down test-s3 fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
+.PHONY: build kvd test fault-runs metamorphic kvsuite test-s3 crash-test restore-test wake-demo cold-start slt drivers orm ceph-up ceph-down proto
 
-build:
+# Every binary into bin/: the Go ones (sqld, dird, proxyd, tools) and kvd,
+# the KV owner, from kvd-rs/ (Rust, on SlateDB).
+build: kvd
 	go build -o bin/ ./cmd/...
 
-# Unit and integration tests; the MinIO tests skip without MINIO_ENDPOINT.
-test:
+kvd:
+	cd kvd-rs && cargo build --release
+	mkdir -p bin && cp kvd-rs/target/release/kvd bin/kvd.new && mv bin/kvd.new bin/kvd
+
+# Unit and integration tests. They need no object store: kvd runs on a
+# local directory (-store-dir).
+test: kvd
+	cd kvd-rs && cargo test --release
 	go test ./...
 
-test-minio:
-	MINIO_ENDPOINT=$${MINIO_ENDPOINT:-127.0.0.1:9000} go test ./...
+# The owner's fault-injection runs and metamorphic test, at length.
+fault-runs:
+	cd kvd-rs && KVD_FAULT_SEEDS=200 cargo test --release --test durability faults
+metamorphic:
+	cd kvd-rs && KVD_META_SEEDS=100 KVD_META_OPS=500 cargo test --release --test metamorphic
 
-# Slice 2 bar: the fault tests pass 1,000 seeded runs.
-fault-1000:
-	go test ./internal/kv/ -run TestFaultInjection -fault-runs=1000 -timeout 30m
+# The KV suites over gRPC against kvd (on S3 when MINIO_ENDPOINT is set).
+kvsuite: kvd
+	go test ./internal/kvsuite -count=1 -v
 
-crash-test:
-	./scripts/crash-test.sh -kills 5
+# Object-store tests against MicroCeph (or whatever MINIO_ENDPOINT points at).
+test-s3: kvd
+	eval "$$(scripts/ceph/microceph.sh env)" && \
+	go test ./internal/objstore -run 'S3Compat|MinIO' -v && go test ./internal/kvsuite -count=1 -v
+
+# kill -9 loop against kvd; needs MINIO_* (an object store).
+crash-test: build
+	./bin/crashtest -kvd bin/kvd -sqld bin/sqld -kills 5
+
+# Point-in-time restore end to end through sqld; needs MINIO_*.
+restore-test: build
+	scripts/kvd-rs/restore-test.sh
 
 wake-demo: build
 	./bin/wakedemo -bin ./bin -idle 3s -rounds 3
-
-wake-time: build
-	./bin/waketime -sizes 100,1024,5120
 
 cold-start: build
 	./bin/coldstart -rounds 20 -warm 0
 	./bin/coldstart -rounds 20 -warm 1
 
 # sqllogictest subset (scripts/slt/files.txt); writes scripts/slt/results.md.
-slt:
+slt: kvd
 	scripts/slt/fetch.sh
 	go run ./cmd/slt -parallel 4 -summary scripts/slt/results.md $$(grep -v '^#' scripts/slt/files.txt | sed 's|^|scripts/slt/test/|')
 
@@ -46,37 +64,10 @@ ceph-up:
 ceph-down:
 	scripts/ceph/microceph.sh down
 
-# Object-store tests against MicroCeph (or whatever MINIO_ENDPOINT points at).
-test-s3:
-	eval "$$(scripts/ceph/microceph.sh env)" && \
-	go test ./internal/objstore -run 'S3Compat|MinIO' -v && go test ./internal/kv -run MinIO -v
-
 # Regenerate the Go protobuf code (internal/kvrpc/kvpb, internal/directory/dirpb)
-# from proto/s2z. Needs buf and protoc-gen-go on PATH:
+# from proto/s2z; kvd-rs generates its own at build time. Needs buf and
+# protoc-gen-go on PATH:
 #   go install github.com/bufbuild/buf/cmd/buf@v1.57.2
 #   go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
-# The Rust KV owner on SlateDB (kvd-rs/, docs/slatedb-plan.md).
-kvd-rs:
-	cd kvd-rs && cargo build --release
-
-# The crash test with the Rust owner (needs MINIO_* pointing at an object store).
-crash-test-rs: kvd-rs
-	go build -o bin/ ./cmd/sqld ./cmd/crashtest
-	./bin/crashtest -kvd kvd-rs/target/release/kvd -sqld bin/sqld
-
-# The scale-to-zero demo with dird spawning the Rust owner.
-wake-demo-rs: build kvd-rs
-	./bin/wakedemo -bin ./bin -kvd kvd-rs/target/release/kvd -idle 3s -rounds 3
-
-# Point-in-time restore with the Rust owner (needs MINIO_*).
-restore-test-rs: build kvd-rs
-	scripts/kvd-rs/restore-test.sh
-
-# The KV suites over gRPC against both owners (needs MINIO_*).
-kvsuite: kvd-rs
-	go build -o bin/ ./cmd/kvd
-	KVSUITE_KVD=$$PWD/bin/kvd go test ./internal/kvsuite -count=1
-	KVSUITE_KVD=$$PWD/kvd-rs/target/release/kvd go test ./internal/kvsuite -count=1
-
 proto:
 	cd proto && buf lint && buf generate

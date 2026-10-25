@@ -10,9 +10,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
-	"log/slog"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,9 +23,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/salesstair-01/001/internal/kv"
 	"github.com/salesstair-01/001/internal/kvrpc"
-	"github.com/salesstair-01/001/internal/objstore"
+	"github.com/salesstair-01/001/internal/kvtest"
 	"github.com/salesstair-01/001/internal/sqlengine"
 )
 
@@ -217,22 +213,22 @@ func displayName(f string) string {
 	return f
 }
 
-// startCluster runs a KV node over an in-memory store and a query engine.
+// startCluster runs a KV owner (a kvd process on a temporary local store,
+// internal/kvtest) and a query engine.
 func startCluster() (string, func(), error) {
-	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dir, err := os.MkdirTemp("", "slt-kv-")
 	if err != nil {
 		return "", nil, err
 	}
-	node := kv.NewNode(kv.Config{Store: objstore.NewMem(), DataDir: dir, Logger: quiet})
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	kvAddr, err := kvtest.FreeAddr()
 	if err != nil {
 		return "", nil, err
 	}
-	g := grpc.NewServer(kvrpc.ServerOption())
-	kvrpc.Register(g, &kvrpc.Server{Node: node, AutoOpen: true})
-	go g.Serve(lis)
-	cc, err := grpc.NewClient(lis.Addr().String(), append(kvrpc.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)
+	kvd, exited, err := kvtest.Launch(kvAddr, filepath.Join(dir, "store"), filepath.Join(dir, "kvd.log"))
+	if err != nil {
+		return "", nil, err
+	}
+	cc, err := grpc.NewClient(kvAddr, append(kvrpc.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)
 	if err != nil {
 		return "", nil, err
 	}
@@ -241,12 +237,10 @@ func startCluster() (string, func(), error) {
 	if err := eng.EnsureDatabase(context.Background(), "slt"); err != nil {
 		return "", nil, err
 	}
-	l2, err := net.Listen("tcp", "127.0.0.1:0")
+	addr, err := kvtest.FreeAddr()
 	if err != nil {
 		return "", nil, err
 	}
-	addr := l2.Addr().String()
-	l2.Close()
 	srv, err := eng.NewServer(addr)
 	if err != nil {
 		return "", nil, err
@@ -256,8 +250,8 @@ func startCluster() (string, func(), error) {
 		srv.Close()
 		st.Close()
 		cc.Close()
-		g.Stop()
-		node.Close()
+		_ = kvd.Process.Kill()
+		<-exited
 		os.RemoveAll(dir)
 	}, nil
 }

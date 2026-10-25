@@ -26,7 +26,7 @@ func main() {
 	dbPath := flag.String("db", "./data/directory.db", "SQLite file holding the partition table")
 	kvdBin := flag.String("spawn-kvd", "", "kvd binary to start KV processes on demand (empty = only use registered nodes)")
 	kvdArgs := flag.String("spawn-args", "", "extra arguments for spawned kvd processes (MinIO flags, -idle-suspend ...)")
-	kvdData := flag.String("spawn-data", "./data/spawned", "base directory for spawned kvd processes; their SST cache is shared under <base>/cache")
+	kvdData := flag.String("spawn-data", "./data/spawned", "base directory for spawned kvd processes (logs, per-process directories)")
 	dedicated := flag.Bool("dedicated", true, "with -spawn-kvd, give each woken tenant its own kvd that exits when idle")
 	metricsListen := flag.String("metrics-listen", "", "serve Prometheus metrics at http://<addr>/metrics (empty = off)")
 	flag.Parse()

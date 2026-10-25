@@ -1,7 +1,6 @@
 package sqlengine
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"net"
@@ -12,7 +11,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/salesstair-01/001/internal/kv"
 	"github.com/salesstair-01/001/internal/kvrpc"
 )
 
@@ -52,7 +50,7 @@ func TestPointInTimeRestoreSQL(t *testing.T) {
 	mustExec(t, db, "DELETE FROM t WHERE v <> 'a'") // the mistake to undo
 	mustExec(t, db, "DROP TABLE t")
 
-	if _, err := kv.Restore(context.Background(), c.store, 1, 2, at, t.TempDir()); err != nil {
+	if err := c.kv.Restore(1, 2, at); err != nil {
 		t.Fatal(err)
 	}
 	r := c.engineOn(t, 2)

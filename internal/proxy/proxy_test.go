@@ -19,9 +19,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/salesstair-01/001/internal/directory"
-	"github.com/salesstair-01/001/internal/kv"
 	"github.com/salesstair-01/001/internal/kvrpc"
-	"github.com/salesstair-01/001/internal/objstore"
+	"github.com/salesstair-01/001/internal/kvtest"
 	"github.com/salesstair-01/001/internal/sqlengine"
 )
 
@@ -31,8 +30,7 @@ var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 // node per woken tenant, a pool of generic query engines, and the proxy.
 type stack struct {
 	t       *testing.T
-	store   objstore.Store
-	cache   string
+	store   string // the kvd processes' shared store directory
 	dir     *directory.Directory
 	dirAddr string
 	pool    *Pool
@@ -52,7 +50,7 @@ type stackOpts struct {
 }
 
 func newStack(t *testing.T, o stackOpts) *stack {
-	s := &stack{t: t, store: objstore.NewMem(), cache: filepath.Join(t.TempDir(), "cache")}
+	s := &stack{t: t, store: filepath.Join(t.TempDir(), "store")}
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -104,41 +102,26 @@ func mustTLS(t *testing.T) *tls.Config {
 	return c
 }
 
-// startKV is an in-process stand-in for a spawned per-tenant kvd.
+// startKV starts a per-tenant kvd process (internal/kvtest), as dird
+// -spawn-kvd does: it registers with the directory, suspends after idle and
+// then exits.
 func (s *stack) startKV(id string, idle time.Duration) <-chan struct{} {
-	lis, _ := net.Listen("tcp", "127.0.0.1:0")
-	cc, _ := grpc.NewClient(s.dirAddr, append(kvrpc.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)
-	exited := make(chan struct{})
-	var once sync.Once
-	var node *kv.Node
-	g := grpc.NewServer(kvrpc.ServerOption())
-	stop := func() {
-		once.Do(func() {
-			g.Stop()
-			node.Close()
-			cc.Close()
-			s.mu.Lock()
-			s.kvLive--
-			s.mu.Unlock()
-			close(exited)
-		})
+	args := []string{"-directory", s.dirAddr, "-node-id", id, "-listen", "127.0.0.1:0", "-auto-open=true", "-exit-when-idle"}
+	if idle > 0 {
+		args = append(args, "-idle-suspend", idle.String())
 	}
-	agent := &directory.Agent{Dir: directory.NewClient(cc), NodeID: id, Addr: lis.Addr().String(), ExitWhenIdle: true, Logger: quiet,
-		Exit: func() { go stop() }}
-	node = kv.NewNode(kv.Config{Store: s.store, DataDir: s.t.TempDir(), CacheDir: s.cache, OwnerID: id, Logger: quiet,
-		IdleSuspend: idle, OnSuspend: agent.OnSuspend, OnEmpty: agent.OnEmpty})
-	agent.Attach(node)
-	kvrpc.Register(g, &kvrpc.Server{Node: node, AutoOpen: true})
-	go g.Serve(lis)
+	p := kvtest.Spawn(s.t, s.store, args...)
 	s.mu.Lock()
 	s.kvLive++
-	s.kvStops = append(s.kvStops, stop)
+	s.kvStops = append(s.kvStops, p.Kill)
 	s.mu.Unlock()
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() { <-exited; cancel() }()
-	agent.Dir.RegisterNode(ctx, id, agent.Addr)
-	go agent.Run(ctx, 0)
-	return exited
+	go func() {
+		<-p.Exited
+		s.mu.Lock()
+		s.kvLive--
+		s.mu.Unlock()
+	}()
+	return p.Exited
 }
 
 // startQE is an in-process stand-in for a spawned generic sqld.

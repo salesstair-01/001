@@ -12,8 +12,7 @@ Decided after the SlateDB spike (`spikes/slatedb`) and the Ceph tests
 - **Ceph RGW is the object store:** MicroCeph for development and CI, a
   full cluster for release testing.
 
-Until the Rust owner reaches parity, the Go owner stays the default and
-both are tested against the same suites.
+The Rust owner reached parity and replaced the Go owner (phase 6).
 
 ## Design decisions
 
@@ -101,6 +100,22 @@ both are tested against the same suites.
   restore to a time before the first commit still in the window fails
   rather than restoring an empty partition, and `s2zctl` does not drive
   it yet.
+
+- **Phase 6** is done: `kvd` is the Rust binary (`make build` puts it in
+  `bin/`). The Go owner (`internal/kv`'s Pebble storage, WAL, checkpoints,
+  manifests; `internal/wal`; Go `cmd/kvd`; `cmd/remotebench`, `cmd/s2zctl`,
+  `cmd/waketime`) is removed; `internal/kv` keeps only the API's types. Its
+  tests were ported to Rust (`kvd-rs/tests`: transactions and locks,
+  durability and faults, the metamorphic test, node and restore). The Go
+  tests that ran an in-process Go owner (`sqlengine`, `proxy`, `directory`,
+  `cmd/slt`) start the Rust `kvd` on a local store directory
+  (`internal/kvtest`, `kvd -store-dir`), so `go test ./...` needs no object
+  store. Not ported: the Pebble compatibility test (it tested Pebble's
+  format), the Go owner's remote-SST and checkpoint-cache tests.
+- **Open:** wake latency (about 170 ms through the stack against 80–95 ms
+  for the Go owner; SlateDB's open is most of it); commits wait out an
+  unreachable store instead of failing after 60 s (SlateDB retries; bound
+  it with `object_store_max_retries`); per-partition PUT accounting.
 
 Found along the way, in the SQL layer and so for both owners:
 go-mysql-server v0.20.0 skips an UPDATE whose new row equals the old one

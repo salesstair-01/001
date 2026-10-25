@@ -1,5 +1,6 @@
-# Local development stack: MinIO is the only durable state (D4).
-# kvd and sqld run from source (see README); this file only provides MinIO.
+# An S3 store for local development. MinIO's repository is archived (see
+# docs/object-stores.md); `make ceph-up` (MicroCeph) is the maintained
+# option, and kvd -store-dir needs no object store at all.
 services:
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z

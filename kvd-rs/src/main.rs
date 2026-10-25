@@ -129,6 +129,9 @@ struct Args {
     /// memtable size per partition before it is flushed to an SST, MiB
     #[arg(long = "memtable-mb", default_value_t = 4)]
     memtable_mb: usize,
+    /// abort a transaction without a heartbeat for this long
+    #[arg(long = "txn-lease", value_parser = go_duration, default_value = "10s")]
+    txn_lease: Duration,
     /// how far back a point-in-time restore can go (MVCC history kept)
     #[arg(long = "restore-window", value_parser = go_duration, default_value = "1h")]
     restore_window: Duration,
@@ -254,6 +257,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         l0_sst_bytes: args.memtable_mb << 20,
         max_unflushed_bytes: args.max_unflushed_mb << 20,
         restore_window: args.restore_window,
+        txn_lease: args.txn_lease,
         ..Default::default()
     };
     let (events_tx, events) = tokio::sync::mpsc::unbounded_channel();

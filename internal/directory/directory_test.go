@@ -17,36 +17,25 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/salesstair-01/001/internal/kv"
 	"github.com/salesstair-01/001/internal/kvrpc"
-	"github.com/salesstair-01/001/internal/objstore"
+	"github.com/salesstair-01/001/internal/kvtest"
 	"github.com/salesstair-01/001/internal/sqlengine"
 )
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 var _ = os.Stderr
 
-// kvProc is an in-process stand-in for a kvd process.
+// kvProc is a kvd process (internal/kvtest).
 type kvProc struct {
-	id     string
-	node   *kv.Node
-	grpc   *grpc.Server
-	exited chan struct{}
-	once   sync.Once
+	id string
+	*kvtest.Proc
 }
 
-func (p *kvProc) kill() { // like kill -9: no release, no checkpoint
-	p.once.Do(func() {
-		p.grpc.Stop()
-		p.node.Close()
-		close(p.exited)
-	})
-}
+func (p *kvProc) kill() { p.Kill() } // kill -9: no release, no flush
 
 type env struct {
 	t       *testing.T
-	store   objstore.Store
-	cache   string
+	store   string // the kvd processes' shared store directory
 	dir     *Directory
 	dirAddr string
 
@@ -56,31 +45,14 @@ type env struct {
 
 func (e *env) startNode(id string, idle time.Duration, dedicated bool) *kvProc {
 	e.t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		e.t.Fatal(err)
+	args := []string{"-directory", e.dirAddr, "-node-id", id, "-listen", "127.0.0.1:0", "-auto-open=true"}
+	if idle > 0 {
+		args = append(args, "-idle-suspend", idle.String())
 	}
-	cc, err := grpc.NewClient(e.dirAddr, append(kvrpc.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)
-	if err != nil {
-		e.t.Fatal(err)
+	if dedicated {
+		args = append(args, "-exit-when-idle")
 	}
-	p := &kvProc{id: id, exited: make(chan struct{})}
-	agent := &Agent{Dir: NewClient(cc), NodeID: id, Addr: lis.Addr().String(), ExitWhenIdle: dedicated, Logger: quiet}
-	agent.Exit = func() { go p.kill() }
-	p.node = kv.NewNode(kv.Config{
-		Store: e.store, DataDir: e.t.TempDir(), CacheDir: e.cache, OwnerID: id, Logger: quiet,
-		IdleSuspend: idle, OnSuspend: agent.OnSuspend, OnEmpty: agent.OnEmpty,
-	})
-	agent.Attach(p.node)
-	p.grpc = grpc.NewServer(kvrpc.ServerOption())
-	kvrpc.Register(p.grpc, &kvrpc.Server{Node: p.node, AutoOpen: true})
-	go p.grpc.Serve(lis)
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() { <-p.exited; cancel(); cc.Close() }()
-	if err := agent.Dir.RegisterNode(ctx, id, agent.Addr); err != nil {
-		e.t.Fatal(err)
-	}
-	go agent.Run(ctx, 0)
+	p := &kvProc{id: id, Proc: kvtest.Spawn(e.t, e.store, args...)}
 	e.mu.Lock()
 	e.procs = append(e.procs, p)
 	e.mu.Unlock()
@@ -88,7 +60,7 @@ func (e *env) startNode(id string, idle time.Duration, dedicated bool) *kvProc {
 }
 
 func newEnv(t *testing.T, idle time.Duration, spawn bool) *env {
-	e := &env{t: t, store: objstore.NewMem(), cache: filepath.Join(t.TempDir(), "cache")}
+	e := &env{t: t, store: filepath.Join(t.TempDir(), "store")}
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -98,9 +70,7 @@ func newEnv(t *testing.T, idle time.Duration, spawn bool) *env {
 	if spawn {
 		cfg.DedicatedNodes = true
 		cfg.Spawn = func(_ context.Context, id string) (<-chan struct{}, error) {
-			go e.startNode(id, idle, true)
-			p := e.waitProc(id)
-			return p.exited, nil
+			return e.startNode(id, idle, true).Exited, nil
 		}
 	}
 	e.dir, err = Open(cfg)
@@ -122,18 +92,15 @@ func newEnv(t *testing.T, idle time.Duration, spawn bool) *env {
 	return e
 }
 
-func (e *env) waitProc(id string) *kvProc {
-	for {
-		e.mu.Lock()
-		for _, p := range e.procs {
-			if p.id == id {
-				e.mu.Unlock()
-				return p
-			}
-		}
-		e.mu.Unlock()
-		time.Sleep(5 * time.Millisecond)
-	}
+// waitRegistered waits until node id has registered with the directory.
+func (e *env) waitRegistered(id string) {
+	e.t.Helper()
+	waitFor(e.t, "node "+id+" to register", 30*time.Second, func() bool {
+		e.dir.mu.Lock()
+		defer e.dir.mu.Unlock()
+		_, ok := e.dir.nodes[id]
+		return ok
+	})
 }
 
 // sqlServer starts a query engine routed through the directory.
@@ -192,7 +159,7 @@ func (e *env) liveProcs() int {
 	n := 0
 	for _, p := range e.procs {
 		select {
-		case <-p.exited:
+		case <-p.Exited:
 		default:
 			n++
 		}
@@ -236,13 +203,6 @@ func TestIdleSuspendExitAndWake(t *testing.T) {
 	t.Logf("wake + first query: %v", time.Since(start))
 	if e.liveProcs() != 1 {
 		t.Fatalf("the query should have woken one process, have %d", e.liveProcs())
-	}
-	// The woken owner found the checkpoint in the host's cache.
-	e.mu.Lock()
-	woken := e.procs[len(e.procs)-1]
-	e.mu.Unlock()
-	if p := woken.node.Get(42); p == nil || p.CacheHits() == 0 {
-		t.Fatal("expected the wake to use the local SST cache")
 	}
 	exec(t, db, "INSERT INTO t VALUES (100, 'after wake')")
 	if n := count(t, db, "SELECT COUNT(*) FROM t"); n != 51 {
@@ -294,6 +254,7 @@ func TestQueriesAcrossManyWakes(t *testing.T) {
 func TestDeadNodeIsReplaced(t *testing.T) {
 	e := newEnv(t, 0, false)
 	a := e.startNode("a", 0, false)
+	e.waitRegistered("a")
 	db := e.sqlServer(5)
 	exec(t, db, "CREATE TABLE t (id INT PRIMARY KEY)")
 	exec(t, db, "INSERT INTO t VALUES (1)")
@@ -302,6 +263,7 @@ func TestDeadNodeIsReplaced(t *testing.T) {
 		t.Fatalf("route: %+v", routes[5])
 	}
 	e.startNode("b", 0, false)
+	e.waitRegistered("b")
 	a.kill()
 	exec(t, db, "INSERT INTO t VALUES (2)")
 	if n := count(t, db, "SELECT COUNT(*) FROM t"); n != 2 {

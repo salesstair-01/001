@@ -1,10 +1,11 @@
 // Package kvsuite holds the KV owner's semantic test suites (the
-// metamorphic test, transactions and locks) so that they run against any
-// owner: the Go owner in process (internal/kv), or a kvd binary of either
-// implementation over gRPC (docs/slatedb-plan.md, phase 3).
+// metamorphic test, transactions and locks), run over gRPC against a kvd
+// binary: the contract between the query engine's client (internal/kvrpc)
+// and the owner (kvd-rs/, whose own tests cover it from the inside).
 //
-//	go test ./internal/kv -run Suite                       # Go owner, in process
-//	KVSUITE_KVD=kvd-rs/target/release/kvd go test ./internal/kvsuite   # a binary, needs MINIO_*
+//	go test ./internal/kvsuite                     # kvd-rs on a local store
+//	MINIO_ENDPOINT=... go test ./internal/kvsuite  # kvd-rs on an S3 store
+//	KVSUITE_KVD=<binary> go test ./internal/kvsuite  # another kvd binary
 package kvsuite
 
 import (
@@ -135,10 +136,11 @@ var nextPid atomic.Uint64
 
 func init() { nextPid.Store(uint64(time.Now().UnixNano()%(1<<40)) + 1<<20) }
 
-// ProcessTarget runs each instance on its own kvd process started from bin
-// (either implementation; it reads MINIO_* from the environment). Restart
-// kills it with SIGKILL and starts another on the same address.
-func ProcessTarget(bin string) Target {
+// ProcessTarget runs each instance on its own kvd process started from bin,
+// with its data in storeDir (a local store), or in the object store named
+// by MINIO_* when storeDir is empty. Restart kills it with SIGKILL and
+// starts another on the same address.
+func ProcessTarget(bin, storeDir string) Target {
 	return func(t testing.TB) Instance {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -150,7 +152,7 @@ func ProcessTarget(bin string) Target {
 		if err != nil {
 			t.Fatal(err)
 		}
-		p := &process{bin: bin, addr: addr, dir: t.TempDir(), pid: nextPid.Add(1), c: c}
+		p := &process{bin: bin, addr: addr, dir: t.TempDir(), store: storeDir, pid: nextPid.Add(1), c: c}
 		p.start(t)
 		t.Cleanup(func() {
 			if p.cmd != nil {
@@ -164,6 +166,7 @@ func ProcessTarget(bin string) Target {
 
 type process struct {
 	bin, addr, dir string
+	store          string // local store directory; empty = MINIO_*
 	pid            uint64
 	n              int
 	cmd            *exec.Cmd
@@ -182,8 +185,11 @@ func (p *process) start(t testing.TB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.cmd = exec.Command(p.bin, "-listen", p.addr, "-data", filepath.Join(p.dir, fmt.Sprint("kv", p.n)),
-		"-owner", fmt.Sprintf("suite-%d-%d", p.pid, p.n))
+	args := []string{"-listen", p.addr, "-owner", fmt.Sprintf("suite-%d-%d", p.pid, p.n)}
+	if p.store != "" {
+		args = append(args, "-store-dir", p.store)
+	}
+	p.cmd = exec.Command(p.bin, args...)
 	p.cmd.Stdout, p.cmd.Stderr = log, log
 	if err := p.cmd.Start(); err != nil {
 		t.Fatal(err)

@@ -8,7 +8,7 @@
 #   scripts/ceph/microceph.sh down     # remove MicroCeph and all its data
 #
 #   eval "$(scripts/ceph/microceph.sh env)"
-#   go test ./internal/objstore -run 'S3Compat|MinIO' -v && go test ./internal/kv -run MinIO -v
+#   go test ./internal/objstore -run 'S3Compat|MinIO' -v && go test ./internal/kvsuite -v
 #
 # Needs Linux with snapd and systemd (Ubuntu 22.04+); on macOS or Windows
 # run it inside a Multipass VM and point MINIO_ENDPOINT at the VM's address:

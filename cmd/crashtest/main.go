@@ -112,7 +112,6 @@ func main() {
 	time.Sleep(time.Second)
 	close(stop)
 	wg.Wait()
-	defer kvd.Process.Kill()
 
 	// Verify through a fresh KV process.
 	must(kvd.Process.Signal(syscall.SIGKILL))
@@ -145,6 +144,10 @@ func main() {
 			}
 		}
 	}
+	// Stop the last kvd and sqld (os.Exit below skips deferred calls).
+	_ = kvd.Process.Kill()
+	_ = kvd.Wait()
+	_ = sqld.Process.Kill()
 	fmt.Printf("attempts=%d acknowledged=%d failed=%d rows=%d lost=%d\n", attempts, len(acked), failures, len(found), lost)
 	if lost > 0 || len(acked) == 0 {
 		fmt.Println("FAIL")

@@ -172,8 +172,8 @@ Accepted but different:
 - Scale to zero: a tenant's KV owner suspends after `-idle-suspend` and the
   next query wakes it; a query that arrives during a wake waits for it.
   Query engines behind the proxy scale with sessions (`-warm`, `-engine-idle`).
-- Point-in-time restore: `s2zctl restore -src N -dst M -at TIME` writes a new
-  partition as the old one was at TIME, within the GC grace period (1 h by
+- Point-in-time restore: `kvd restore -src N -dst M -at TIME` writes a new
+  partition as the old one was at TIME, within the restore window (1 h by
   default); point the tenant at the new partition.
 - Metrics: `-metrics-listen` on every binary serves Prometheus text format
-  (wakes by reason, cold-start latency, commit latency, PUTs per tenant).
+  (wakes by reason, cold-start latency, commit and takeover latency).

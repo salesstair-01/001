@@ -99,8 +99,8 @@ func TestHundredTenants(t *testing.T) {
 		t.Fatalf("first-use wakes: %v", got)
 	}
 	text := metrics.Default.Text()
-	for _, want := range []string{`s2z_kv_puts_total{partition="1000"}`, `s2z_kv_puts_total{partition="1099"}`,
-		`s2z_proxy_queries_total{tenant="t042"}`, "s2z_kv_commit_seconds_count"} {
+	// The KV owner's metrics are its own process's (kvd -metrics-listen).
+	for _, want := range []string{`s2z_proxy_queries_total{tenant="t042"}`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("metrics lack %s", want)
 		}

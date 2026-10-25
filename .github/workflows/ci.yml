@@ -7,150 +7,48 @@ on:
 permissions:
   contents: read
 
-env:
-  MINIO_ROOT_USER: minioadmin
-  MINIO_ROOT_PASSWORD: minioadmin
-
 jobs:
   test:
-    name: vet, unit and integration tests (race)
+    name: vet, unit and integration tests (Go race, Rust)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: test -z "$(gofmt -l .)" || (gofmt -l . && false)
-      - run: go vet ./...
-      - run: go test -race -timeout 20m ./...
-
-  fault:
-    name: fault injection (1000 seeds) and metamorphic test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: make fault-1000
-      - name: metamorphic test, 100 seeds
-        run: go test ./internal/kv -run Metamorphic -meta-runs 100 -meta-ops 500 -timeout 20m
-
-  minio:
-    name: MinIO tests, crash test, driver matrix, ORM suite
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-      # MinIO no longer publishes images or binaries; build the pinned release.
-      - uses: actions/cache@v4
-        with:
-          path: ~/minio-bin
-          key: minio-RELEASE.2025-04-22T22-12-26Z
-      - name: start MinIO
-        run: |
-          [ -x ~/minio-bin/minio ] || GOBIN=~/minio-bin go install github.com/minio/minio@RELEASE.2025-04-22T22-12-26Z
-          mkdir -p /tmp/minio-data
-          ~/minio-bin/minio server /tmp/minio-data --address 127.0.0.1:9000 > /tmp/minio.log 2>&1 &
-          for i in $(seq 60); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
-      - run: make test-minio
-      - run: make crash-test
-      - name: driver matrix (sqld and proxyd)
-        run: |
-          make build
-          mkdir -p /tmp/s2z
-          ./bin/kvd -listen 127.0.0.1:7070 -data /tmp/s2z/kv > /tmp/s2z/kvd.log 2>&1 &
-          ./bin/sqld -listen 127.0.0.1:3306 -kv 127.0.0.1:7070 -partition 5001 > /tmp/s2z/sqld.log 2>&1 &
-          ./bin/dird -listen 127.0.0.1:7000 -db /tmp/s2z/dir.db -spawn-kvd ./bin/kvd \
-            -spawn-data /tmp/s2z/spawned > /tmp/s2z/dird.log 2>&1 &
-          echo '[{"name":"acme","partition":5002,"users":{"app":"s3cret"}}]' > /tmp/s2z/tenants.json
-          ./bin/proxyd -listen 127.0.0.1:3307 -tenants /tmp/s2z/tenants.json -domain db.test \
-            -spawn-sqld ./bin/sqld -directory 127.0.0.1:7000 -warm 1 > /tmp/s2z/proxyd.log 2>&1 &
-          sleep 3
-          DRV_PORT=3306 scripts/drivers/run.sh
-          DRV_PORT=3307 DRV_USER=app@acme DRV_PASSWORD=s3cret scripts/drivers/run.sh
-      - name: ORM suite (SQLAlchemy + Alembic) on sqld and proxyd
-        run: |
-          ORM_PORT=3306 scripts/orm/run.sh
-          ORM_PORT=3307 ORM_USER=app@acme ORM_PASSWORD=s3cret scripts/orm/run.sh
-      - name: logs
-        if: failure()
-        run: tail -n 50 /tmp/s2z/*.log || true
-
-  ceph:
-    name: Ceph RGW on MicroCeph (S3 compatibility, KV tests, crash test)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      # The same script developers use (scripts/ceph/microceph.sh).
-      - run: scripts/ceph/microceph.sh up
-      - name: S3 compatibility and KV tests
-        run: |
-          eval "$(scripts/ceph/microceph.sh env)"
-          go test ./internal/objstore -run 'S3Compat|MinIO' -v
-          go test ./internal/kv -run MinIO -v
-      - name: crash test
-        run: |
-          eval "$(scripts/ceph/microceph.sh env)"
-          make crash-test
-      - name: logs
-        if: failure()
-        run: |
-          scripts/ceph/microceph.sh status || true
-          sudo journalctl -u snap.microceph.rgw --no-pager -n 50 || true
-
-  slatedb-spike:
-    name: SlateDB spike on MicroCeph (spikes/slatedb)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: spikes/slatedb/go.mod
-          cache-dependency-path: spikes/slatedb/go.sum
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.rustup/toolchains
-            spikes/slatedb/.slatedb
-          key: slatedb-uniffi-v0.17.0
-      - run: scripts/ceph/microceph.sh up
-      - name: build the SlateDB library and the spike
-        run: |
-          L=$(spikes/slatedb/build-lib.sh)
-          echo "LD_LIBRARY_PATH=$L" >> "$GITHUB_ENV"
-          CGO_LDFLAGS="-L$L" go build -C spikes/slatedb -o slatespike .
-      - name: smoke, fencing, kill -9 with injected faults, FFI cost, density, benchmark
-        run: |
-          eval "$(scripts/ceph/microceph.sh env)"
-          cd spikes/slatedb
-          ./slatespike smoke
-          ./slatespike fence
-          ./slatespike crash -kills 5
-          ./slatespike crash -kills 5 -fail 0.05 -drop 0.05
-          ./slatespike ffi
-          ./slatespike density -n 50
-          ./slatespike bench -sizes 100
+            kvd-rs/target
+          key: kvd-rs-${{ hashFiles('kvd-rs/Cargo.lock') }}
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && false)
+      - run: go vet ./...
+      - run: (cd kvd-rs && cargo fmt --check)
+      - name: the owner's tests (kvd-rs)
+        run: cd kvd-rs && cargo test --release
+      # The Go tests run kvd on a local store directory (internal/kvtest).
+      - run: make kvd
+      - run: go test -race -timeout 20m ./...
 
-  kvd-rs:
-    name: "Rust kvd (SlateDB) on MicroCeph: KV suites, MySQL diff, sqllogictest, crash test, restore, scale to zero, drivers, ORM"
+  owner:
+    name: owner fault injection (200 seeds) and metamorphic test (100 seeds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kvd-rs/target
+          key: kvd-rs-${{ hashFiles('kvd-rs/Cargo.lock') }}
+      - run: make fault-runs
+      - run: make metamorphic
+
+  ceph:
+    name: "on Ceph RGW (MicroCeph): S3 compatibility, KV suites, crash test, restore, scale to zero, drivers, ORM"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -174,57 +72,34 @@ jobs:
             ~/.cargo/git
             kvd-rs/target
           key: kvd-rs-${{ hashFiles('kvd-rs/Cargo.lock') }}
+      # The same script developers use (scripts/ceph/microceph.sh).
       - run: scripts/ceph/microceph.sh up
-      - name: unit tests and build
+      - run: make build
+      # The S3 compatibility suite also creates the bucket.
+      - name: S3 compatibility, KV suites over gRPC on S3
         run: |
-          (cd kvd-rs && cargo test --release && cargo build --release)
-          make build
-      # The Go owner's crash test first: it also creates the bucket.
-      - name: crash test, Go owner then Rust owner
+          eval "$(scripts/ceph/microceph.sh env)"
+          go test ./internal/objstore -run 'S3Compat|MinIO' -v
+          go test ./internal/kvsuite -count=1 -v -meta-runs 20 -meta-ops 500
+      - name: crash test
         run: |
           eval "$(scripts/ceph/microceph.sh env)"
           make crash-test
-          make crash-test-rs
-      - name: KV suites (semantics, metamorphic) over gRPC, both owners
-        run: |
-          eval "$(scripts/ceph/microceph.sh env)"
-          KVSUITE_KVD=$PWD/bin/kvd go test ./internal/kvsuite -count=1 -v -meta-runs 20 -meta-ops 500
-          KVSUITE_KVD=$PWD/kvd-rs/target/release/kvd go test ./internal/kvsuite -count=1 -v -meta-runs 20 -meta-ops 500
-      # The runner image ships MySQL 8.0 (root/root), stopped.
-      - name: differential tests against MySQL 8 and sqllogictest, on the Rust owner
-        run: |
-          set -o pipefail
-          eval "$(scripts/ceph/microceph.sh env)"
-          sudo systemctl start mysql
-          mkdir -p /tmp/s2z-sql
-          kvd-rs/target/release/kvd -listen 127.0.0.1:7170 > /tmp/s2z-sql/kvd.log 2>&1 &
-          sleep 1
-          S2Z_KVD_ADDR=127.0.0.1:7170 S2Z_MYSQL_DSN='root:root@tcp(127.0.0.1:3306)/' \
-            go test ./internal/sqlengine -run MySQLDiff -diff-rounds 5 -count=1 -timeout 30m
-          ./bin/sqld -listen 127.0.0.1:3370 -kv 127.0.0.1:7170 -partition 5101 > /tmp/s2z-sql/sqld.log 2>&1 &
-          scripts/slt/fetch.sh
-          # Each file in its own database, as each gets its own cluster in process.
-          n=0
-          for f in $(grep -v '^#' scripts/slt/files.txt | grep -E '^(select[123]|evidence/)'); do
-            n=$((n+1))
-            mysql -h127.0.0.1 -P3370 -uroot -e "CREATE DATABASE slt$n"
-            ./bin/slt -dsn "root@tcp(127.0.0.1:3370)/slt$n" -min-pass-rate 100 "scripts/slt/test/$f" 2>/dev/null | grep '^| [a-z]'
-          done
-      - name: point-in-time restore with the Rust owner
+      - name: point-in-time restore
         run: |
           eval "$(scripts/ceph/microceph.sh env)"
           scripts/kvd-rs/restore-test.sh
-      - name: scale to zero with the Rust owner (dird spawns it, it suspends and exits)
+      - name: scale to zero (dird spawns kvd; it suspends, exits, wakes)
         run: |
           eval "$(scripts/ceph/microceph.sh env)"
-          ./bin/wakedemo -bin ./bin -kvd kvd-rs/target/release/kvd -idle 3s -rounds 3
-      - name: driver matrix and ORM suite on the Rust owner (sqld, and proxyd + dird)
+          ./bin/wakedemo -bin ./bin -idle 3s -rounds 3
+      - name: driver matrix and ORM suite (sqld, and proxyd + dird)
         run: |
           eval "$(scripts/ceph/microceph.sh env)"
           mkdir -p /tmp/s2z
-          kvd-rs/target/release/kvd -listen 127.0.0.1:7070 > /tmp/s2z/kvd.log 2>&1 &
+          ./bin/kvd -listen 127.0.0.1:7070 > /tmp/s2z/kvd.log 2>&1 &
           ./bin/sqld -listen 127.0.0.1:3306 -kv 127.0.0.1:7070 -partition 5001 > /tmp/s2z/sqld.log 2>&1 &
-          ./bin/dird -listen 127.0.0.1:7000 -db /tmp/s2z/dir.db -spawn-kvd kvd-rs/target/release/kvd \
+          ./bin/dird -listen 127.0.0.1:7000 -db /tmp/s2z/dir.db -spawn-kvd ./bin/kvd \
             -spawn-data /tmp/s2z/spawned > /tmp/s2z/dird.log 2>&1 &
           echo '[{"name":"acme","partition":5002,"users":{"app":"s3cret"}}]' > /tmp/s2z/tenants.json
           ./bin/proxyd -listen 127.0.0.1:3307 -tenants /tmp/s2z/tenants.json -domain db.test \
@@ -236,7 +111,9 @@ jobs:
           ORM_PORT=3307 ORM_USER=app@acme ORM_PASSWORD=s3cret scripts/orm/run.sh
       - name: logs
         if: failure()
-        run: tail -n 50 /tmp/s2z/*.log /tmp/s2z/spawned/*.log /tmp/s2z-sql/*.log || true
+        run: |
+          tail -n 50 /tmp/s2z/*.log /tmp/s2z/spawned/*.log || true
+          scripts/ceph/microceph.sh status || true
 
   mysql-diff:
     name: differential tests against MySQL 8
@@ -246,6 +123,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kvd-rs/target
+          key: kvd-rs-${{ hashFiles('kvd-rs/Cargo.lock') }}
+      - run: make kvd
       # The runner image ships MySQL 8.0 (root/root), stopped.
       - run: sudo systemctl start mysql
       - run: S2Z_MYSQL_DSN='root:root@tcp(127.0.0.1:3306)/' go test ./internal/sqlengine -run MySQLDiff -diff-rounds 10 -timeout 30m
@@ -258,6 +143,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kvd-rs/target
+          key: kvd-rs-${{ hashFiles('kvd-rs/Cargo.lock') }}
+      - run: make kvd
       - run: scripts/slt/fetch.sh
       - name: run (fails below the recorded pass rate)
         run: |

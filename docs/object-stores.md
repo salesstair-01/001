@@ -9,12 +9,13 @@ things against whatever `MINIO_ENDPOINT` points at:
 ```sh
 MINIO_ENDPOINT=host:port MINIO_ACCESS_KEY=... MINIO_SECRET_KEY=... \
   go test ./internal/objstore -run 'S3Compat|MinIO' -v
-MINIO_ENDPOINT=... go test ./internal/kv -run MinIO -v    # KV owner on the store
+MINIO_ENDPOINT=... go test ./internal/kvsuite -v          # KV owner (kvd) on the store
 MINIO_ENDPOINT=... make crash-test                         # kill -9 during writes
 ```
 
-`MINIO_BUCKET` and `MINIO_REGION` are also read. `kvd` and `s2zctl` read
-the same variables.
+`MINIO_BUCKET` and `MINIO_REGION` are also read. `kvd` reads the same
+variables. The results below were measured with the Go owner, which kvd-rs
+(SlateDB) has since replaced; SlateDB needs the same conditional writes.
 
 ## Why not MinIO any more
 

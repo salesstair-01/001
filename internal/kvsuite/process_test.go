@@ -4,6 +4,8 @@ import (
 	"flag"
 	"os"
 	"testing"
+
+	"github.com/salesstair-01/001/internal/kvtest"
 )
 
 var (
@@ -12,14 +14,19 @@ var (
 	metaOps  = flag.Int("meta-ops", 300, "operations per seed")
 )
 
-// The suites against a kvd binary named by KVSUITE_KVD (cmd/kvd or
-// kvd-rs), over gRPC, with the object store from MINIO_*.
+// The suites against kvd over gRPC: the binary KVSUITE_KVD, or kvd-rs; on
+// the object store from MINIO_* if MINIO_ENDPOINT is set, else on a local
+// store.
 func processTarget(t *testing.T) Target {
 	bin := os.Getenv("KVSUITE_KVD")
 	if bin == "" {
-		t.Skip("KVSUITE_KVD is not set")
+		bin = kvtest.Binary(t)
 	}
-	return ProcessTarget(bin)
+	store := ""
+	if os.Getenv("MINIO_ENDPOINT") == "" {
+		store = t.TempDir()
+	}
+	return ProcessTarget(bin, store)
 }
 
 func TestSemantics(t *testing.T) {

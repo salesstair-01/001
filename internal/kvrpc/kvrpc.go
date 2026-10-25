@@ -1,15 +1,13 @@
-// Package kvrpc is the gRPC API between the query engine and the KV owner
-// (D7). The API is defined in proto/s2z/kv/kv.proto, so owners can be
-// written in other languages; Go code uses the plain structs below, which
-// codec.go converts to and from the protobuf messages. Every request
-// carries the partition id and the epoch the caller expects; a mismatch
-// returns EpochChanged.
+// Package kvrpc is the query engine's client for the KV owner (kvd-rs/),
+// over the gRPC API of proto/s2z/kv/kv.proto (D7). Go code uses the plain
+// structs below, which codec.go converts to and from the protobuf messages.
+// Every request carries the partition id and the epoch the caller expects;
+// a mismatch returns EpochChanged.
 package kvrpc
 
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -127,13 +125,10 @@ func lockWaitOf(o ReadOpts) int64 {
 	return o.LockWaitMs
 }
 
-func (o ReadOpts) kv() kv.ReadOptions {
-	return kv.ReadOptions{Stmt: o.Stmt, IncludeStmt: o.IncludeStmt, Lock: o.Lock, LockWait: time.Duration(o.LockWaitMs) * time.Millisecond}
-}
-
 // ---- codec -------------------------------------------------------------------
 
-// ServerOption makes a grpc.Server use the protobuf codec over the Go structs.
+// ServerOption makes a grpc.Server use the protobuf codec over the Go
+// structs (the directory's server, internal/directory).
 func ServerOption() grpc.ServerOption { return grpc.ForceServerCodec(protoCodec{}) }
 
 // DialOptions make a client connection use the protobuf codec and reconnect
@@ -155,18 +150,6 @@ var CallTimeout = 30 * time.Second
 // ---- errors ------------------------------------------------------------------
 
 const errPrefix = "kv|"
-
-// toStatus turns a KV error into a gRPC status that keeps its kind and key.
-func toStatus(err error) error {
-	if err == nil {
-		return nil
-	}
-	var ke *kv.Error
-	if errors.As(err, &ke) {
-		return status.Error(codes.Aborted, errPrefix+ke.Kind.String()+"|"+hex.EncodeToString(ke.Key)+"|"+ke.Msg)
-	}
-	return status.Error(codes.Internal, err.Error())
-}
 
 // FromStatus turns a gRPC error back into a *kv.Error where possible.
 // Transport failures (owner unreachable) become EpochChanged, as in D7.
@@ -192,162 +175,7 @@ func FromStatus(err error) error {
 	return fmt.Errorf("kv rpc: %s", st.Message())
 }
 
-// ---- service -----------------------------------------------------------------
-
 const serviceName = "s2z.kv.KV"
-
-// Server serves a kv.Node over gRPC.
-type Server struct {
-	Node *kv.Node
-	// AutoOpen takes a partition over on Open when this node doesn't serve it.
-	// The directory (slice 6) replaces this with explicit placement.
-	AutoOpen bool
-}
-
-func (s *Server) part(h Header) (*kv.Partition, error) {
-	p, err := s.Node.Partition(h.Partition)
-	if err == nil && !h.Background {
-		p.Touch()
-	}
-	return p, err
-}
-
-type handler func(s *Server, ctx context.Context, dec func(any) error) (any, error)
-
-func unary[Req any, Resp any](f func(s *Server, ctx context.Context, req *Req) (*Resp, error)) handler {
-	return func(s *Server, ctx context.Context, dec func(any) error) (any, error) {
-		req := new(Req)
-		if err := dec(req); err != nil {
-			return nil, err
-		}
-		resp, err := f(s, ctx, req)
-		if err != nil {
-			return nil, toStatus(err)
-		}
-		return resp, nil
-	}
-}
-
-var methods = map[string]handler{
-	"Open": unary(func(s *Server, ctx context.Context, r *OpenReq) (*OpenResp, error) {
-		if !s.AutoOpen {
-			p, err := s.Node.Partition(r.Partition)
-			if err != nil {
-				return nil, err
-			}
-			return &OpenResp{Epoch: p.Epoch()}, nil
-		}
-		p, err := s.Node.Open(ctx, r.Partition)
-		if err != nil {
-			return nil, err
-		}
-		return &OpenResp{Epoch: p.Epoch()}, nil
-	}),
-	"Begin": unary(func(s *Server, _ context.Context, r *BeginReq) (*Empty, error) {
-		p, err := s.part(r.H)
-		if err != nil {
-			return nil, err
-		}
-		return &Empty{}, p.Begin(r.H.Epoch, r.Txn, kv.BeginOptions{Isolation: r.Isolation, ConsistentSnapshot: r.ConsistentSnapshot})
-	}),
-	"Get": unary(func(s *Server, _ context.Context, r *GetReq) (*GetResp, error) {
-		p, err := s.part(r.H)
-		if err != nil {
-			return nil, err
-		}
-		vs, err := p.Get(r.H.Epoch, r.Txn, r.Keys, r.Opts.kv())
-		resp := &GetResp{Values: vs, Found: make([]bool, len(vs))}
-		for i, v := range vs {
-			resp.Found[i] = v != nil
-		}
-		return resp, err
-	}),
-	"Scan": unary(func(s *Server, _ context.Context, r *ScanReq) (*ScanResp, error) {
-		p, err := s.part(r.H)
-		if err != nil {
-			return nil, err
-		}
-		rows, resume, err := p.Scan(r.H.Epoch, r.Txn, r.Start, r.End, r.Limit, r.Opts.kv())
-		if err != nil {
-			return nil, err
-		}
-		resp := &ScanResp{Resume: resume, Keys: make([][]byte, len(rows)), Values: make([][]byte, len(rows))}
-		for i, kvp := range rows {
-			resp.Keys[i], resp.Values[i] = kvp.Key, kvp.Value
-		}
-		return resp, nil
-	}),
-	"Mutate": unary(func(s *Server, _ context.Context, r *MutateReq) (*Empty, error) {
-		p, err := s.part(r.H)
-		if err != nil {
-			return nil, err
-		}
-		return &Empty{}, p.Mutate(r.H.Epoch, r.Txn, r.Stmt, r.Mutations, time.Duration(r.LockWaitMs)*time.Millisecond)
-	}),
-	"RollbackStatement": unary(func(s *Server, _ context.Context, r *StmtReq) (*Empty, error) {
-		p, err := s.part(r.H)
-		if err != nil {
-			return nil, err
-		}
-		return &Empty{}, p.RollbackStatement(r.H.Epoch, r.Txn, r.Stmt)
-	}),
-	"Commit": unary(func(s *Server, _ context.Context, r *TxnReq) (*CommitResp, error) {
-		p, err := s.part(r.H)
-		if err != nil {
-			return nil, err
-		}
-		ts, err := p.CommitGuarded(r.H.Epoch, r.Txn, r.Guards)
-		return &CommitResp{CommitTS: ts}, err
-	}),
-	"Rollback": unary(func(s *Server, _ context.Context, r *TxnReq) (*Empty, error) {
-		p, err := s.part(r.H)
-		if err != nil {
-			return nil, err
-		}
-		return &Empty{}, p.Rollback(r.H.Epoch, r.Txn)
-	}),
-	"TxnStatus": unary(func(s *Server, _ context.Context, r *TxnReq) (*TxnStatusResp, error) {
-		p, err := s.part(r.H)
-		if err != nil {
-			return nil, err
-		}
-		st, ts, err := p.TxnStatus(r.H.Epoch, r.Txn)
-		return &TxnStatusResp{State: st, CommitTS: ts}, err
-	}),
-	"Ping": unary(func(s *Server, _ context.Context, _ *Empty) (*PingResp, error) {
-		return &PingResp{Owner: s.Node.OwnerID()}, nil
-	}),
-	"AutoIncrement": unary(func(s *Server, _ context.Context, r *AutoIncReq) (*AutoIncResp, error) {
-		p, err := s.part(r.H)
-		if err != nil {
-			return nil, err
-		}
-		first, err := p.AutoIncrement(r.H.Epoch, r.Txn, r.Table, r.Count, r.AtLeast)
-		return &AutoIncResp{First: first}, err
-	}),
-	"Heartbeat": unary(func(s *Server, _ context.Context, r *HeartbeatReq) (*Empty, error) {
-		p, err := s.part(r.H)
-		if err != nil {
-			return nil, err
-		}
-		return &Empty{}, p.Heartbeat(r.H.Epoch, r.Txns)
-	}),
-}
-
-// Register adds the KV service to a gRPC server.
-func Register(g *grpc.Server, s *Server) {
-	desc := grpc.ServiceDesc{ServiceName: serviceName, HandlerType: (*any)(nil)}
-	for name, h := range methods {
-		h := h
-		desc.Methods = append(desc.Methods, grpc.MethodDesc{
-			MethodName: name,
-			Handler: func(srv any, ctx context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
-				return h(srv.(*Server), ctx, dec)
-			},
-		})
-	}
-	g.RegisterService(&desc, s)
-}
 
 // ---- client ------------------------------------------------------------------
 
@@ -357,6 +185,9 @@ type Client struct {
 }
 
 func NewClient(cc *grpc.ClientConn) *Client { return &Client{cc: cc} }
+
+// Close closes the connection.
+func (c *Client) Close() error { return c.cc.Close() }
 
 func (c *Client) call(ctx context.Context, method string, req, resp any) error {
 	return c.callWait(ctx, method, req, resp, 0)

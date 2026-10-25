@@ -1,18 +1,28 @@
 # kvd-rs: the KV owner on SlateDB
 
-The Rust rewrite of `cmd/kvd`, phase 2 of `docs/slatedb-plan.md`. It
-serves the same gRPC API (`proto/s2z/kv/kv.proto`) and takes the same flags,
-so `sqld` runs against it unchanged.
+The KV owner, `kvd`: it serves the gRPC API of `proto/s2z/kv/kv.proto` to
+the query engines (`sqld`). It replaced the Go owner, which it was ported
+from (`docs/slatedb-plan.md`); it takes the Go owner's flags.
 
 ```sh
-make ceph-up && eval "$(scripts/ceph/microceph.sh env)"   # or scripts/ceph/mini.sh start
-make kvd-rs                                               # cargo build --release
-kvd-rs/target/release/kvd -listen 127.0.0.1:7070 &
+make kvd                                                  # cargo build --release; copies it to bin/kvd
+bin/kvd -listen 127.0.0.1:7070 -store-dir ./data/store &  # a local store, for development
+make ceph-up && eval "$(scripts/ceph/microceph.sh env)"   # or an S3 store (Ceph RGW)
+bin/kvd -listen 127.0.0.1:7070 &
 bin/sqld -kv 127.0.0.1:7070 -partition 1 &
-make crash-test-rs                                        # kill -9 loop, as for the Go owner
-make kvsuite                                              # KV suites over gRPC against both owners
-make wake-demo-rs                                         # dird spawns the Rust kvd; it suspends, exits, wakes
+cd kvd-rs && cargo test --release                         # the owner's tests (tests/), in memory
 ```
+
+## Tests
+
+`tests/` are the Go owner's tests, ported: `transactions.rs` (snapshots,
+rollback, scans, guards, AUTO_INCREMENT, MVCC GC, locks, deadlocks, leases),
+`durability.rs` (fencing, takeover during commits, seeded object-store
+faults, lost acknowledgements), `metamorphic.rs` (a model of the transaction
+semantics checked under restarts and GC) and `node_restore.rs`. They run on
+an in-memory store. Longer runs: `KVD_FAULT_SEEDS=200` for `durability`,
+`KVD_META_SEEDS=100 KVD_META_OPS=500` for `metamorphic`. The Go side runs
+`internal/kvsuite` against the binary over gRPC.
 
 ## Layout
 
@@ -23,7 +33,11 @@ make wake-demo-rs                                         # dird spawns the Rust
 | `src/keys.rs` | stored key layout (escaped user key + inverted commit_ts) |
 | `src/node.rs` | the partitions this process serves; concurrent opens share one takeover |
 | `src/service.rs` | the `s2z.kv.KV` gRPC service |
-| `src/error.rs` | KV errors, encoded as the Go owner encodes them |
+| `src/error.rs` | KV errors, encoded as `internal/kvrpc.FromStatus` decodes them |
+| `src/agent.rs` | the directory agent: register, heartbeat, release, exit when idle |
+| `src/restore.rs` | point-in-time restore |
+| `src/localstore.rs` | the local-directory store (`-store-dir`) |
+| `src/metrics.rs` | Prometheus metrics |
 
 ## How it maps onto SlateDB
 
@@ -84,11 +98,10 @@ the last commit at or before the time, reads the source through a SlateDB
 reader (it holds a checkpoint, so nothing it reads is collected, and it does
 not fence the live owner), and writes each key's newest version at or below
 that commit into a new partition, with the partition id in the keys
-rewritten. Point the tenant at the new partition, as with `s2zctl restore`
-for the Go owner (whose storage format differs).
+rewritten. Point the tenant at the new partition.
 `scripts/kvd-rs/restore-test.sh` checks it end to end through `sqld`.
 
-## Results so far (Ceph RGW, loopback)
+## Compared with the Go owner it replaced (Ceph RGW, loopback)
 
 | | Go owner | Rust owner |
 |---|---|---|
@@ -100,9 +113,9 @@ for the Go owner (whose storage format differs).
 | ORM suite (SQLAlchemy + Alembic) | 16/16 | 16/16 |
 | fencing: a second owner takes over | old owner's writes refused | old owner's writes refused |
 | `internal/kvsuite` over gRPC: semantics, 40 metamorphic seeds × 500 ops | pass | pass |
-| sqllogictest, the four `index/*/10` files (40,173 records) | 100% | 100%, the same counts (other files: run pending) |
+| sqllogictest subset | 139,122 passed, 0 wrong | the same, run in CI |
 | scale-to-zero demo: suspend and exit after 3 s idle, wake on the next query | wake 80–95 ms | wake ~170 ms (SlateDB open 70–85 ms + durable epoch write) |
 | drivers and ORM through `proxyd` + `dird` spawning `kvd` | 4/4, 16/16 | 4/4, 16/16 |
-| point-in-time restore (`scripts/kvd-rs/restore-test.sh`) | (`s2zctl restore`) | pass; ~300 ms for a small partition |
+| point-in-time restore (`scripts/kvd-rs/restore-test.sh`) | (`s2zctl`) | pass; ~300 ms for a small partition |
 
 The crash-test counts depend on the random kill timing; both pass.

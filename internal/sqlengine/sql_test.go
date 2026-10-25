@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -20,41 +18,17 @@ import (
 	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/kv"
 	"github.com/salesstair-01/001/internal/kvrpc"
-	"github.com/salesstair-01/001/internal/objstore"
+	"github.com/salesstair-01/001/internal/kvtest"
 )
 
-// cluster runs a KV node and a query engine in-process.
+// cluster runs a KV owner (a kvd process, internal/kvtest) and a query
+// engine in-process.
 type cluster struct {
 	t      *testing.T
-	store  objstore.Store
-	node   *kv.Node
-	grpc   *grpc.Server
+	kv     *kvtest.Server // nil when the owner is external
 	kvAddr string
 	engine *Engine
 	addr   string
-}
-
-func startKV(t *testing.T, store objstore.Store, owner, addr string) (*kv.Node, *grpc.Server, string) {
-	t.Helper()
-	node := kv.NewNode(kv.Config{
-		Store: store, DataDir: t.TempDir(), OwnerID: owner, TxnLease: 3 * time.Second,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	var lis net.Listener
-	var err error
-	for i := 0; i < 100; i++ { // the old listener's port may take a moment to free
-		if lis, err = net.Listen("tcp", addr); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	g := grpc.NewServer(kvrpc.ServerOption())
-	kvrpc.Register(g, &kvrpc.Server{Node: node, AutoOpen: true})
-	go g.Serve(lis)
-	return node, g, lis.Addr().String()
 }
 
 func startCluster(t *testing.T) *cluster {
@@ -62,13 +36,13 @@ func startCluster(t *testing.T) *cluster {
 }
 
 // startClusterOn runs the query engine against the KV owner at kvAddr, on
-// partition, or against an in-process node (kvAddr empty).
+// partition, or against a kvd of its own (kvAddr empty).
 func startClusterOn(t *testing.T, kvAddr string, partition uint64) *cluster {
 	t.Helper()
 	c := &cluster{t: t, kvAddr: kvAddr}
 	if kvAddr == "" {
-		c.store = objstore.NewMem()
-		c.node, c.grpc, c.kvAddr = startKV(t, c.store, "kv-a", "127.0.0.1:0")
+		c.kv = kvtest.Start(t, "-txn-lease", "3s")
+		c.kvAddr = c.kv.Addr
 	}
 	cc, err := grpc.NewClient(c.kvAddr, append(kvrpc.DialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)
 	if err != nil {
@@ -94,21 +68,15 @@ func startClusterOn(t *testing.T, kvAddr string, partition uint64) *cluster {
 		srv.Close()
 		st.Close()
 		cc.Close()
-		if c.node != nil {
-			c.grpc.Stop()
-			c.node.Close()
-		}
 	})
 	return c
 }
 
-// restartKV replaces the KV node with a fresh one on the same address over
-// the same object store, as after kill -9 and a restart: the next request
-// gets EpochChanged and the partition is taken over.
+// restartKV kills the kvd and starts another on the same address and
+// store, as after kill -9 and a restart: the next request gets
+// EpochChanged and the partition is taken over.
 func (c *cluster) restartKV() {
-	c.grpc.Stop()
-	c.node.Close()
-	c.node, c.grpc, _ = startKV(c.t, c.store, fmt.Sprint("kv-", time.Now().UnixNano()), c.kvAddr)
+	c.kv.Restart()
 }
 
 func (c *cluster) db(t *testing.T) *sql.DB {

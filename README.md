@@ -130,9 +130,11 @@ wake is the rest (see the wake-time table above for larger tenants).
 Wake time: a woken `kvd` opens the partition's SlateDB database, which reads
 its manifest and replays the WAL not yet in SSTs; data is read lazily from
 the store after that, so wake time does not grow with tenant size. Through
-the whole stack, `wakedemo` sees about 170 ms from query to rows on MicroCeph
-(about 100 ms of it the takeover, 70–85 ms of that SlateDB's open), and the
-directory tests about 60 ms on a local store directory.
+the whole stack, `wakedemo` sees about 90–100 ms from query to rows on
+MicroCeph, including starting the `kvd` process; the takeover is about 50 ms
+of it (`cargo run --release --example wake` in `kvd-rs/`). SlateDB's
+compactor and garbage collector start after the partition serves, not
+during the open.
 
 ### Many tenants per node, metrics and restore (slice 9)
 

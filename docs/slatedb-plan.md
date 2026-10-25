@@ -112,8 +112,13 @@ The Rust owner reached parity and replaced the Go owner (phase 6).
   (`internal/kvtest`, `kvd -store-dir`), so `go test ./...` needs no object
   store. Not ported: the Pebble compatibility test (it tested Pebble's
   format), the Go owner's remote-SST and checkpoint-cache tests.
-- **Open:** wake latency (about 170 ms through the stack against 80–95 ms
-  for the Go owner; SlateDB's open is most of it); commits wait out an
+- **Wake latency**, about 170 ms through the stack at the switch, is now
+  90–100 ms (the Go owner: 80–95 ms): SlateDB's compactor and garbage
+  collector start after the partition serves instead of inside the open
+  (takeover 100 ms → 56 ms), and the partition's epoch is SlateDB's writer
+  epoch, which the open already raises durably, instead of a durable write
+  of its own (→ about 45–50 ms).
+- **Open:** commits wait out an
   unreachable store instead of failing after 60 s (SlateDB retries; bound
   it with `object_store_max_retries`); per-partition PUT accounting.
 

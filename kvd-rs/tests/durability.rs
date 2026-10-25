@@ -157,3 +157,29 @@ async fn lost_acknowledgement() {
     }
     assert_eq!(get(&q, 1).await, "before");
 }
+
+/// With the compactor and garbage collector started after takeover, the
+/// partition still commits, recovers and closes.
+#[tokio::test]
+async fn deferred_background() {
+    let store = mem();
+    let cfg = Config {
+        deferred_background: true,
+        l0_sst_bytes: 4 << 10,
+        ..cfg()
+    };
+    for round in 0..3i64 {
+        let p = tokio::time::timeout(Duration::from_secs(10), open_with(&store, cfg.clone()))
+            .await
+            .expect("takeover");
+        for i in 0..50 {
+            put(&p, round * 100 + i, "v").await.unwrap();
+        }
+        if round > 0 {
+            assert_eq!(get(&p, (round - 1) * 100 + 7).await, "v");
+        }
+        tokio::time::timeout(Duration::from_secs(10), p.close())
+            .await
+            .expect("close");
+    }
+}

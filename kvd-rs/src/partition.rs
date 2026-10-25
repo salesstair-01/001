@@ -49,6 +49,10 @@ pub struct Config {
     /// How far back a point-in-time restore can go: MVCC GC keeps every
     /// version newer than this (zero = only what open snapshots need).
     pub restore_window: Duration,
+    /// Open the database without its compactor and garbage collector and
+    /// start them once the partition serves, so a wake doesn't wait for
+    /// them to start.
+    pub deferred_background: bool,
 }
 
 impl Default for Config {
@@ -64,6 +68,7 @@ impl Default for Config {
             intent_cap: 64 << 20,
             mvcc_gc_interval: Duration::from_secs(60),
             restore_window: Duration::from_secs(3600),
+            deferred_background: true,
         }
     }
 }
@@ -188,11 +193,15 @@ struct State {
     stop_err: Option<KvError>,
 }
 
+type StopFn = Box<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
 pub struct Partition {
     pub id: u64,
     pub epoch: u64,
     cfg: Config,
     db: Db,
+    /// Stops for the compactor and garbage collector started after takeover.
+    background_stops: Mutex<Vec<(StopFn, tokio::task::JoinHandle<()>)>>,
     state: Mutex<State>,
     locks: LockTable,
     commit_lock: tokio::sync::Mutex<()>,
@@ -214,7 +223,6 @@ fn be64(v: &Option<Bytes>) -> u64 {
         .unwrap_or(0)
 }
 
-const META_EPOCH: &[u8] = b"epoch";
 const META_MAXTS: &[u8] = b"maxts";
 const META_TXN: &[u8] = b"txn/";
 /// time/<wall micros><commit_ts>, both big-endian: when each commit happened,
@@ -270,25 +278,29 @@ impl Partition {
     /// writer; the epoch is then raised durably.
     pub async fn takeover(cfg: Config, store: Arc<dyn ObjectStore>, pid: u64) -> Result<Arc<Partition>> {
         let t0 = Instant::now();
-        let settings = Settings {
+        let mut settings = Settings {
             flush_interval: Some(cfg.flush_interval),
             l0_sst_size_bytes: cfg.l0_sst_bytes,
             max_unflushed_bytes: cfg.max_unflushed_bytes,
             manifest_poll_interval: Duration::from_secs(1),
             ..Settings::default()
         };
-        let mut builder = Db::builder(format!("p/{pid}"), store).with_settings(settings);
+        let deferred = cfg.deferred_background.then(|| {
+            (
+                settings.compactor_options.take().unwrap_or_default(),
+                settings.garbage_collector_options.take().unwrap_or_default(),
+            )
+        });
+        let mut builder = Db::builder(format!("p/{pid}"), store.clone()).with_settings(settings);
         if let Some(cache) = &cfg.cache {
             builder = builder.with_db_cache(cache.clone(), pid);
         }
         let db = builder.build().await?;
         let opened = t0.elapsed();
-        let epoch = be64(&db.get(keys::meta_key(META_EPOCH)).await?) + 1;
+        // The epoch query engines see is SlateDB's writer epoch: the open
+        // raised it durably, and that is what fenced the previous owner.
+        let epoch = db.manifest().writer_epoch();
         let max_ts = be64(&db.get(keys::meta_key(META_MAXTS)).await?);
-        let mut b = WriteBatch::new();
-        b.put(keys::meta_key(META_EPOCH), epoch.to_be_bytes());
-        db.write(b).await?.await_durable().await?;
-        let epoch_written = t0.elapsed();
 
         // Committed ids from the window, so a commit whose response was lost is recognised.
         let mut recent = HashMap::new();
@@ -316,6 +328,7 @@ impl Partition {
             epoch,
             cfg,
             db,
+            background_stops: Mutex::new(Vec::new()),
             state: Mutex::new(State {
                 max_commit_ts: max_ts,
                 txns: HashMap::new(),
@@ -329,8 +342,11 @@ impl Partition {
             last_active: Mutex::new(Instant::now()),
         });
         tokio::spawn(background(Arc::downgrade(&p)));
+        if let Some((copts, gopts)) = deferred {
+            p.start_background(store, copts, gopts);
+        }
         crate::metrics::TAKEOVER.observe(t0.elapsed());
-        tracing::info!(partition = pid, epoch, max_commit_ts = max_ts, took = ?t0.elapsed(), ?opened, ?epoch_written, "took over partition");
+        tracing::info!(partition = pid, epoch, max_commit_ts = max_ts, took = ?t0.elapsed(), ?opened, "took over partition");
         Ok(p)
     }
 
@@ -359,7 +375,9 @@ impl Partition {
             st.stop_err = Some(KvError::suspended());
         }
         let _g = self.commit_lock.lock().await;
-        self.db.close().await?;
+        let closed = self.db.close().await;
+        self.stop_background().await;
+        closed?;
         Ok(true)
     }
 
@@ -400,6 +418,8 @@ impl Partition {
         if let Err(e) = self.db.close().await {
             tracing::debug!(partition = self.id, err = %e, "close");
         }
+        // After the close: its final flush may wait for compaction.
+        self.stop_background().await;
     }
 
     fn txn_locked<'a>(&self, st: &'a mut State, id: &TxnId) -> Result<&'a mut Txn> {
@@ -950,6 +970,65 @@ impl Partition {
     /// older than the newest one at or below the safe point, and that one too
     /// if it is a delete marker. The deletes need not be durable: versions
     /// that come back after a crash are equally invisible.
+    /// Runs the database's compactor and garbage collector in tasks of
+    /// their own until close.
+    fn start_background(
+        &self,
+        store: Arc<dyn ObjectStore>,
+        copts: slatedb::config::CompactorOptions,
+        gopts: slatedb::config::GarbageCollectorOptions,
+    ) {
+        let path = format!("p/{}", self.id);
+        let pid = self.id;
+        let compactor = Arc::new(
+            slatedb::CompactorBuilder::new(path.clone(), store.clone())
+                .with_options(copts)
+                .build(),
+        );
+        let gc = Arc::new(
+            slatedb::GarbageCollectorBuilder::new(path, store)
+                .with_options(gopts)
+                .build(),
+        );
+        let mut stops = self.background_stops.lock();
+        let c = compactor.clone();
+        let task = tokio::spawn(async move {
+            if let Err(e) = c.run().await {
+                tracing::warn!(partition = pid, err = %e, "compactor stopped");
+            }
+        });
+        let stop: StopFn = Box::new(move || {
+            let c = compactor.clone();
+            Box::pin(async move {
+                let _ = c.stop().await;
+            })
+        });
+        stops.push((stop, task));
+        let g = gc.clone();
+        let task = tokio::spawn(async move {
+            if let Err(e) = g.run().await {
+                tracing::warn!(partition = pid, err = %e, "garbage collector stopped");
+            }
+        });
+        let stop: StopFn = Box::new(move || {
+            let g = gc.clone();
+            Box::pin(async move {
+                let _ = g.stop().await;
+            })
+        });
+        stops.push((stop, task));
+    }
+
+    async fn stop_background(&self) {
+        let stops: Vec<_> = self.background_stops.lock().drain(..).collect();
+        for (stop, task) in stops {
+            stop().await;
+            if tokio::time::timeout(Duration::from_secs(10), task).await.is_err() {
+                tracing::warn!(partition = self.id, "a background task did not stop");
+            }
+        }
+    }
+
     /// Runs MVCC GC now and reports how many versions it dropped.
     pub async fn collect_garbage(&self) -> Result<usize> {
         self.gc_versions(&[]).await

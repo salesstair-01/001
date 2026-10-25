@@ -114,7 +114,7 @@ rewritten. Point the tenant at the new partition.
 | fencing: a second owner takes over | old owner's writes refused | old owner's writes refused |
 | `internal/kvsuite` over gRPC: semantics, 40 metamorphic seeds × 500 ops | pass | pass |
 | sqllogictest subset | 139,122 passed, 0 wrong | the same, run in CI |
-| scale-to-zero demo: suspend and exit after 3 s idle, wake on the next query | wake 80–95 ms | wake ~170 ms (SlateDB open 70–85 ms + durable epoch write) |
+| scale-to-zero demo: suspend and exit after 3 s idle, wake on the next query | wake 80–95 ms | wake 90–100 ms (takeover ~50 ms) |
 | drivers and ORM through `proxyd` + `dird` spawning `kvd` | 4/4, 16/16 | 4/4, 16/16 |
 | point-in-time restore (`scripts/kvd-rs/restore-test.sh`) | (`s2zctl`) | pass; ~300 ms for a small partition |
 

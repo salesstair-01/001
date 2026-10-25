@@ -88,8 +88,24 @@ Reading the source (v19.2.3):
   storage, cephx off inside the cluster. A real deployment is a normal Ceph
   cluster (cephadm or Rook) with RGW in front.
 
-CI runs a `ceph` job: Ubuntu's packages, `mini.sh`, the compatibility and
-KV tests, and the crash test.
+### Development, CI and release testing
+
+| Where | What | How |
+|---|---|---|
+| Development | MicroCeph: Canonical's snap of Ceph Squid, one node, three loop-file OSDs, RGW on :8000 | `make ceph-up`, then `make test-s3` (or `eval "$(scripts/ceph/microceph.sh env)"` before running anything); `make ceph-down` removes it. macOS and Windows: inside a Multipass VM (see the script's header). |
+| CI | The same MicroCeph script on GitHub's Ubuntu runner: the compatibility and KV tests and the crash test | the `ceph` job |
+| Release testing | A full cluster (cephadm or Rook), at least three OSD hosts with 3× replication, RGW configured as above | the same suites, pointed at it with `MINIO_ENDPOINT` and the credentials |
+| No snapd or systemd (containers) | `scripts/ceph/mini.sh`: Ubuntu's Ceph packages, one memstore OSD | the results above were measured this way |
+
+MicroCeph generates RGW's configuration itself and has no option for extra
+frontend settings. `microceph.sh` therefore appends `tcp_nodelay=1` to the
+generated frontend line and restarts RGW, and does it again on every `up`,
+because MicroCeph rewrites the line whenever RGW is reconfigured.
+
+On a full cluster, set it as part of the RGW service:
+
+- cephadm: `rgw_frontend_extra_args: ["tcp_nodelay=1"]` in the service spec;
+- Rook: the equivalent frontend setting on the object store.
 
 ## Other candidates (not run here)
 

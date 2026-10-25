@@ -46,7 +46,7 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | `cmd/slt`, `scripts/slt` | sqllogictest runner, the pinned file list and recorded results |
 | `scripts/drivers` | the driver matrix (Go, Python, Node, Java) |
 | `docs/compatibility.md` | what differs from MySQL 8.0, and how it is checked |
-| `docs/object-stores.md`, `scripts/ceph/mini.sh` | which S3-compatible stores can hold partitions (MinIO is archived; Ceph RGW tested) and the compatibility suite |
+| `docs/object-stores.md`, `scripts/ceph/` | which S3-compatible stores can hold partitions (MinIO is archived; Ceph RGW tested), the compatibility suite, and the development Ceph (`make ceph-up`: MicroCeph) |
 | `.github/workflows/ci.yml` | CI: race tests, 1,000 fault seeds, MinIO + crash test + drivers, sqllogictest |
 
 Object layout per partition: `p/<id>/manifest/<N>`, `p/<id>/wal/<seq>`,
@@ -65,7 +65,9 @@ upgraded as it is.
 ## Run it
 
 ```sh
-docker compose up -d minio            # or any MinIO on 127.0.0.1:9000 (minioadmin/minioadmin)
+make ceph-up                          # MicroCeph with RGW on :8000 (Linux; macOS/Windows: see scripts/ceph/microceph.sh)
+eval "$(scripts/ceph/microceph.sh env)"
+# or: docker compose up -d minio      # the pinned MinIO on :9000 (minioadmin/minioadmin), archived upstream
 make build
 ./bin/kvd  -listen 127.0.0.1:7070 -data ./data/kv
 ./bin/sqld -listen 127.0.0.1:3306 -kv 127.0.0.1:7070 -partition 1

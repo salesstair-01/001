@@ -1,4 +1,4 @@
-.PHONY: build test test-minio fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
+.PHONY: build test test-minio ceph-up ceph-down test-s3 fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
 
 build:
 	go build -o bin/ ./cmd/...
@@ -39,3 +39,14 @@ drivers:
 # ORM suites against ORM_HOST:ORM_PORT (see scripts/orm/README.md).
 orm:
 	scripts/orm/run.sh
+
+# Development object store: single-node MicroCeph with RGW on :8000 (scripts/ceph/microceph.sh).
+ceph-up:
+	scripts/ceph/microceph.sh up
+ceph-down:
+	scripts/ceph/microceph.sh down
+
+# Object-store tests against MicroCeph (or whatever MINIO_ENDPOINT points at).
+test-s3:
+	eval "$$(scripts/ceph/microceph.sh env)" && \
+	go test ./internal/objstore -run 'S3Compat|MinIO' -v && go test ./internal/kv -run MinIO -v

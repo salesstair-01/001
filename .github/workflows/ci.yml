@@ -90,29 +90,29 @@ jobs:
         run: tail -n 50 /tmp/s2z/*.log || true
 
   ceph:
-    name: Ceph RGW (S3 compatibility, KV tests, crash test)
+    name: Ceph RGW on MicroCeph (S3 compatibility, KV tests, crash test)
     runs-on: ubuntu-latest
-    env:
-      MINIO_ENDPOINT: 127.0.0.1:8000
-      MINIO_ACCESS_KEY: s2zkey
-      MINIO_SECRET_KEY: s2zsecret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: install Ceph (Squid, Ubuntu packages)
+      # The same script developers use (scripts/ceph/microceph.sh).
+      - run: scripts/ceph/microceph.sh up
+      - name: S3 compatibility and KV tests
         run: |
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            ceph-mon ceph-osd ceph-mgr radosgw ceph-common
-      - run: scripts/ceph/mini.sh start /tmp/ceph-mini
-      - run: go test ./internal/objstore -run 'S3Compat|MinIO' -v
-      - run: go test ./internal/kv -run MinIO -v
-      - run: make crash-test
+          eval "$(scripts/ceph/microceph.sh env)"
+          go test ./internal/objstore -run 'S3Compat|MinIO' -v
+          go test ./internal/kv -run MinIO -v
+      - name: crash test
+        run: |
+          eval "$(scripts/ceph/microceph.sh env)"
+          make crash-test
       - name: logs
         if: failure()
-        run: tail -n 50 /tmp/ceph-mini/log/*.log || true
+        run: |
+          scripts/ceph/microceph.sh status || true
+          sudo journalctl -u snap.microceph.rgw --no-pager -n 50 || true
 
   mysql-diff:
     name: differential tests against MySQL 8

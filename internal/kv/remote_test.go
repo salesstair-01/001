@@ -14,9 +14,10 @@ import (
 // countingStore counts operations on keys containing a substring.
 type countingStore struct {
 	objstore.Store
-	sub string
-	mu  sync.Mutex
-	ops map[string]int
+	sub  string
+	mu   sync.Mutex
+	ops  map[string]int
+	keys map[string][]string // keys per op, for failure messages
 }
 
 func newCounting(s objstore.Store, sub string) *countingStore {
@@ -27,6 +28,10 @@ func (c *countingStore) count(op, key string) {
 	if strings.Contains(key, c.sub) {
 		c.mu.Lock()
 		c.ops[op]++
+		if c.keys == nil {
+			c.keys = map[string][]string{}
+		}
+		c.keys[op] = append(c.keys[op], key)
 		c.mu.Unlock()
 	}
 }
@@ -137,7 +142,8 @@ func TestRemoteSSTsWakeWithoutDownload(t *testing.T) {
 		t.Fatal("reads made no ranged GETs")
 	}
 	if n := cs.get("get") + cs.get("size"); n != 0 {
-		t.Fatalf("reads made %d whole-object GETs or HEADs", n)
+		cs.mu.Lock()
+		t.Fatalf("reads made %d whole-object GETs or HEADs: get %v, size %v", n, cs.keys["get"], cs.keys["size"])
 	}
 }
 

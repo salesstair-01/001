@@ -51,4 +51,3 @@ func TestLeaseExpiryFreesLocks(t *testing.T) {
 		t.Fatal("lease expiry too slow")
 	}
 }
-

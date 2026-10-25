@@ -66,6 +66,14 @@ both are tested against the same suites.
 | 5 | **Restore and operations.** Point-in-time restore on SlateDB checkpoints and clones, `s2zctl` | the restore tests pass |
 | 6 | **Switch.** The Rust `kvd` becomes the default; the Go owner's storage layer is removed; docs updated | CI on the Rust owner only |
 
+## Status
+
+- **Phase 1** is done: the Go code speaks protobuf (`proto/s2z`).
+- **Phase 2** is done for a single partition: `kvd-rs/` (see its README).
+  On Ceph RGW, `sqld` runs against it and passes the crash test, the
+  driver matrix, the ORM suite and a fencing check; CI runs these in the
+  `kvd-rs` job on MicroCeph.
+
 ## Open questions carried from the spike
 
 - Repeated reads took 150–350 µs, against about 10 µs for the Go owner.

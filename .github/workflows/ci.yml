@@ -149,6 +149,55 @@ jobs:
           ./slatespike density -n 50
           ./slatespike bench -sizes 100
 
+  kvd-rs:
+    name: "Rust kvd (SlateDB) on MicroCeph: crash test, driver matrix, ORM suite"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kvd-rs/target
+          key: kvd-rs-${{ hashFiles('kvd-rs/Cargo.lock') }}
+      - run: scripts/ceph/microceph.sh up
+      - name: unit tests and build
+        run: |
+          (cd kvd-rs && cargo test --release && cargo build --release)
+          make build
+      # The Go owner's crash test first: it also creates the bucket.
+      - name: crash test, Go owner then Rust owner
+        run: |
+          eval "$(scripts/ceph/microceph.sh env)"
+          make crash-test
+          make crash-test-rs
+      - name: driver matrix and ORM suite on the Rust owner
+        run: |
+          eval "$(scripts/ceph/microceph.sh env)"
+          mkdir -p /tmp/s2z
+          kvd-rs/target/release/kvd -listen 127.0.0.1:7070 > /tmp/s2z/kvd.log 2>&1 &
+          ./bin/sqld -listen 127.0.0.1:3306 -kv 127.0.0.1:7070 -partition 5001 > /tmp/s2z/sqld.log 2>&1 &
+          sleep 3
+          DRV_PORT=3306 scripts/drivers/run.sh
+          ORM_PORT=3306 scripts/orm/run.sh
+      - name: logs
+        if: failure()
+        run: tail -n 50 /tmp/s2z/*.log || true
+
   mysql-diff:
     name: differential tests against MySQL 8
     runs-on: ubuntu-latest

@@ -1,4 +1,4 @@
-.PHONY: proto build test test-minio ceph-up ceph-down test-s3 fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
+.PHONY: proto kvd-rs crash-test-rs build test test-minio ceph-up ceph-down test-s3 fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
 
 build:
 	go build -o bin/ ./cmd/...
@@ -55,5 +55,14 @@ test-s3:
 # from proto/s2z. Needs buf and protoc-gen-go on PATH:
 #   go install github.com/bufbuild/buf/cmd/buf@v1.57.2
 #   go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+# The Rust KV owner on SlateDB (kvd-rs/, docs/slatedb-plan.md).
+kvd-rs:
+	cd kvd-rs && cargo build --release
+
+# The crash test with the Rust owner (needs MINIO_* pointing at an object store).
+crash-test-rs: kvd-rs
+	go build -o bin/ ./cmd/sqld ./cmd/crashtest
+	./bin/crashtest -kvd kvd-rs/target/release/kvd -sqld bin/sqld
+
 proto:
 	cd proto && buf lint && buf generate

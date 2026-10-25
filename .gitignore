@@ -11,3 +11,6 @@ __pycache__/
 # SlateDB spike: its source checkout and build output, and the binary
 /spikes/slatedb/.slatedb/
 /spikes/slatedb/slatespike
+
+# Rust KV owner build output
+/kvd-rs/target/

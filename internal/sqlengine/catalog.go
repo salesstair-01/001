@@ -277,10 +277,22 @@ func (c *Catalog) load(ctx context.Context) error {
 // ensure loads the catalog, or once the lease has run out, checks the
 // catalog version and reloads if another query engine changed the schema.
 func (c *Catalog) ensure(ctx context.Context) error {
+	return c.check(ctx, false)
+}
+
+// refresh checks the catalog version now, lease or not, and reloads if it
+// changed: for a name not found in the cache, which another query engine
+// may just have created. Every query looks up the absent "mysql" database,
+// so this must not reload the whole catalog each time.
+func (c *Catalog) refresh(ctx context.Context) error {
+	return c.check(ctx, true)
+}
+
+func (c *Catalog) check(ctx context.Context, force bool) error {
 	c.mu.RLock()
 	loaded, fresh, version := c.loaded, time.Since(c.checked) < CatalogLease, c.version
 	c.mu.RUnlock()
-	if loaded && fresh {
+	if loaded && fresh && !force {
 		return nil
 	}
 	if loaded {

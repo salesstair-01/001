@@ -44,8 +44,8 @@ func (p *Provider) Database(ctx *sql.Context, name string) (sql.Database, error)
 		return nil, err
 	}
 	if d == nil {
-		// Another query engine may have created it; reload once.
-		if err := cat.load(ctx); err != nil {
+		// Another query engine may have created it.
+		if err := cat.refresh(ctx); err != nil {
 			return nil, err
 		}
 		if d, err = cat.Database(ctx, name); err != nil {

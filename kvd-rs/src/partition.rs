@@ -624,14 +624,18 @@ impl Partition {
         intents: Vec<(Vec<u8>, Intent)>,
     ) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, Vec<bool>, Option<Vec<u8>>)> {
         let lower = keys::versions_start(start).max(keys::DATA_START.to_vec());
-        let it = if end.is_empty() {
-            self.db.scan_with_options(lower.., &scan_opts()).await?
-        } else {
-            self.db
-                .scan_with_options(lower..keys::versions_start(end), &scan_opts())
-                .await?
+        let upper = (!end.is_empty()).then(|| keys::versions_start(end));
+        let it = match &upper {
+            None => self.db.scan_with_options(lower.., &scan_opts()).await?,
+            Some(upper) => self.db.scan_with_options(lower..upper.clone(), &scan_opts()).await?,
         };
-        let mut committed = Committed { it, ts, decided: None };
+        let mut committed = Committed {
+            it,
+            ts,
+            upper,
+            decided: None,
+            done: false,
+        };
         let mut out = vec![];
         let mut own = vec![];
         let mut c = committed.next().await?;
@@ -1142,19 +1146,45 @@ async fn background(p: Weak<Partition>) {
 }
 
 /// Committed rows visible at a timestamp, one per user key.
+///
+/// A key's versions it does not need (newer than ts, or older than the one
+/// it took) are skipped by seeking once there are more than a few: the
+/// restore window keeps every version for an hour, and a key rewritten on
+/// every statement (a counter, the catalog version) gathers thousands.
 struct Committed {
     it: slatedb::DbIterator,
     ts: u64,
+    upper: Option<Vec<u8>>,   // the scan's end, exclusive (None: unbounded)
     decided: Option<Vec<u8>>, // the user key whose visible version was already taken
+    done: bool,
 }
+
+/// Versions of one key skipped by next() before the iterator seeks past them.
+const SEEK_AFTER: usize = 8;
 
 impl Committed {
     async fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        while let Some(kv) = self.it.next().await? {
+        let mut skipped = 0;
+        while !self.done
+            && let Some(kv) = self.it.next().await?
+        {
             let Some((uk, vts)) = keys::split(&kv.key) else {
                 continue;
             };
-            if self.decided.as_ref() == Some(&uk) || vts > self.ts {
+            if self.decided.as_ref() == Some(&uk) {
+                skipped += 1;
+                if skipped >= SEEK_AFTER {
+                    skipped = 0;
+                    self.seek(keys::versions_end(&uk)).await?;
+                }
+                continue;
+            }
+            if vts > self.ts {
+                skipped += 1;
+                if skipped >= SEEK_AFTER {
+                    skipped = 0;
+                    self.seek(keys::version_key(&uk, self.ts)).await?;
+                }
                 continue;
             }
             self.decided = Some(uk.clone());
@@ -1163,5 +1193,14 @@ impl Committed {
             }
         }
         Ok(None)
+    }
+
+    async fn seek(&mut self, to: Vec<u8>) -> Result<()> {
+        if self.upper.as_ref().is_some_and(|u| to >= *u) {
+            self.done = true;
+            return Ok(());
+        }
+        self.it.seek(to).await?;
+        Ok(())
     }
 }

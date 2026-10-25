@@ -552,3 +552,42 @@ async fn money_transfers() {
     assert_eq!(total, ACCOUNTS * 1000);
     assert!(committed.load(Ordering::Relaxed) > 0);
 }
+
+#[tokio::test]
+async fn scan_skips_many_versions() {
+    // The restore window keeps every version: a scan seeks past the ones
+    // it does not need, at an old snapshot and at a new one.
+    let p = open(&mem()).await;
+    for i in 1..=4 {
+        put(&p, i, "v0").await.unwrap();
+    }
+    let old = begin(&p).await;
+    let (rows, _) = p.scan(p.epoch, old, &key(0), &key(10), 0, ro(1)).await.unwrap();
+    assert_eq!(rows.len(), 4);
+    for n in 1..=50 {
+        put(&p, 2, &format!("v{n}")).await.unwrap();
+        let id = begin(&p).await;
+        let del = Mutation {
+            op: Op::Delete,
+            key: key(3),
+            value: vec![],
+        };
+        let m = if n % 2 == 0 { put_mut(3, &format!("v{n}")) } else { del };
+        p.mutate(p.epoch, id, 1, vec![m], Duration::ZERO).await.unwrap();
+        p.commit(p.epoch, id, vec![]).await.unwrap();
+    }
+    let vals = |rows: Vec<(Vec<u8>, Vec<u8>)>| {
+        rows.into_iter()
+            .map(|(_, v)| String::from_utf8(v).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let (rows, _) = p.scan(p.epoch, old, &key(0), &key(10), 0, ro(1)).await.unwrap();
+    assert_eq!(vals(rows), ["v0", "v0", "v0", "v0"], "the old snapshot");
+    let new = begin(&p).await;
+    let (rows, _) = p.scan(p.epoch, new, &key(0), &key(10), 0, ro(1)).await.unwrap();
+    assert_eq!(vals(rows), ["v0", "v50", "v50", "v0"], "the newest versions");
+    let (rows, _) = p.scan(p.epoch, new, &key(2), &key(3), 0, ro(1)).await.unwrap();
+    assert_eq!(vals(rows), ["v50"], "a range ending after the rewritten key");
+    let (rows, _) = p.scan(p.epoch, new, &key(1), &key(4), 2, ro(1)).await.unwrap();
+    assert_eq!(vals(rows), ["v0", "v50"], "a page");
+}

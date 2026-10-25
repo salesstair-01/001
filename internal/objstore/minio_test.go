@@ -19,9 +19,14 @@ func minioForTest(t *testing.T) *MinIO {
 	if user == "" {
 		user, pass = "minioadmin", "minioadmin"
 	}
+	bucket := os.Getenv("MINIO_BUCKET")
+	if bucket == "" {
+		bucket = "s2z-test"
+	}
 	m, err := NewMinIO(context.Background(), MinIOConfig{
-		Endpoint: ep, AccessKey: user, SecretKey: pass, Bucket: "s2z-test",
+		Endpoint: ep, AccessKey: user, SecretKey: pass, Bucket: bucket,
 		Prefix: fmt.Sprintf("objstore-test-%d/", time.Now().UnixNano()),
+		Region: os.Getenv("MINIO_REGION"),
 	})
 	if err != nil {
 		t.Fatal(err)

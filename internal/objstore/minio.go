@@ -20,6 +20,9 @@ type MinIOConfig struct {
 	UseSSL    bool
 	// Prefix is prepended to every key, so several deployments can share a bucket.
 	Prefix string
+	// Region is the bucket's region; empty lets the client discover it
+	// (other S3-compatible stores may require a fixed one, e.g. Garage's "garage").
+	Region string
 }
 
 // MinIO is a Store backed by a MinIO bucket.
@@ -34,6 +37,7 @@ func NewMinIO(ctx context.Context, cfg MinIOConfig) (*MinIO, error) {
 	c, err := minio.New(cfg.Endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure: cfg.UseSSL,
+		Region: cfg.Region,
 	})
 	if err != nil {
 		return nil, err
@@ -43,7 +47,7 @@ func NewMinIO(ctx context.Context, cfg MinIOConfig) (*MinIO, error) {
 		return nil, err
 	}
 	if !ok {
-		if err := c.MakeBucket(ctx, cfg.Bucket, minio.MakeBucketOptions{}); err != nil {
+		if err := c.MakeBucket(ctx, cfg.Bucket, minio.MakeBucketOptions{Region: cfg.Region}); err != nil {
 			// Another process may have created it concurrently.
 			if exists, err2 := c.BucketExists(ctx, cfg.Bucket); err2 != nil || !exists {
 				return nil, err

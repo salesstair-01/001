@@ -53,6 +53,10 @@ pub struct Config {
     /// start them once the partition serves, so a wake doesn't wait for
     /// them to start.
     pub deferred_background: bool,
+    /// Retries of a failing object-store operation (100 ms to 1 s apart)
+    /// before SlateDB gives up: a commit then fails as Unavailable and the
+    /// partition stops serving (None = retry forever).
+    pub store_retries: Option<u32>,
 }
 
 impl Default for Config {
@@ -69,6 +73,7 @@ impl Default for Config {
             mvcc_gc_interval: Duration::from_secs(60),
             restore_window: Duration::from_secs(3600),
             deferred_background: true,
+            store_retries: Some(60),
         }
     }
 }
@@ -283,6 +288,7 @@ impl Partition {
             l0_sst_size_bytes: cfg.l0_sst_bytes,
             max_unflushed_bytes: cfg.max_unflushed_bytes,
             manifest_poll_interval: Duration::from_secs(1),
+            object_store_max_retries: cfg.store_retries,
             ..Settings::default()
         };
         let deferred = cfg.deferred_background.then(|| {

@@ -183,3 +183,33 @@ async fn deferred_background() {
             .expect("close");
     }
 }
+
+/// When the store stays unreachable, a commit fails after the configured
+/// retries instead of waiting forever, and the partition stops serving; a
+/// new owner later sees either all of the commit or none of it.
+#[tokio::test]
+async fn unreachable_store_fails_commits() {
+    let mem = mem();
+    let faulty = FaultyStore::new(mem.clone(), 7);
+    let store: Arc<dyn object_store::ObjectStore> = faulty.clone();
+    let p = open_with(
+        &store,
+        Config {
+            store_retries: Some(2),
+            ..cfg()
+        },
+    )
+    .await;
+    put(&p, 1, "before").await.unwrap();
+    faulty.set(Faults { fail: 1.0, drop: 0.0 });
+    let id = begin(&p).await;
+    write(&p, id, 1, 2, "lost", Duration::ZERO).await.unwrap();
+    let res = tokio::time::timeout(Duration::from_secs(30), p.commit(p.epoch, id, vec![])).await;
+    let err = res.expect("the commit must not hang").unwrap_err();
+    assert!(matches!(err.kind, Kind::Unavailable | Kind::EpochChanged), "{err}");
+    assert!(p.stopped().is_some(), "the partition stops serving");
+    faulty.set(Faults::default());
+    let q = open(&mem).await;
+    assert_eq!(get(&q, 1).await, "before");
+    assert_eq!(get(&q, 2).await, "", "the failed commit is not visible");
+}

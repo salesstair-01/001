@@ -118,9 +118,11 @@ The Rust owner reached parity and replaced the Go owner (phase 6).
   (takeover 100 ms → 56 ms), and the partition's epoch is SlateDB's writer
   epoch, which the open already raises durably, instead of a durable write
   of its own (→ about 45–50 ms).
-- **Open:** commits wait out an
-  unreachable store instead of failing after 60 s (SlateDB retries; bound
-  it with `object_store_max_retries`); per-partition PUT accounting.
+- **Store outages**: a failing object-store operation is retried
+  `-store-retries` times (60, about a minute) before SlateDB gives up; the
+  commit then fails and the partition stops serving, as the Go owner did
+  after its 60 s commit timeout. Before, commits waited forever.
+- **Open:** per-partition PUT accounting (SlateDB makes its own PUTs).
 
 Found along the way, in the SQL layer and so for both owners:
 go-mysql-server v0.20.0 skips an UPDATE whose new row equals the old one

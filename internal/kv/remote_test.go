@@ -423,3 +423,34 @@ func TestRemoteSSTsLowerLevelsOnly(t *testing.T) {
 		}
 	}
 }
+
+// Storages of different locators (epochs) share one size cache; reads and
+// uploads through both at once must not race (run with -race).
+func TestRemoteStorageSharedSizes(t *testing.T) {
+	cfg := &remoteConfig{store: objstore.NewMem(), prefix: "p/rsst/", sizes: map[string]int64{}}
+	var wg sync.WaitGroup
+	for e := range 2 {
+		st, err := cfg.CreateStorage(remoteLocator(uint64(e + 1)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				name := fmt.Sprintf("0000-1-%06d.sst", i)
+				w, _ := st.CreateObject(name)
+				_, _ = w.Write([]byte("x"))
+				if err := w.Close(); err != nil {
+					t.Error(err)
+					return
+				}
+				if n, err := st.Size(name); err != nil || n != 1 {
+					t.Errorf("size %d %v", n, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}

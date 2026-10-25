@@ -48,6 +48,9 @@ type remoteConfig struct {
 	epoch      uint64
 	cacheBytes int64 // local cache of remote blocks; 0 = none
 	lowerOnly  bool  // only L5 and L6 remote; L0–L4 stay local (uploaded at checkpoints)
+	// sizes caches object sizes for every locator's storage, so it has
+	// one lock of its own, not one per storage.
+	sizesMu    sync.Mutex
 	sizes      map[string]int64
 	onCreate   func(RemoteRef)
 	onObsolete func(object string)
@@ -73,7 +76,6 @@ func (c *remoteConfig) CreateStorage(locator remote.Locator) (remote.Storage, er
 type remoteStorage struct {
 	cfg       *remoteConfig
 	keyPrefix string
-	mu        sync.Mutex
 }
 
 func (s *remoteStorage) ctx() (context.Context, context.CancelFunc) {
@@ -97,9 +99,9 @@ func (s *remoteStorage) ReadObject(ctx context.Context, name string) (remote.Obj
 }
 
 func (s *remoteStorage) size(ctx context.Context, key string) (int64, error) {
-	s.mu.Lock()
+	s.cfg.sizesMu.Lock()
 	n, ok := s.cfg.sizes[key]
-	s.mu.Unlock()
+	s.cfg.sizesMu.Unlock()
 	if ok {
 		return n, nil
 	}
@@ -107,9 +109,9 @@ func (s *remoteStorage) size(ctx context.Context, key string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	s.mu.Lock()
+	s.cfg.sizesMu.Lock()
 	s.cfg.sizes[key] = n
-	s.mu.Unlock()
+	s.cfg.sizesMu.Unlock()
 	return n, nil
 }
 
@@ -201,9 +203,9 @@ func (w *remoteWriter) Close() error {
 			return fmt.Errorf("remote storage: %s exists with other content", key)
 		}
 	}
-	w.s.mu.Lock()
+	w.s.cfg.sizesMu.Lock()
 	w.s.cfg.sizes[key] = int64(len(data))
-	w.s.mu.Unlock()
+	w.s.cfg.sizesMu.Unlock()
 	if w.s.cfg.onCreate != nil {
 		if fn, ok := remoteFileNum(w.name); ok {
 			w.s.cfg.onCreate(RemoteRef{FileNum: fn, Object: key, Size: int64(len(data))})

@@ -46,6 +46,7 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | `cmd/slt`, `scripts/slt` | sqllogictest runner, the pinned file list and recorded results |
 | `scripts/drivers` | the driver matrix (Go, Python, Node, Java) |
 | `docs/compatibility.md` | what differs from MySQL 8.0, and how it is checked |
+| `docs/object-stores.md`, `scripts/ceph/mini.sh` | which S3-compatible stores can hold partitions (MinIO is archived; Ceph RGW tested) and the compatibility suite |
 | `.github/workflows/ci.yml` | CI: race tests, 1,000 fault seeds, MinIO + crash test + drivers, sqllogictest |
 
 Object layout per partition: `p/<id>/manifest/<N>`, `p/<id>/wal/<seq>`,

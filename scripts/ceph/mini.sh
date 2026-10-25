@@ -28,6 +28,13 @@ stop() {
 	for p in radosgw ceph-osd ceph-mgr ceph-mon; do
 		pkill -x "$p" 2>/dev/null || true
 	done
+	# Wait for them to exit (radosgw can take several seconds), then force:
+	# a survivor would rejoin the next cluster on the same address.
+	for _ in $(seq 20); do
+		pgrep -x 'radosgw|ceph-osd|ceph-mgr|ceph-mon' >/dev/null || return 0
+		sleep 0.5
+	done
+	pkill -9 -x 'radosgw|ceph-osd|ceph-mgr|ceph-mon' 2>/dev/null || true
 	sleep 1
 }
 
@@ -69,7 +76,12 @@ osd_crush_chooseleaf_type = 0
 mon_max_pg_per_osd = 1000
 
 [client.rgw.a]
-rgw_frontends = beast endpoint=127.0.0.1:$PORT
+# Without tcp_nodelay, small responses wait out delayed ACKs: a 4 KiB GET
+# took 43 ms on loopback instead of under 2 ms.
+rgw_frontends = beast endpoint=127.0.0.1:$PORT tcp_nodelay=1
+# radosgw asks for the "secure" monitor connection mode, which needs cephx;
+# with auth disabled it must be allowed plain crc as well.
+ms_mon_client_mode = crc secure
 EOF
 
 # Monitor.

@@ -10,21 +10,37 @@ import (
 	"github.com/salesstair-01/001/internal/objstore"
 )
 
-// TestMinIOTakeoverAndFencing runs the durability protocol against a real
-// MinIO (set MINIO_ENDPOINT): commit, takeover by a second owner, fencing of
-// the first, checkpoint, and recovery through a third owner.
-func TestMinIOTakeoverAndFencing(t *testing.T) {
+// minioForTest connects to the S3-compatible store named by MINIO_ENDPOINT
+// (MinIO, Ceph RGW, ...), or skips. MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
+// MINIO_BUCKET and MINIO_REGION override the MinIO defaults.
+func minioForTest(t *testing.T, prefix string) objstore.Store {
+	t.Helper()
 	ep := os.Getenv("MINIO_ENDPOINT")
 	if ep == "" {
 		t.Skip("MINIO_ENDPOINT not set")
 	}
+	env := func(k, d string) string {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+		return d
+	}
 	s, err := objstore.NewMinIO(context.Background(), objstore.MinIOConfig{
-		Endpoint: ep, AccessKey: "minioadmin", SecretKey: "minioadmin", Bucket: "s2z-test",
-		Prefix: fmt.Sprintf("kv-test-%d/", time.Now().UnixNano()),
+		Endpoint: ep, AccessKey: env("MINIO_ACCESS_KEY", "minioadmin"), SecretKey: env("MINIO_SECRET_KEY", "minioadmin"),
+		Bucket: env("MINIO_BUCKET", "s2z-test"), Region: os.Getenv("MINIO_REGION"),
+		Prefix: fmt.Sprintf("%s-%d/", prefix, time.Now().UnixNano()),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return s
+}
+
+// TestMinIOTakeoverAndFencing runs the durability protocol against a real
+// MinIO (set MINIO_ENDPOINT): commit, takeover by a second owner, fencing of
+// the first, checkpoint, and recovery through a third owner.
+func TestMinIOTakeoverAndFencing(t *testing.T) {
+	s := minioForTest(t, "kv-test")
 	a := open(t, s, "a")
 	for i := 0; i < 20; i++ {
 		if _, err := put(a, i, "a"); err != nil {
@@ -67,18 +83,8 @@ func TestMinIOTakeoverAndFencing(t *testing.T) {
 // flushes and compactions, a wake that reads them with ranged GETs, and a
 // fenced owner flushing under its own epoch.
 func TestMinIORemoteSSTs(t *testing.T) {
-	ep := os.Getenv("MINIO_ENDPOINT")
-	if ep == "" {
-		t.Skip("MINIO_ENDPOINT not set")
-	}
 	ctx := context.Background()
-	s, err := objstore.NewMinIO(ctx, objstore.MinIOConfig{
-		Endpoint: ep, AccessKey: "minioadmin", SecretKey: "minioadmin", Bucket: "s2z-test",
-		Prefix: fmt.Sprintf("kv-remote-test-%d/", time.Now().UnixNano()),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := minioForTest(t, "kv-remote-test")
 	a, err := Takeover(ctx, remoteTestConfig(t, s, "a"), pid)
 	if err != nil {
 		t.Fatal(err)

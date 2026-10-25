@@ -30,7 +30,9 @@ import (
 
 func main() {
 	sizes := flag.String("sizes", "100,500", "tenant sizes in MB, comma-separated")
-	endpoint := flag.String("minio-endpoint", "127.0.0.1:9000", "MinIO host:port")
+	endpoint := flag.String("minio-endpoint", "127.0.0.1:9000", "MinIO (or other S3-compatible store) host:port")
+	accessKey := flag.String("minio-access-key", envOr("MINIO_ACCESS_KEY", "minioadmin"), "access key")
+	secretKey := flag.String("minio-secret-key", envOr("MINIO_SECRET_KEY", "minioadmin"), "secret key")
 	bucket := flag.String("bucket", "s2z-remotebench", "MinIO bucket")
 	work := flag.String("work", "", "local working directory (default: a temp dir)")
 	rowSize := flag.Int("row", 1024, "bytes per row value")
@@ -67,7 +69,7 @@ func main() {
 				continue
 			}
 			minio, err := objstore.NewMinIO(ctx, objstore.MinIOConfig{
-				Endpoint: *endpoint, AccessKey: "minioadmin", SecretKey: "minioadmin", Bucket: *bucket,
+				Endpoint: *endpoint, AccessKey: *accessKey, SecretKey: *secretKey, Bucket: *bucket,
 				Prefix: fmt.Sprintf("run-%d-%dmb-%v/", time.Now().UnixNano(), mb, remote),
 			})
 			must(err)
@@ -286,6 +288,13 @@ func (c *counting) GetRange(ctx context.Context, k string, off, n int64) ([]byte
 func key(i int) []byte {
 	k := encoding.Prefix(1, encoding.FirstUserTableID, 0)
 	return binary.BigEndian.AppendUint64(append(k, encoding.MarkerValue), uint64(i)^(1<<63))
+}
+
+func envOr(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
 }
 
 func must(err error) {

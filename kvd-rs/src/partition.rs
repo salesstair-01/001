@@ -812,7 +812,7 @@ impl Partition {
             let ts = st.max_commit_ts;
             for table in &autoinc {
                 // saved with the commit, so values are never reused
-                b.put(self.auto_inc_key(*table), st.autoinc[table].to_be_bytes());
+                b.put(keys::version_key(&self.auto_inc_key(*table), ts), st.autoinc[table].to_be_bytes());
             }
             ts
         };

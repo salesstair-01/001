@@ -150,7 +150,7 @@ jobs:
           ./slatespike bench -sizes 100
 
   kvd-rs:
-    name: "Rust kvd (SlateDB) on MicroCeph: crash test, driver matrix, ORM suite"
+    name: "Rust kvd (SlateDB) on MicroCeph: KV suites, crash test, drivers, ORM"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -185,6 +185,11 @@ jobs:
           eval "$(scripts/ceph/microceph.sh env)"
           make crash-test
           make crash-test-rs
+      - name: KV suites (semantics, metamorphic) over gRPC, both owners
+        run: |
+          eval "$(scripts/ceph/microceph.sh env)"
+          KVSUITE_KVD=$PWD/bin/kvd go test ./internal/kvsuite -count=1 -v -meta-runs 20 -meta-ops 500
+          KVSUITE_KVD=$PWD/kvd-rs/target/release/kvd go test ./internal/kvsuite -count=1 -v -meta-runs 20 -meta-ops 500
       - name: driver matrix and ORM suite on the Rust owner
         run: |
           eval "$(scripts/ceph/microceph.sh env)"

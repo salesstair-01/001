@@ -1,4 +1,4 @@
-.PHONY: proto kvd-rs crash-test-rs build test test-minio ceph-up ceph-down test-s3 fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
+.PHONY: proto kvd-rs crash-test-rs kvsuite build test test-minio ceph-up ceph-down test-s3 fault-1000 crash-test wake-demo wake-time cold-start slt drivers orm
 
 build:
 	go build -o bin/ ./cmd/...
@@ -63,6 +63,12 @@ kvd-rs:
 crash-test-rs: kvd-rs
 	go build -o bin/ ./cmd/sqld ./cmd/crashtest
 	./bin/crashtest -kvd kvd-rs/target/release/kvd -sqld bin/sqld
+
+# The KV suites over gRPC against both owners (needs MINIO_*).
+kvsuite: kvd-rs
+	go build -o bin/ ./cmd/kvd
+	KVSUITE_KVD=$$PWD/bin/kvd go test ./internal/kvsuite -count=1
+	KVSUITE_KVD=$$PWD/kvd-rs/target/release/kvd go test ./internal/kvsuite -count=1
 
 proto:
 	cd proto && buf lint && buf generate

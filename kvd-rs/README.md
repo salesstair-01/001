@@ -10,6 +10,7 @@ make kvd-rs                                               # cargo build --releas
 kvd-rs/target/release/kvd -listen 127.0.0.1:7070 &
 bin/sqld -kv 127.0.0.1:7070 -partition 1 &
 make crash-test-rs                                        # kill -9 loop, as for the Go owner
+make kvsuite                                              # KV suites over gRPC against both owners
 ```
 
 ## Layout
@@ -58,5 +59,6 @@ flags are accepted and ignored with a warning.
 | driver matrix (Go, Python, Node, Java) | 4/4 | 4/4 |
 | ORM suite (SQLAlchemy + Alembic) | 16/16 | 16/16 |
 | fencing: a second owner takes over | old owner's writes refused | old owner's writes refused |
+| `internal/kvsuite` over gRPC: semantics, 40 metamorphic seeds × 500 ops | pass | pass |
 
 The crash-test counts depend on the random kill timing; both pass.

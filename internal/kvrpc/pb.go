@@ -59,6 +59,10 @@ func init() {
 			ms := make([]kv.Mutation, len(m.Mutations))
 			for i, mu := range m.Mutations {
 				ms[i] = kv.Mutation{Op: kv.MutationOp(mu.Op), Key: mu.Key, Value: mu.Value}
+				if ms[i].Op != kv.OpDelete && ms[i].Value == nil {
+					// An empty value (a secondary-index entry) is a row; nil would read as absent.
+					ms[i].Value = []byte{}
+				}
 			}
 			*r = MutateReq{H: header(m.H), Txn: txnID(m.Txn), Stmt: m.Stmt, Mutations: ms, LockWaitMs: m.LockWaitMs}
 		})

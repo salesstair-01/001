@@ -71,31 +71,6 @@ func get(t *testing.T, p *Partition, i int) string {
 	return string(vs[0])
 }
 
-func TestCommitAndRestart(t *testing.T) {
-	s := objstore.NewMem()
-	p := open(t, s, "a")
-	for i := 0; i < 50; i++ {
-		if _, err := put(p, i, fmt.Sprint("v", i)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := get(t, p, 3); got != "v3" {
-		t.Fatalf("got %q", got)
-	}
-	// Simulate kill -9: drop the process without a checkpoint; a new owner
-	// recovers everything from the WAL.
-	p.Close()
-	q := open(t, s, "b")
-	for i := 0; i < 50; i++ {
-		if got := get(t, q, i); got != fmt.Sprint("v", i) {
-			t.Fatalf("key %d: got %q", i, got)
-		}
-	}
-	if q.epoch != p.epoch+1 {
-		t.Fatalf("epoch %d -> %d", p.epoch, q.epoch)
-	}
-}
-
 func TestCheckpointAndReplay(t *testing.T) {
 	s := objstore.NewMem()
 	p := open(t, s, "a")
@@ -260,121 +235,6 @@ func TestTakeoverDuringGroupFlush(t *testing.T) {
 	}
 }
 
-func TestSnapshotIsolation(t *testing.T) {
-	p := open(t, objstore.NewMem(), "a")
-	put(p, 1, "old")
-	a := txnID()
-	p.Begin(p.epoch, a, BeginOptions{})
-	if vs, _ := p.Get(p.epoch, a, [][]byte{key(1)}, ReadOptions{Stmt: 1}); string(vs[0]) != "old" {
-		t.Fatal("first read")
-	}
-	put(p, 1, "new")
-	if vs, _ := p.Get(p.epoch, a, [][]byte{key(1)}, ReadOptions{Stmt: 2}); string(vs[0]) != "old" {
-		t.Fatal("repeatable read must keep the old value")
-	}
-	// READ COMMITTED sees the new value on its next statement.
-	rc := txnID()
-	p.Begin(p.epoch, rc, BeginOptions{Isolation: ReadCommitted})
-	p.Get(p.epoch, rc, [][]byte{key(1)}, ReadOptions{Stmt: 1})
-	put(p, 1, "newer")
-	if vs, _ := p.Get(p.epoch, rc, [][]byte{key(1)}, ReadOptions{Stmt: 2}); string(vs[0]) != "newer" {
-		t.Fatal("read committed must see the latest commit")
-	}
-	// A locking read sees the latest committed version, not the snapshot.
-	if vs, _ := p.Get(p.epoch, a, [][]byte{key(1)}, ReadOptions{Stmt: 3, Lock: LockExclusive}); string(vs[0]) != "newer" {
-		t.Fatalf("locking read must read the latest version, got %q", vs[0])
-	}
-	p.Rollback(p.epoch, a)
-}
-
-func TestRollbackAndStatementRollback(t *testing.T) {
-	p := open(t, objstore.NewMem(), "a")
-	put(p, 1, "a")
-	id := txnID()
-	p.Begin(p.epoch, id, BeginOptions{})
-	p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpPut, Key: key(2), Value: []byte("b")}}, 0)
-	p.Mutate(p.epoch, id, 2, []Mutation{{Op: OpPut, Key: key(3), Value: []byte("c")}}, 0)
-	err := p.Mutate(p.epoch, id, 2, []Mutation{{Op: OpInsertOnly, Key: key(1), Value: []byte("dup")}}, 0)
-	if KindOf(err) != KindDuplicateKey {
-		t.Fatalf("expected duplicate, got %v", err)
-	}
-	p.RollbackStatement(p.epoch, id, 2)
-	rows, _, err := p.Scan(p.epoch, id, key(0), key(10), 0, ReadOptions{Stmt: 3})
-	if err != nil || len(rows) != 2 {
-		t.Fatalf("scan inside txn: %d rows %v", len(rows), err)
-	}
-	if _, err := p.Commit(p.epoch, id); err != nil {
-		t.Fatal(err)
-	}
-	if get(t, p, 2) != "b" || get(t, p, 3) != "" {
-		t.Fatal("statement rollback")
-	}
-	id2 := txnID()
-	p.Begin(p.epoch, id2, BeginOptions{})
-	p.Mutate(p.epoch, id2, 1, []Mutation{{Op: OpDelete, Key: key(1)}}, 0)
-	p.Rollback(p.epoch, id2)
-	if get(t, p, 1) != "a" {
-		t.Fatal("rollback left a trace")
-	}
-}
-
-func TestScanMergesIntents(t *testing.T) {
-	p := open(t, objstore.NewMem(), "a")
-	for i := 0; i < 10; i += 2 {
-		put(p, i, fmt.Sprint(i))
-	}
-	id := txnID()
-	p.Begin(p.epoch, id, BeginOptions{})
-	p.Mutate(p.epoch, id, 1, []Mutation{
-		{Op: OpPut, Key: key(3), Value: []byte("3")},
-		{Op: OpDelete, Key: key(4)},
-		{Op: OpPut, Key: key(6), Value: []byte("six")},
-	}, 0)
-	var got []string
-	start := key(0)
-	for {
-		rows, resume, err := p.Scan(p.epoch, id, start, key(100), 2, ReadOptions{Stmt: 2})
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, r := range rows {
-			got = append(got, string(r.Value))
-		}
-		if resume == nil {
-			break
-		}
-		start = resume
-	}
-	if fmt.Sprint(got) != "[0 2 3 six 8]" {
-		t.Fatalf("got %v", got)
-	}
-}
-
-func TestTxnStatusAndIdempotentCommit(t *testing.T) {
-	s := objstore.NewMem()
-	p := open(t, s, "a")
-	id := txnID()
-	p.Begin(p.epoch, id, BeginOptions{})
-	p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpPut, Key: key(1), Value: []byte("x")}}, 0)
-	ts, err := p.Commit(p.epoch, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ts2, err := p.Commit(p.epoch, id); err != nil || ts2 != ts {
-		t.Fatal("retried commit must return the original commit_ts")
-	}
-	p.Checkpoint(context.Background())
-	p.Close()
-	q := open(t, s, "b")
-	st, ts3, _ := q.TxnStatus(q.epoch, id)
-	if st != TxnCommitted || ts3 != ts {
-		t.Fatalf("status after takeover: %v %d", st, ts3)
-	}
-	if st, _, _ := q.TxnStatus(q.epoch, txnID()); st != TxnUnknown {
-		t.Fatal("unknown id")
-	}
-}
-
 func TestMVCCGC(t *testing.T) {
 	p := open(t, objstore.NewMem(), "a")
 	for v := 0; v < 5; v++ {
@@ -394,13 +254,6 @@ func TestMVCCGC(t *testing.T) {
 	}
 	if get(t, p, 1) != "4" || get(t, p, 2) != "" {
 		t.Fatal("gc changed visible data")
-	}
-}
-
-func TestEpochMismatch(t *testing.T) {
-	p := open(t, objstore.NewMem(), "a")
-	if err := p.Begin(p.epoch+1, txnID(), BeginOptions{}); KindOf(err) != KindEpochChanged {
-		t.Fatal("epoch mismatch must return EpochChanged")
 	}
 }
 
@@ -433,61 +286,6 @@ func TestGroupCommitConcurrent(t *testing.T) {
 }
 
 var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
-
-func TestAutoIncrementSurvivesRestart(t *testing.T) {
-	s := objstore.NewMem()
-	p := open(t, s, "a")
-	id := txnID()
-	p.Begin(p.epoch, id, BeginOptions{})
-	first, _ := p.AutoIncrement(p.epoch, id, 2000, 3, 0)
-	if first != 1 {
-		t.Fatalf("first value %d", first)
-	}
-	// A rolled-back transaction's values are not handed out again.
-	rb := txnID()
-	p.Begin(p.epoch, rb, BeginOptions{})
-	if v, _ := p.AutoIncrement(p.epoch, rb, 2000, 1, 0); v != 4 {
-		t.Fatalf("second allocation %d", v)
-	}
-	p.Rollback(p.epoch, rb)
-	if v, _ := p.AutoIncrement(p.epoch, id, 2000, 0, 100); v != 100 {
-		t.Fatalf("explicit value raises the counter: %d", v)
-	}
-	p.Mutate(p.epoch, id, 1, []Mutation{{Op: OpPut, Key: key(1), Value: []byte("x")}}, 0)
-	if _, err := p.Commit(p.epoch, id); err != nil {
-		t.Fatal(err)
-	}
-	p.Close()
-	q := open(t, s, "b")
-	if v, _ := q.AutoIncrement(q.epoch, TxnID{}, 2000, 0, 0); v != 100 {
-		t.Fatalf("counter after restart: %d", v)
-	}
-}
-
-// A snapshot taken before anything was committed has timestamp 0, which once
-// also meant "no snapshot yet": the next read took a new one, so reads on a
-// fresh partition were not repeatable (found by the metamorphic test).
-func TestSnapshotOnEmptyPartitionIsRepeatable(t *testing.T) {
-	for _, iso := range []Isolation{RepeatableRead, ReadCommitted} {
-		p := open(t, objstore.NewMem(), "kv-a")
-		reader := txnID()
-		if err := p.Begin(p.epoch, reader, BeginOptions{Isolation: iso}); err != nil {
-			t.Fatal(err)
-		}
-		k := key(int(iso) + 100)
-		if vs, err := p.Get(p.epoch, reader, [][]byte{k}, ReadOptions{Stmt: 1}); err != nil || vs[0] != nil {
-			t.Fatalf("first read: %q %v", vs, err)
-		}
-		if _, err := put(p, int(iso)+100, "later"); err != nil {
-			t.Fatal(err)
-		}
-		// Same statement: neither RR nor RC may see the later commit.
-		if vs, err := p.Get(p.epoch, reader, [][]byte{k}, ReadOptions{Stmt: 1}); err != nil || vs[0] != nil {
-			t.Fatalf("isolation %d: second read in the statement saw %q (%v)", iso, vs[0], err)
-		}
-		_ = p.Rollback(p.epoch, reader)
-	}
-}
 
 // A manifest listing engine files from before the v2 comparer (format 0) is
 // refused at takeover and restore, without fencing its owner; one that only

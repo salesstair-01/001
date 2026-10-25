@@ -73,6 +73,16 @@ both are tested against the same suites.
   On Ceph RGW, `sqld` runs against it and passes the crash test, the
   driver matrix, the ORM suite and a fencing check; CI runs these in the
   `kvd-rs` job on MicroCeph.
+- **Phase 3** is under way. The transaction, lock and metamorphic suites
+  moved to `internal/kvsuite` and run against any owner: the Go owner in
+  process (`go test ./internal/kv`), or a `kvd` binary of either
+  implementation over gRPC (`make kvsuite`). Both binaries pass 40
+  metamorphic seeds of 500 operations each on Ceph RGW. Running the Go
+  owner over gRPC found a bug that predates the Rust work: an empty value
+  (a secondary-index entry) written in a transaction read back as absent
+  until commit, because the wire turns it into nil; fixed in `kvrpc`.
+  Still to do: the Pebble compatibility test and sqllogictest against the
+  Rust owner in CI, and the MySQL differential test over gRPC.
 
 ## Open questions carried from the spike
 

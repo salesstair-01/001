@@ -1,42 +1,32 @@
-package kv
+package kvsuite
 
 // A metamorphic test in the style of Pebble's (pebble/metamorphic): a seeded
 // generator produces a sequence of operations together with the result each
 // must have, computed by a small in-memory model of the transaction
-// semantics, and the sequence is replayed against a real partition under
-// several configurations that must not change any result: checkpoint
-// frequency, local SST cache, memtable size and group-commit window.
+// semantics, and the sequence is replayed against an owner. Storage events
+// must not change any result: Checkpoint and MVCC GC (where the owner has
+// them), and Restart, which ends the owner and takes the partition over
+// again (open transactions are lost, committed data is not).
 //
 // Operations: Begin (RR or RC, optionally a consistent snapshot), Get and
 // Scan (plain, shared- or exclusive-locking, with and without the current
 // statement's writes, scans paginated by a limit), Mutate (put, delete,
 // insert-only, several keys per call), statement and transaction rollback,
-// Commit, and storage events that must be invisible: Checkpoint, MVCC GC, and
-// Restart, which closes the owner and takes the partition over again (open
-// transactions are lost, committed data is not).
-//
-//	go test ./internal/kv -run Metamorphic -meta-seed 1 -meta-runs 50 -meta-ops 500
+// Commit, and the storage events.
 
 import (
 	"bytes"
-	"context"
+	"crypto/rand"
 	"errors"
-	"flag"
 	"fmt"
-	"math/rand"
+	mrand "math/rand"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/salesstair-01/001/internal/encoding"
-	"github.com/salesstair-01/001/internal/objstore"
-)
-
-var (
-	metaSeed = flag.Int64("meta-seed", 1, "first seed of the metamorphic test")
-	metaRuns = flag.Int("meta-runs", 8, "seeds the metamorphic test runs")
-	metaOps  = flag.Int("meta-ops", 300, "operations per seed")
+	"github.com/salesstair-01/001/internal/kv"
 )
 
 const (
@@ -61,7 +51,7 @@ const (
 )
 
 type metaMut struct {
-	op  MutationOp
+	op  kv.MutationOp
 	key int
 	val string
 }
@@ -70,12 +60,12 @@ type metaMut struct {
 type metaOp struct {
 	kind    metaOpKind
 	txn     int // generator's transaction number
-	iso     Isolation
+	iso     kv.Isolation
 	snap    bool // Begin with a consistent snapshot
 	keys    []int
 	lo, hi  int // scan [lo, hi)
 	limit   int
-	lock    LockMode
+	lock    kv.LockMode
 	include bool // reads see the current statement's writes
 	muts    []metaMut
 }
@@ -84,7 +74,7 @@ func (o metaOp) String() string {
 	switch o.kind {
 	case opBegin:
 		iso := "RR"
-		if o.iso == ReadCommitted {
+		if o.iso == kv.ReadCommitted {
 			iso = "RC"
 		}
 		return fmt.Sprintf("t%d.Begin(%s, snapshot=%v)", o.txn, iso, o.snap)
@@ -125,7 +115,7 @@ type metaLayer struct {
 }
 
 type metaTxn struct {
-	iso    Isolation
+	iso    kv.Isolation
 	stmt   uint64
 	snap   map[int]string // nil until the first consistent read (RR)
 	layers []*metaLayer
@@ -154,7 +144,7 @@ func (m *metaModel) copyCommitted() map[int]string {
 	return out
 }
 
-func (m *metaModel) lock(txn, key int, mode LockMode) bool {
+func (m *metaModel) lock(txn, key int, mode kv.LockMode) bool {
 	l := m.locks[key]
 	if l == nil {
 		l = &metaLock{x: -1, s: map[int]bool{}}
@@ -163,7 +153,7 @@ func (m *metaModel) lock(txn, key int, mode LockMode) bool {
 	if l.x != -1 && l.x != txn {
 		return false
 	}
-	if mode == LockExclusive {
+	if mode == kv.LockExclusive {
 		for h := range l.s {
 			if h != txn {
 				return false
@@ -213,8 +203,8 @@ func (t *metaTxn) layer() *metaLayer {
 
 // base is the committed state a read sees: the snapshot, or the latest for a
 // locking read.
-func (m *metaModel) base(t *metaTxn, lock LockMode) map[int]string {
-	if lock != LockNone {
+func (m *metaModel) base(t *metaTxn, lock kv.LockMode) map[int]string {
+	if lock != kv.LockNone {
 		return m.committed
 	}
 	if t.snap == nil { // RR: the first consistent read; RC: the first in each statement
@@ -236,14 +226,14 @@ func (m *metaModel) apply(op metaOp) string {
 	switch op.kind {
 	case opBegin:
 		t = &metaTxn{iso: op.iso, stmt: 1}
-		if op.snap && op.iso == RepeatableRead { // RC takes a snapshot per statement regardless
+		if op.snap && op.iso == kv.RepeatableRead { // RC takes a snapshot per statement regardless
 			t.snap = m.copyCommitted()
 		}
 		m.txns[op.txn] = t
 		return "ok"
 	case opNextStmt:
 		t.stmt++
-		if t.iso == ReadCommitted {
+		if t.iso == kv.ReadCommitted {
 			t.snap = nil
 		}
 		return "ok"
@@ -252,7 +242,7 @@ func (m *metaModel) apply(op metaOp) string {
 		// keys the transaction wrote are answered from its writes, unlocked;
 		// the others are locked in order, if locking, and read.
 		var base map[int]string
-		if op.lock == LockNone {
+		if op.lock == kv.LockNone {
 			base = m.base(t, op.lock)
 		}
 		var out []string
@@ -265,7 +255,7 @@ func (m *metaModel) apply(op metaOp) string {
 				}
 				continue
 			}
-			if op.lock != LockNone {
+			if op.lock != kv.LockNone {
 				if !m.lock(op.txn, k, op.lock) {
 					return "err:LockTimeout"
 				}
@@ -290,7 +280,7 @@ func (m *metaModel) apply(op metaOp) string {
 			if !ok {
 				continue
 			}
-			if op.lock != LockNone && !m.lock(op.txn, k, op.lock) {
+			if op.lock != kv.LockNone && !m.lock(op.txn, k, op.lock) {
 				return "err:LockTimeout"
 			}
 			rows = append(rows, fmt.Sprintf("%d=%q", k, bv))
@@ -298,19 +288,19 @@ func (m *metaModel) apply(op metaOp) string {
 		return "[" + strings.Join(rows, " ") + "]"
 	case opMutate:
 		for _, mu := range op.muts {
-			if !m.lock(op.txn, mu.key, LockExclusive) {
+			if !m.lock(op.txn, mu.key, kv.LockExclusive) {
 				return "err:LockTimeout"
 			}
 		}
 		l := t.layer()
 		for _, mu := range op.muts {
 			switch mu.op {
-			case OpPut:
+			case kv.OpPut:
 				v := mu.val
 				l.writes[mu.key] = &v
-			case OpDelete:
+			case kv.OpDelete:
 				l.writes[mu.key] = nil
-			case OpInsertOnly:
+			case kv.OpInsertOnly:
 				own, ok := t.own(mu.key, true)
 				if ok && own != nil {
 					return "err:DuplicateKey"
@@ -371,7 +361,7 @@ func (m *metaModel) apply(op metaOp) string {
 
 // ---- the generator --------------------------------------------------------------
 
-func generateMeta(r *rand.Rand, n int) ([]metaOp, []string) {
+func generateMeta(r *mrand.Rand, n int) ([]metaOp, []string) {
 	m := newMetaModel()
 	var ops []metaOp
 	var want []string
@@ -386,7 +376,7 @@ func generateMeta(r *rand.Rand, n int) ([]metaOp, []string) {
 		w := r.Intn(100)
 		switch {
 		case len(open) == 0 || (w < 8 && len(open) < 4):
-			op = metaOp{kind: opBegin, txn: nextTxn, iso: Isolation(r.Intn(2)), snap: r.Intn(4) == 0}
+			op = metaOp{kind: opBegin, txn: nextTxn, iso: kv.Isolation(r.Intn(2)), snap: r.Intn(4) == 0}
 			nextTxn++
 		case w < 9:
 			op = metaOp{kind: opCheckpoint}
@@ -396,9 +386,9 @@ func generateMeta(r *rand.Rand, n int) ([]metaOp, []string) {
 			op = metaOp{kind: opRestart}
 		default:
 			txn := open[r.Intn(len(open))]
-			lock := LockNone
+			lock := kv.LockNone
 			if r.Intn(4) == 0 {
-				lock = LockMode(1 + r.Intn(2))
+				lock = kv.LockMode(1 + r.Intn(2))
 			}
 			switch x := r.Intn(100); {
 			case x < 22:
@@ -413,8 +403,8 @@ func generateMeta(r *rand.Rand, n int) ([]metaOp, []string) {
 			case x < 70:
 				var muts []metaMut
 				for i := 0; i < 1+r.Intn(3); i++ {
-					mu := metaMut{op: MutationOp(r.Intn(3)), key: r.Intn(metaKeys)}
-					if mu.op != OpDelete {
+					mu := metaMut{op: kv.MutationOp(r.Intn(3)), key: r.Intn(metaKeys)}
+					if mu.op != kv.OpDelete {
 						if r.Intn(8) == 0 {
 							mu.val = "" // empty values (secondary-index entries) must read back as present
 						} else {
@@ -440,32 +430,23 @@ func generateMeta(r *rand.Rand, n int) ([]metaOp, []string) {
 	return ops, want
 }
 
-// ---- running against a partition -----------------------------------------------
+// ---- running against an owner ---------------------------------------------------
+
+func txnID() kv.TxnID {
+	var id kv.TxnID
+	_, _ = rand.Read(id[:])
+	return id
+}
 
 type metaRunner struct {
 	t     *testing.T
-	store objstore.Store
-	cfg   Config
-	p     *Partition
-	ids   map[int]TxnID
+	inst  Instance
+	ids   map[int]kv.TxnID
 	stmts map[int]uint64
-	n     int
-}
-
-func (r *metaRunner) takeover() {
-	r.n++
-	cfg := r.cfg
-	cfg.OwnerID = fmt.Sprintf("meta-%d", r.n)
-	cfg.DataDir = r.t.TempDir()
-	p, err := Takeover(context.Background(), cfg, pid)
-	if err != nil {
-		r.t.Fatalf("takeover: %v", err)
-	}
-	r.p = p
 }
 
 func errResult(err error) string {
-	var e *Error
+	var e *kv.Error
 	if errors.As(err, &e) {
 		return "err:" + e.Kind.String()
 	}
@@ -473,15 +454,16 @@ func errResult(err error) string {
 }
 
 func (r *metaRunner) run(op metaOp) string {
-	p := r.p
+	p := r.inst.Owner()
+	pid := r.inst.Pid()
 	id := r.ids[op.txn]
 	stmt := r.stmts[op.txn]
-	ro := ReadOptions{Stmt: stmt, IncludeStmt: op.include, Lock: op.lock, LockWait: metaLockWait}
+	ro := kv.ReadOptions{Stmt: stmt, IncludeStmt: op.include, Lock: op.lock, LockWait: metaLockWait}
 	switch op.kind {
 	case opBegin:
 		id = txnID()
 		r.ids[op.txn], r.stmts[op.txn] = id, 1
-		if err := p.Begin(p.Epoch(), id, BeginOptions{Isolation: op.iso, ConsistentSnapshot: op.snap}); err != nil {
+		if err := p.Begin(p.Epoch(), id, kv.BeginOptions{Isolation: op.iso, ConsistentSnapshot: op.snap}); err != nil {
 			return errResult(err)
 		}
 		return "ok"
@@ -491,7 +473,7 @@ func (r *metaRunner) run(op metaOp) string {
 	case opGet:
 		keys := make([][]byte, len(op.keys))
 		for i, k := range op.keys {
-			keys[i] = metaUserKey(k)
+			keys[i] = metaUserKey(pid, k)
 		}
 		vs, err := p.Get(p.Epoch(), id, keys, ro)
 		if err != nil {
@@ -505,7 +487,7 @@ func (r *metaRunner) run(op metaOp) string {
 	case opScan:
 		// Page through with the limit, as query engines do.
 		var rows []string
-		start, end := metaUserKey(op.lo), metaUserKey(op.hi)
+		start, end := metaUserKey(pid, op.lo), metaUserKey(pid, op.hi)
 		for {
 			kvs, resume, err := p.Scan(p.Epoch(), id, start, end, op.limit, ro)
 			if err != nil {
@@ -514,8 +496,8 @@ func (r *metaRunner) run(op metaOp) string {
 			if op.limit > 0 && len(kvs) > op.limit {
 				return fmt.Sprintf("scan returned %d rows over its limit %d", len(kvs), op.limit)
 			}
-			for _, kv := range kvs {
-				rows = append(rows, fmt.Sprintf("%d=%q", keyIndex(kv.Key), kv.Value))
+			for _, row := range kvs {
+				rows = append(rows, fmt.Sprintf("%d=%q", keyIndex(pid, row.Key), row.Value))
 			}
 			if resume == nil {
 				break
@@ -527,10 +509,10 @@ func (r *metaRunner) run(op metaOp) string {
 		}
 		return "[" + strings.Join(rows, " ") + "]"
 	case opMutate:
-		muts := make([]Mutation, len(op.muts))
+		muts := make([]kv.Mutation, len(op.muts))
 		for i, mu := range op.muts {
-			muts[i] = Mutation{Op: mu.op, Key: metaUserKey(mu.key)}
-			if mu.op != OpDelete {
+			muts[i] = kv.Mutation{Op: mu.op, Key: metaUserKey(pid, mu.key)}
+			if mu.op != kv.OpDelete {
 				muts[i].Value = []byte(mu.val)
 			}
 		}
@@ -549,7 +531,7 @@ func (r *metaRunner) run(op metaOp) string {
 		}
 		return "ok"
 	case opCommit:
-		ts, err := p.Commit(p.Epoch(), id)
+		ts, err := p.CommitGuarded(p.Epoch(), id, nil)
 		if err != nil {
 			return errResult(err)
 		}
@@ -557,21 +539,14 @@ func (r *metaRunner) run(op metaOp) string {
 			return "ok:empty"
 		}
 		return "ok:committed"
-	case opCheckpoint:
-		if err := p.Checkpoint(context.Background()); err != nil {
-			return errResult(err)
-		}
-		return "ok"
-	case opGC:
-		if _, err := p.gcVersions(); err != nil {
+	case opCheckpoint, opGC:
+		what := map[metaOpKind]string{opCheckpoint: "checkpoint", opGC: "gc"}[op.kind]
+		if err := r.inst.Maintain(r.t, what); err != nil {
 			return errResult(err)
 		}
 		return "ok"
 	case opRestart:
-		if err := p.Close(); err != nil {
-			return errResult(err)
-		}
-		r.takeover()
+		r.inst.Restart(r.t)
 		return "ok"
 	}
 	return "?"
@@ -579,9 +554,9 @@ func (r *metaRunner) run(op metaOp) string {
 
 // metaUserKey returns user key i of the run: raw bytes, each key a prefix of
 // the next ("", "\x00", "a", "a\x00", "aa", ...), so every version of a key
-// must sort before the longer keys (issue #3), and "a\x00" sits right
-// where a seek past "a"'s versions lands.
-func metaUserKey(i int) []byte {
+// must sort before the longer keys, and "a\x00" sits right where a seek past
+// "a"'s versions lands.
+func metaUserKey(pid uint64, i int) []byte {
 	k := append(encoding.Prefix(pid, encoding.FirstUserTableID, 0), strings.Repeat("a", i/2)...)
 	if i%2 == 1 {
 		k = append(k, 0)
@@ -589,53 +564,37 @@ func metaUserKey(i int) []byte {
 	return k
 }
 
-func keyIndex(k []byte) int {
+func keyIndex(pid uint64, k []byte) int {
 	for i := 0; i < metaKeys+1; i++ {
-		if bytes.Equal(k, metaUserKey(i)) {
+		if bytes.Equal(k, metaUserKey(pid, i)) {
 			return i
 		}
 	}
 	return -1
 }
 
-// metaConfigs change how the owner stores data, never what it returns.
-var metaConfigs = []struct {
-	name string
-	set  func(*Config)
-}{
-	{"default", func(*Config) {}},
-	{"checkpoint-often", func(c *Config) { c.CheckpointBytes = 1; c.CheckpointInterval = 10 * time.Millisecond }},
-	{"no-cache-small-memtable", func(c *Config) { c.CacheMaxBytes = -1; c.MemTableBytes = 64 << 10; c.BlockCacheBytes = 1 << 20 }},
-	{"no-group-window", func(c *Config) { c.GroupWindow = time.Microsecond; c.GroupMaxBytes = 64 }},
-	{"remote-ssts", func(c *Config) {
-		c.RemoteSSTs = true
-		c.CacheMaxBytes = -1
-		c.MemTableBytes = 64 << 10
-		c.CheckpointBytes = 1
-		c.CheckpointInterval = 10 * time.Millisecond
-		c.GCGrace = time.Millisecond
-	}},
-}
-
-func TestMetamorphic(t *testing.T) {
-	for seed := *metaSeed; seed < *metaSeed+int64(*metaRuns); seed++ {
-		ops, want := generateMeta(rand.New(rand.NewSource(seed)), *metaOps)
-		for _, mc := range metaConfigs {
-			seed, mc := seed, mc
-			t.Run(fmt.Sprintf("seed=%d/%s", seed, mc.name), func(t *testing.T) {
-				cfg := testConfig(t, objstore.NewMem(), "meta")
-				mc.set(&cfg)
-				r := &metaRunner{t: t, store: cfg.Store, cfg: cfg, ids: map[int]TxnID{}, stmts: map[int]uint64{}}
-				r.takeover()
-				defer func() { r.p.Close() }()
-				for i, op := range ops {
+// Metamorphic replays runs seeds of ops operations each, starting at seed,
+// against a fresh instance of every target.
+func Metamorphic(t *testing.T, seed int64, runs, ops int, targets map[string]Target) {
+	names := make([]string, 0, len(targets))
+	for n := range targets {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for s := seed; s < seed+int64(runs); s++ {
+		gen, want := generateMeta(mrand.New(mrand.NewSource(s)), ops)
+		for _, name := range names {
+			s, target := s, targets[name]
+			t.Run(fmt.Sprintf("seed=%d/%s", s, name), func(t *testing.T) {
+				r := &metaRunner{t: t, inst: target(t), ids: map[int]kv.TxnID{}, stmts: map[int]uint64{}}
+				for i, op := range gen {
 					if got := r.run(op); got != want[i] {
 						var hist []string
 						for j := max(0, i-15); j <= i; j++ {
-							hist = append(hist, fmt.Sprintf("  %3d %-60s -> %s", j, ops[j], want[j]))
+							hist = append(hist, fmt.Sprintf("  %3d %-60s -> %s", j, gen[j], want[j]))
 						}
-						t.Fatalf("seed %d, op %d: %s\n  got:  %s\n  want: %s\nlast operations (with expected results):\n%s\nreplay: go test ./internal/kv -run 'Metamorphic/seed=%d/%s' -meta-seed %d -meta-runs 1 -meta-ops %d",
-							seed, i, op, got, want[i], strings.Join(hist, "\n"), seed, mc.name, seed, *metaOps)
+						t.Fatalf("seed %d, op %d: %s\n  got:  %s\n  want: %s\nlast operations (with expected results):\n%s\nreplay with -meta-seed %d -meta-runs 1 -meta-ops %d",
+							s, i, op, got, want[i], strings.Join(hist, "\n"), s, ops)
 					}
 				}
 			})

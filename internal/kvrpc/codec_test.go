@@ -28,6 +28,7 @@ func TestCodecRoundTrip(t *testing.T) {
 			{Op: kv.OpPut, Key: []byte("k"), Value: []byte("v")},
 			{Op: kv.OpDelete, Key: []byte("d")},
 			{Op: kv.OpInsertOnly, Key: []byte("i"), Value: []byte("w")},
+			{Op: kv.OpPut, Key: []byte("e"), Value: []byte{}}, // an empty value stays a value
 		}},
 		&StmtReq{H: h, Txn: txn, Stmt: 5},
 		&TxnReq{H: h, Txn: txn, Guards: []kv.Guard{{Key: []byte("g"), Value: []byte("1")}}},

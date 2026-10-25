@@ -73,9 +73,8 @@ jobs:
             kvd-rs/target
           key: kvd-rs-${{ hashFiles('kvd-rs/Cargo.lock') }}
       # The same script developers use (scripts/ceph/microceph.sh).
-      - run: scripts/ceph/microceph.sh up
+      - run: make ceph-up
       - run: make build
-      # The S3 compatibility suite also creates the bucket.
       - name: S3 compatibility, KV suites over gRPC on S3
         run: |
           eval "$(scripts/ceph/microceph.sh env)"

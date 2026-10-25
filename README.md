@@ -50,6 +50,7 @@ The design lives in the doc *Scale-to-Zero MySQL DB — v1 Foundation Decisions*
 | `cmd/proxyd` | the proxy binary |
 | `cmd/wakedemo` | the slice-6 sleep/wake demo |
 | `cmd/coldstart` | the slice-7 cold-start benchmark (every layer at zero, pooled app) |
+| `cmd/s3bucket` | creates the bucket `kvd` uses on an S3 store |
 | `internal/metrics` | dependency-free Prometheus text registry (`-metrics-listen` on every binary) |
 | `cmd/slt`, `scripts/slt` | sqllogictest runner, the pinned file list and recorded results |
 | `scripts/drivers` | the driver matrix (Go, Python, Node, Java) |
@@ -67,8 +68,8 @@ before them.
 ## Run it
 
 ```sh
-make ceph-up                          # MicroCeph with RGW on :8000 (Linux; macOS/Windows: see scripts/ceph/microceph.sh)
-eval "$(scripts/ceph/microceph.sh env)"
+make ceph-up                          # MicroCeph with RGW on :8000 and the bucket (Linux; macOS/Windows: see scripts/ceph/microceph.sh)
+eval "$(scripts/ceph/microceph.sh env)"   # another S3 store: set MINIO_* and run go run ./cmd/s3bucket
 # or no object store at all: ./bin/kvd -store-dir ./data/store ...
 make build                            # Go binaries, and kvd from kvd-rs/ (needs cargo)
 ./bin/kvd  -listen 127.0.0.1:7070

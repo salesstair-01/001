@@ -246,6 +246,16 @@ async fn run_points(a: PointsArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let store = args.store.open()?;
+    if args.store.store_dir.is_empty() {
+        // Fail now, not on the first takeover, when the bucket is missing.
+        if let Err(e) = store.list_with_delimiter(None).await {
+            return Err(format!(
+                "bucket {:?} on {}: {e} (create it with: go run ./cmd/s3bucket)",
+                args.store.bucket, args.store.endpoint
+            )
+            .into());
+        }
+    }
     let mut owner = args.owner.clone();
     if owner.is_empty() {
         owner = format!("kv-{:012x}", rand::random::<u64>() & 0xffff_ffff_ffff);

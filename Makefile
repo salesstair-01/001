@@ -61,6 +61,7 @@ orm:
 # Development object store: single-node MicroCeph with RGW on :8000 (scripts/ceph/microceph.sh).
 ceph-up:
 	scripts/ceph/microceph.sh up
+	eval "$$(scripts/ceph/microceph.sh env)" && go run ./cmd/s3bucket
 ceph-down:
 	scripts/ceph/microceph.sh down
 

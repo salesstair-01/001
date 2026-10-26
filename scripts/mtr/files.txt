@@ -19,6 +19,7 @@ constraints
 count_distinct
 count_distinct2
 create
+ctype_ascii
 ctype_binary
 ctype_utf8mb4_uca
 delete

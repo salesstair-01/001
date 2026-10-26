@@ -40,6 +40,7 @@ func simpleDML(ctx *sql.Context, n sql.Node) (sql.Node, error) {
 	if _, ok := rewritten.LoadAndDelete(n); ok || !isSimpleDML(n) {
 		return nil, nil
 	}
+	lexWarnings(ctx) // the pre-analyze rule that gives them was skipped
 	changed := false
 	for _, rule := range simpleDMLRules {
 		nn, same, err := rule(ctx, nil, n, nil, analyzer.DefaultRuleSelector, nil)

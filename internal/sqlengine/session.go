@@ -20,9 +20,10 @@ import (
 // Session is a MySQL session whose transactions are KV transactions.
 type Session struct {
 	*sql.BaseSession
-	store *Store
-	temps tempTables    // CREATE TEMPORARY TABLE (temptable.go)
-	stmt  atomic.Uint64 // statement id; one per client command
+	store     *Store
+	temps     tempTables    // CREATE TEMPORARY TABLE (temptable.go)
+	lexWarned uint64        // the query lexWarnings last warned for (lexwarn.go)
+	stmt      atomic.Uint64 // statement id; one per client command
 
 	locksMu sync.Mutex
 	locks   stmtLocks // lock modes of the current statement

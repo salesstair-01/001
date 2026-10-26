@@ -55,6 +55,7 @@ func ddlWarnings(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan
 			}
 		}
 	}
+	lexWarnings(ctx)
 	tableNotes(ctx, n)
 	return n, transform.SameTree, nil
 }

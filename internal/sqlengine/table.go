@@ -38,6 +38,9 @@ type Table struct {
 	keyless bool
 	// refCheck marks a foreign-key reference check (fk.go).
 	refCheck bool
+	// cmpSchema, when set, is what Schema() returns: the schema with text
+	// columns in the binary collation, for an UPDATE (exactupdate.go).
+	cmpSchema sql.Schema
 }
 
 var (
@@ -96,10 +99,15 @@ func newTable(ctx *sql.Context, cat *Catalog, info *TableInfo) (*Table, error) {
 	return t, nil
 }
 
-func (t *Table) Name() string                           { return t.info.Name }
-func (t *Table) String() string                         { return t.info.Name }
-func (t *Table) Database() string                       { return t.info.DB }
-func (t *Table) Schema() sql.Schema                     { return t.schema.Schema }
+func (t *Table) Name() string     { return t.info.Name }
+func (t *Table) String() string   { return t.info.Name }
+func (t *Table) Database() string { return t.info.DB }
+func (t *Table) Schema() sql.Schema {
+	if t.cmpSchema != nil {
+		return t.cmpSchema
+	}
+	return t.schema.Schema
+}
 func (t *Table) PrimaryKeySchema() sql.PrimaryKeySchema { return t.schema }
 func (t *Table) Comment() string                        { return t.info.Comment }
 

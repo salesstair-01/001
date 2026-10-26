@@ -160,6 +160,10 @@ Accepted but different:
     so values within about 2^11 of 2^64 compare equal; integer literals and
     parameters compare exactly.
   - `ENUM ... LIKE` is always false.
+  - A multi-table `UPDATE` (`UPDATE a JOIN b ... SET a.v = 'B'`) still skips
+    a row whose new value equals the old one under the collation (`b` →
+    `B`); a single-table `UPDATE` stores the new bytes and counts the row,
+    as MySQL does.
   - Output formatting: `DATETIME(6)` prints without trailing
     zeros in the fraction (`.12`, MySQL `.120000`); `FLOAT` prints every
     digit of the float32 (`-565.3059`, MySQL `-565.306`).

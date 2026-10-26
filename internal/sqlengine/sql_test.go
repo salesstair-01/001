@@ -747,3 +747,49 @@ func TestUniqueIndexConcurrentInserts(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+// An UPDATE that changes only the case of a value under a case-insensitive
+// collation stores the new bytes and counts the row, as MySQL does.
+func TestCaseOnlyUpdate(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	mustExec(t, db, "CREATE TABLE ci (id INT PRIMARY KEY, v VARCHAR(20), n INT, KEY (v))")
+	mustExec(t, db, "INSERT INTO ci VALUES (1, 'b', 1), (2, 'c', 2)")
+	affected := func(q string) int64 {
+		t.Helper()
+		n, err := mustExec(t, db, q).RowsAffected()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := affected("UPDATE ci SET v = 'B' WHERE id = 1"); n != 1 {
+		t.Fatalf("rows affected %d, want 1", n)
+	}
+	if n := affected("UPDATE ci SET v = 'C' WHERE v = 'c'"); n != 1 {
+		t.Fatalf("through the index: rows affected %d, want 1", n)
+	}
+	if n := affected("UPDATE ci SET v = 'B' WHERE id = 1"); n != 0 {
+		t.Fatalf("unchanged: rows affected %d, want 0", n)
+	}
+	if got := fmt.Sprint(queryStrings(t, db, "SELECT CAST(v AS BINARY) FROM ci ORDER BY id")); got != "[B C]" {
+		t.Fatalf("stored %s, want [B C]", got)
+	}
+	// The column keeps its collation: lookups ignore case, through the index too.
+	if got := fmt.Sprint(queryStrings(t, db, "SELECT id FROM ci WHERE v = 'b'")); got != "[1]" {
+		t.Fatalf("lookup %s, want [1]", got)
+	}
+	if got := fmt.Sprint(queryStrings(t, db, "SELECT id FROM ci FORCE INDEX (v) WHERE v = 'c'")); got != "[2]" {
+		t.Fatalf("index lookup %s, want [2]", got)
+	}
+
+	// A table with a foreign key is updated through another path.
+	mustExec(t, db, "CREATE TABLE child (id INT PRIMARY KEY, pid INT, v VARCHAR(20), FOREIGN KEY (pid) REFERENCES ci (id))")
+	mustExec(t, db, "INSERT INTO child VALUES (10, 1, 'z')")
+	if n := affected("UPDATE child SET v = 'Z' WHERE id = 10"); n != 1 {
+		t.Fatalf("foreign-key table: rows affected %d, want 1", n)
+	}
+	if got := fmt.Sprint(queryStrings(t, db, "SELECT CAST(v AS BINARY) FROM child")); got != "[Z]" {
+		t.Fatalf("foreign-key table: stored %s, want [Z]", got)
+	}
+}

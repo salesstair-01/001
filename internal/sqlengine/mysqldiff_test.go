@@ -83,6 +83,25 @@ func (d *diffPair) exec(q string, args ...any) bool {
 	return e1 == nil && e2 == nil
 }
 
+// execAffected is exec that also compares the rows affected.
+func (d *diffPair) execAffected(q string, args ...any) {
+	d.t.Helper()
+	r1, e1 := d.mysql.Exec(q, args...)
+	r2, e2 := d.ours.Exec(q, args...)
+	if (e1 == nil) != (e2 == nil) {
+		d.mismatch("%s %v\n  mysql: %v\n  ours:  %v", q, args, e1, e2)
+		return
+	}
+	if e1 != nil {
+		return
+	}
+	n1, _ := r1.RowsAffected()
+	n2, _ := r2.RowsAffected()
+	if n1 != n2 {
+		d.mismatch("%s %v: rows affected\n  mysql: %d\n  ours:  %d", q, args, n1, n2)
+	}
+}
+
 // must runs q on both and fails the test if either errors.
 func (d *diffPair) must(q string) {
 	d.t.Helper()
@@ -224,6 +243,13 @@ func TestMySQLDiffCollations(t *testing.T) {
 				// stops at U+FFFF and drops strings continuing with emoji.
 				d.query(fmt.Sprintf("SELECT id FROM %s IGNORE INDEX (ks) WHERE s LIKE ? ORDER BY id", tbl), plain, p+"%")
 			}
+			// Updates that change only the case store the new bytes and count
+			// the row; updates that change nothing count none.
+			for k := 0; k < 10; k++ {
+				f := []string{"UPPER", "LOWER", ""}[r.Intn(3)]
+				d.execAffected(fmt.Sprintf("UPDATE %s SET s = %s(s) WHERE id = ?", tbl, f), 1+r.Intn(60))
+			}
+			d.query(fmt.Sprintf("SELECT id, HEX(s) FROM %s ORDER BY id", tbl), plain)
 			// Unique-key conflicts follow collation equality.
 			d.exec(fmt.Sprintf("CREATE UNIQUE INDEX us ON %s (s)", tbl))
 			for k := 0; k < 10; k++ {

@@ -122,6 +122,7 @@ window_min_max
 window_std_var
 with_non_recursive
 with_non_recursive_bugs
+with_recursive
 with_recursive_bugs
 with_recursive_solver
 year-innodb
@@ -141,9 +142,6 @@ auto_increment
 ps
 variables
 lock
-# Left out until sqld bounds a query's memory and time (see the issues):
+# Left out (see issue #18):
 # select_none          a join sqld plans badly: over 180 s and an enormous
 #                      result (5 s on MySQL)
-# with_recursive       an unbounded recursive CTE (MySQL refuses it with
-#                      ER_CTE_RECURSIVE_FORBIDDEN_JOIN_ORDER) grows sqld's
-#                      memory by ~40 MB/s

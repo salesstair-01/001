@@ -21,7 +21,7 @@ import (
 // signed result. MySQL computes an unsigned result when either operand is
 // unsigned, and fails with 1690 when the result is out of range (issue #16).
 // A post-analyze rule replaces integer +, - and * with an expression that
-// does so, CAST(... AS SIGNED / UNSIGNED) where go-mysql-server saturates at
+// does so, the bit operators (bitOp), CAST(... AS SIGNED / UNSIGNED) where go-mysql-server saturates at
 // 2^63, and comparisons of a signed and an unsigned integer, which
 // go-mysql-server makes in float64 (18446744073709551615 = 18446744073709551614
 // was true).
@@ -40,6 +40,8 @@ func intArith(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan.Sc
 			if c := e.(expression.Comparer); mixedIntCompare(c) {
 				return &exactCmp{c}, transform.NewTree, nil
 			}
+		case *expression.BitOp:
+			return &bitOp{e}, transform.NewTree, nil
 		case *expression.Convert:
 			if to, _ := convertTarget(e); to == expression.ConvertToSigned || to == expression.ConvertToUnsigned {
 				return &intCast{Convert: e, signed: to == expression.ConvertToSigned}, transform.NewTree, nil
@@ -363,4 +365,142 @@ func (c *exactCmp) WithChildren(children ...sql.Expression) (sql.Expression, err
 		return &exactCmp{cc}, nil
 	}
 	return e, nil
+}
+
+// bitOp is &, |, ^, << and >> as MySQL computes them (go-mysql-server went
+// through float64: 18446744073709551615 ^ 5 was 9.223372036854776e+18): in
+// 64-bit unsigned integers, a decimal or float rounded half away from zero,
+// a string by its integer prefix, a binary string as a big-endian number;
+// with two binary strings, &, | and ^ are bytewise. A shift by 64 or more
+// gives 0. The parser makes ~x into x ^ 0xFFFFFFFFFFFFFFFF.
+type bitOp struct{ *expression.BitOp }
+
+func (b *bitOp) Type() sql.Type { return types.Uint64 }
+
+func (b *bitOp) Eval(ctx *sql.Context, row sql.Row) (any, error) {
+	l, err := b.Left().Eval(ctx, row)
+	if err != nil || l == nil {
+		return nil, err
+	}
+	r, err := b.Right().Eval(ctx, row)
+	if err != nil || r == nil {
+		return nil, err
+	}
+	lb, lBin := l.([]byte)
+	rb, rBin := r.([]byte)
+	if lBin && rBin && (b.Op == sqlparser.BitAndStr || b.Op == sqlparser.BitOrStr || b.Op == sqlparser.BitXorStr) {
+		if len(lb) != len(rb) {
+			return nil, mysql.NewSQLError(3513, "HY000", "Binary operands of bitwise operators must be of equal length")
+		}
+		out := make([]byte, len(lb))
+		for i := range lb {
+			switch b.Op {
+			case sqlparser.BitAndStr:
+				out[i] = lb[i] & rb[i]
+			case sqlparser.BitOrStr:
+				out[i] = lb[i] | rb[i]
+			default:
+				out[i] = lb[i] ^ rb[i]
+			}
+		}
+		return out, nil
+	}
+	x, err := bitOperand(ctx, l)
+	if err != nil {
+		return nil, err
+	}
+	y, err := bitOperand(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	switch b.Op {
+	case sqlparser.BitAndStr:
+		return x & y, nil
+	case sqlparser.BitOrStr:
+		return x | y, nil
+	case sqlparser.BitXorStr:
+		return x ^ y, nil
+	case sqlparser.ShiftLeftStr:
+		if y >= 64 {
+			return uint64(0), nil
+		}
+		return x << y, nil
+	case sqlparser.ShiftRightStr:
+		if y >= 64 {
+			return uint64(0), nil
+		}
+		return x >> y, nil
+	}
+	return b.BitOp.Eval(ctx, row)
+}
+
+func (b *bitOp) WithChildren(children ...sql.Expression) (sql.Expression, error) {
+	e, err := b.BitOp.WithChildren(children...)
+	if err != nil {
+		return nil, err
+	}
+	if bo, ok := e.(*expression.BitOp); ok {
+		return &bitOp{bo}, nil
+	}
+	return e, nil
+}
+
+// bitOperand is v as MySQL's bit operators take it.
+func bitOperand(ctx *sql.Context, v any) (uint64, error) {
+	if i, ok := bigInt(v); ok {
+		if i.Sign() < 0 {
+			return uint64(i.Int64()), nil
+		}
+		return i.Uint64(), nil
+	}
+	switch x := v.(type) {
+	case []byte:
+		var n uint64
+		for _, c := range x[max(0, len(x)-8):] {
+			n = n<<8 | uint64(c)
+		}
+		return n, nil
+	case string:
+		switch n := stringToInt(ctx, x, false).(type) {
+		case uint64:
+			return n, nil
+		case int64:
+			return uint64(n), nil
+		}
+		return 0, nil
+	case bool:
+		if x {
+			return 1, nil
+		}
+		return 0, nil
+	}
+	r, ok := constValue(v) // decimals and floats
+	if !ok {
+		f, _, err := types.Float64.Convert(ctx, v)
+		if err != nil {
+			return 0, err
+		}
+		if r, ok = finiteRat(f.(float64)); !ok {
+			return 0, nil
+		}
+	}
+	// Round half away from zero.
+	num, den := new(big.Int).Set(r.Num()), r.Denom()
+	q, m := new(big.Int).QuoRem(num, den, new(big.Int))
+	if new(big.Int).Mul(new(big.Int).Abs(m), big.NewInt(2)).Cmp(den) >= 0 {
+		if num.Sign() < 0 {
+			q.Sub(q, big.NewInt(1))
+		} else {
+			q.Add(q, big.NewInt(1))
+		}
+	}
+	switch {
+	case q.Cmp(maxUint64) > 0:
+		return math.MaxUint64, nil
+	case q.Sign() < 0 && q.Cmp(minInt64) < 0:
+		return uint64(1) << 63, nil
+	case q.Sign() < 0:
+		return uint64(q.Int64()), nil
+	}
+	return q.Uint64(), nil
 }

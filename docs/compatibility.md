@@ -185,7 +185,9 @@ Accepted but different:
     so values within about 2^11 of 2^64 compare equal; integer literals
     compare exactly. Integer `+`, `-` and `*` follow MySQL: unsigned if
     either operand is, 1690 when out of range; `CAST(... AS SIGNED /
-    UNSIGNED)` of a string converts as MySQL does, with its warnings.
+    UNSIGNED)` of a string converts as MySQL does, with its warnings. The
+    bit operators (`& | ^ ~ << >>`) work in 64-bit unsigned integers, and
+    bytewise on two binary strings, as in MySQL.
   - `ENUM ... LIKE` is always false.
   - A multi-table `UPDATE` (`UPDATE a JOIN b ... SET a.v = 'B'`) still skips
     a row whose new value equals the old one under the collation (`b` →

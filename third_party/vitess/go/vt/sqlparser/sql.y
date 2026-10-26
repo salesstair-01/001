@@ -9154,7 +9154,9 @@ value_expression:
   }
 | '~'  value_expression
   {
-    $$ = &UnaryExpr{Operator: TildaStr, Expr: tryCastExpr($2)}
+    // s2z patch: ~x is x ^ 0xFFFFFFFFFFFFFFFF, as MySQL computes it in 64
+    // bits (go-mysql-server has no unary ~).
+    $$ = &BinaryExpr{Operator: BitXorStr, Left: tryCastExpr($2).(Expr), Right: NewIntVal([]byte("18446744073709551615"))}
   }
 | '!' value_expression %prec UNARY
   {

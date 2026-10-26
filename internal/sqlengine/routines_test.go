@@ -68,8 +68,27 @@ func TestTriggersAndProcedures(t *testing.T) {
 		{"CALL sumv(@s)", "[]"},
 		{"SELECT @s", "[1]"},
 		{"SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema = 'app'", "[2]"},
-		// an error handler made go-mysql-server's interpreter loop forever
-		{"CREATE PROCEDURE h() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION SET @h = 1; SIGNAL SQLSTATE 'HY000'; END", "ERR 1235"},
+		// error handlers (go-mysql-server's interpreter looped forever, or
+		// skipped a BEGIN ... END body)
+		{"CREATE PROCEDURE h1() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION SET @h1 = 'caught'; SIGNAL SQLSTATE 'HY000'; SET @after1 = 1; END", "[]"},
+		{"CALL h1()", "[]"},
+		{"SELECT @h1, @after1", "[caught,1]"},
+		{"CREATE PROCEDURE h2() BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN SET @h2a = 1; SET @h2b = 2; END; INSERT INTO nosuch VALUES (1); SET @after2 = 1; END", "[]"},
+		{"CALL h2()", "[]"},
+		{"SELECT @h2a, @h2b, @after2", "[1,2,NULL]"},
+		{"CREATE TABLE ht (i int PRIMARY KEY)", "[]"},
+		{"CREATE PROCEDURE h3() BEGIN DECLARE n int DEFAULT 0; DECLARE CONTINUE HANDLER FOR SQLEXCEPTION SET n = n + 1; INSERT INTO ht VALUES (1); INSERT INTO ht VALUES (1); INSERT INTO ht VALUES (2); INSERT INTO ht VALUES (2); SET @n = n; END", "[]"},
+		{"CALL h3()", "[]"},
+		{"SELECT @n, COUNT(*) FROM ht", "[2,2]"},
+		// an EXIT handler of an inner block ends with it (it stayed in force
+		// and looped); SELECT ... INTO a user variable
+		{"CREATE PROCEDURE h4() BEGIN DECLARE c CURSOR FOR SELECT i FROM ht; OPEN c; BEGIN DECLARE v1 INT; DECLARE v2 INT; DECLARE EXIT HANDLER FOR SQLEXCEPTION SET @h4 = 'err'; WHILE TRUE DO FETCH c INTO v1, v2; END WHILE; END; CLOSE c; SELECT i INTO @foo FROM ht ORDER BY i LIMIT 1; END", "[]"},
+		{"CALL h4()", "[]"},
+		{"SELECT @h4, @foo", "[err,1]"},
+		{"CREATE PROCEDURE q1() BEGIN SELECT i INTO @q FROM ht WHERE i > 100; END", "[]"},
+		{"CALL q1()", "[]"},
+		{"CREATE PROCEDURE q2() SELECT i INTO @q FROM ht", "[]"},
+		{"CALL q2()", "ERR 1172"},
 		{"DROP PROCEDURE p", "[]"},
 		{"DROP PROCEDURE p", "ERR 1305"},
 		{"CALL p(1, @y)", "ERR 1305"},

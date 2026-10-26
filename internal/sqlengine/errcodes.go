@@ -37,6 +37,7 @@ var errCodes = []struct {
 	{regexp.MustCompile(`^trigger ".*" does not exist`), 1360, "HY000"},
 	{regexp.MustCompile(`^Updating of (old|new) row is not allowed`), 1362, "HY000"},
 	{regexp.MustCompile(`^stored procedure ".*" does not exist`), 1305, "42000"},
+	{regexp.MustCompile(`^Result consisted of more than one row`), 1172, "42000"},
 }
 
 var (

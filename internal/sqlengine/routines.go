@@ -245,23 +245,3 @@ func splitQualified(s string) (db, name string) {
 	}
 	return "", s
 }
-
-// go-mysql-server 0.20's stored procedure interpreter mishandles a handler
-// for an error: once it fires, a handler whose body is one statement
-// restarts the procedure from its first statement, forever (the handler's
-// result ends with io.EOF, which it takes for a jump), and one whose body
-// is BEGIN ... END is skipped. A CALL then spun the query engine until
-// killed (MySQL's sp-error.test, issue #19). Until that is fixed in the
-// interpreter, CREATE PROCEDURE refuses handlers other than NOT FOUND's,
-// which cursor loops use and which work.
-
-var reHandler = regexp.MustCompile(`(?is)\bdeclare\s+(?:continue|exit|undo)\s+handler\s+for\s+(not\s+found\s*,?)?`)
-
-func checkCreateProcedure(n *plan.CreateProcedure) error {
-	for _, m := range reHandler.FindAllStringSubmatch(n.StoredProcDetails.CreateStatement, -1) {
-		if m[1] == "" || strings.HasSuffix(m[1], ",") {
-			return mysql.NewSQLError(1235, "42000", "This version of sqld doesn't yet support 'DECLARE ... HANDLER for conditions other than NOT FOUND'")
-		}
-	}
-	return nil
-}

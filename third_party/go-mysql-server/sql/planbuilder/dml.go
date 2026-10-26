@@ -616,6 +616,13 @@ func rowUpdatersByTable(ctx *sql.Context, node sql.Node, ij sql.Node) (map[strin
 
 		keyless := sql.IsKeyless(updatable.Schema())
 		if keyless {
+			// s2z patch: a keyless table that can update every row with a
+			// join row's old values takes part (the join's rows dedupe by
+			// content, so identical rows must be updated together).
+			if ju, ok := updatable.(sql.KeylessJoinUpdatable); ok {
+				rowUpdatersByTable[tableToBeUpdated] = ju.KeylessJoinUpdater(ctx)
+				continue
+			}
 			return nil, sql.ErrUnsupportedFeature.New("error: keyless tables unsupported for UPDATE JOIN")
 		}
 

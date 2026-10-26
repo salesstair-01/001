@@ -184,3 +184,68 @@ func (e *editor) newRowid(ctx *sql.Context) ([]byte, error) {
 	}
 	return e.t.rowidKey(n), nil
 }
+
+// A multi-table UPDATE hands its updater each distinct old row once:
+// go-mysql-server's join dedupes a table's rows by content, and identical
+// rows of a keyless table join the same partners, so the update applies to
+// all of them (issue #29).
+
+var _ sql.KeylessJoinUpdatable = (*Table)(nil)
+
+func (t *Table) KeylessJoinUpdater(ctx *sql.Context) sql.RowUpdater {
+	return &joinUpdater{editor: t.editor(ctx)}
+}
+
+type joinUpdater struct {
+	*editor
+	last int // rows the last Update changed
+}
+
+var _ sql.KeylessJoinRowCounter = (*joinUpdater)(nil)
+
+func (u *joinUpdater) Update(ctx *sql.Context, old, new sql.Row) error {
+	n, err := u.rowsLike(ctx, old)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errKeylessRow
+	}
+	for i := 0; i < n; i++ {
+		if err := u.editor.Update(ctx, old, new); err != nil {
+			return err
+		}
+	}
+	u.last = n
+	return nil
+}
+
+func (u *joinUpdater) RowsLike(ctx *sql.Context, row sql.Row) (int, error) {
+	return u.rowsLike(ctx, row)
+}
+
+func (u *joinUpdater) LastUpdateRows() int { return u.last }
+
+// rowsLike is the number of stored rows with these values that the
+// statement has not changed yet, after one locking scan of the table.
+func (e *editor) rowsLike(ctx *sql.Context, row sql.Row) (int, error) {
+	s, ok := ctx.Session.(*Session)
+	if !ok {
+		return 0, errKeylessRow
+	}
+	content, err := e.t.encodeRow(ctx, row)
+	if err != nil {
+		return 0, err
+	}
+	s.keyless.mu.Lock()
+	scanned := s.rowKeys(e.t.info.ID).scanned
+	s.keyless.mu.Unlock()
+	if !scanned {
+		if err := e.scanKeys(ctx); err != nil {
+			return 0, err
+		}
+	}
+	s.keyless.mu.Lock()
+	defer s.keyless.mu.Unlock()
+	return len(s.rowKeys(e.t.info.ID).byRow[string(content)]), nil
+}

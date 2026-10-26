@@ -378,6 +378,24 @@ type RowReplacer interface {
 	RowDeleter
 }
 
+// KeylessJoinUpdatable is a keyless table that a multi-table UPDATE can
+// update: the join hands its updater each distinct old row once, and the
+// updater changes every stored row with those values. (s2z patch)
+type KeylessJoinUpdatable interface {
+	UpdatableTable
+	KeylessJoinUpdater(ctx *Context) RowUpdater
+}
+
+// KeylessJoinRowCounter is a KeylessJoinUpdatable's updater counting the
+// stored rows one distinct join row stands for, for the matched and changed
+// counts. (s2z patch)
+type KeylessJoinRowCounter interface {
+	// RowsLike is the number of rows with these values not yet updated.
+	RowsLike(ctx *Context, row Row) (int, error)
+	// LastUpdateRows is the number of rows the last Update changed.
+	LastUpdateRows() int
+}
+
 // UpdatableTable is a table that can process updates of existing rows via update statements.
 type UpdatableTable interface {
 	Table

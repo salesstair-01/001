@@ -259,6 +259,16 @@ func (u *updateJoinIter) Next(ctx *sql.Context) (sql.Row, error) {
 
 				// updateJoin counts matched rows from join output
 				u.accumulator.handleRowMatched()
+				// s2z patch: a keyless table's identical rows match together
+				if rc, ok := u.updaters[tableName].(sql.KeylessJoinRowCounter); ok {
+					n, err := rc.RowsLike(ctx, oldTableRow)
+					if err != nil {
+						return nil, err
+					}
+					for ; n > 1; n-- {
+						u.accumulator.handleRowMatched()
+					}
+				}
 
 				continue
 			} else if err != nil {

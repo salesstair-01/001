@@ -44,3 +44,6 @@ imports). Changes, each marked `s2z patch` in the code:
 
 | change | file |
 |---|---|
+| A multi-table UPDATE updates tables without a primary key (issue #29): a keyless table implementing `sql.KeylessJoinUpdatable` gets an updater for distinct join rows (the join dedupes a table's rows by content, so identical rows are updated together), and `sql.KeylessJoinRowCounter` makes the matched and changed counts count them all. Upstream refused keyless tables. | `sql/tables.go`, `sql/planbuilder/dml.go`, `sql/analyzer/assign_update_join.go` (`rowUpdatersByTable`), `sql/rowexec/update.go`, `sql/rowexec/dml_iters.go` |
+| Stored procedure handlers (issue #19): the handler's whole statement runs (a BEGIN ... END body was skipped after its first operation), its rows to their end (their `io.EOF` was taken for a jump to -1: the procedure started over, forever); an EXIT handler resumes at its block's end so the block's handlers are popped (they stayed in force, and a later error looped). | `sql/procedures/interpreter_logic.go` (`handleError`) |
+| `SELECT ... INTO @var` in a procedure sets the user variable (it failed on the name); no row warns 1329 and leaves the variables (it returned `io.EOF`, a jump); two rows fail with "more than one row". | `sql/procedures/interpreter_logic.go` (`execOp`) |

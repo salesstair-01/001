@@ -510,7 +510,12 @@ func (u *updateJoinRowHandler) handleRowUpdate(ctx *sql.Context, row sql.Row) er
 		tableNewRow := tableToNewRow[tableName]
 		if equals, err := tableOldRow.Equals(ctx, tableNewRow, u.tableMap[tableName]); err == nil {
 			if !equals {
-				u.rowsAffected++
+				// s2z patch: a keyless table's update changes all its identical rows
+				if rc, ok := u.updaterMap[tableName].(sql.KeylessJoinRowCounter); ok {
+					u.rowsAffected += rc.LastUpdateRows()
+				} else {
+					u.rowsAffected++
+				}
 			}
 		} else {
 			return err

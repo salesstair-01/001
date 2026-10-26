@@ -33,3 +33,48 @@ func TestCaseOnlyUpdateJoin(t *testing.T) {
 		}
 	}
 }
+
+// TestKeylessUpdateJoin: a multi-table UPDATE of tables without a primary
+// key (issue #29), identical rows included, against MySQL 8.0.46's rows and
+// affected counts.
+func TestKeylessUpdateJoin(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, q := range []string{
+		"CREATE TABLE k1 (i int, j int)",
+		"CREATE TABLE k2 (i int, v varchar(5))",
+		"INSERT INTO k1 VALUES (1, 10), (1, 10), (2, 20), (3, 30)",
+		"INSERT INTO k2 VALUES (1, 'a'), (1, 'b'), (2, 'c')",
+	} {
+		if got := connRun(t, conn, q); got != "[]" {
+			t.Fatalf("%s: %s", q, got)
+		}
+	}
+	for _, s := range []struct {
+		q        string
+		affected int64
+		k1, k2   string
+	}{
+		{"UPDATE k1, k2 SET j = j + 1 WHERE k1.i = k2.i", 3, "[1,11 1,11 2,21 3,30]", "[1,a 1,b 2,c]"},
+		{"UPDATE k1 JOIN k2 ON k1.i = k2.i SET k1.j = 0, k2.v = 'z' WHERE k2.v <> 'b'", 5, "[1,0 1,0 2,0 3,30]", "[1,b 1,z 2,z]"},
+		{"UPDATE k1 LEFT JOIN k2 ON k1.i = k2.i SET k1.j = 99 WHERE k2.i IS NULL", 1, "[1,0 1,0 2,0 3,99]", "[1,b 1,z 2,z]"},
+	} {
+		res, err := conn.ExecContext(context.Background(), s.q)
+		if err != nil {
+			t.Fatalf("%s: %v", s.q, err)
+		}
+		if n, _ := res.RowsAffected(); n != s.affected {
+			t.Errorf("%s: %d rows affected, want %d", s.q, n, s.affected)
+		}
+		if got := connRun(t, conn, "SELECT * FROM k1 ORDER BY i, j"); got != s.k1 {
+			t.Errorf("%s: k1 %s, want %s", s.q, got, s.k1)
+		}
+		if got := connRun(t, conn, "SELECT * FROM k2 ORDER BY i, v"); got != s.k2 {
+			t.Errorf("%s: k2 %s, want %s", s.q, got, s.k2)
+		}
+	}
+}

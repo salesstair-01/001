@@ -53,8 +53,6 @@ func (o *exactUpdates) Build(ctx *sql.Context, n sql.Node, row sql.Row) (sql.Row
 		return o.buildTriggerIf(ctx, n, row)
 	case *plan.CreateTrigger:
 		return nil, checkCreateTrigger(ctx, n)
-	case *plan.CreateProcedure:
-		return nil, checkCreateProcedure(n)
 	case *plan.RecursiveCte:
 		nn, err := guardRecursiveCte(ctx, n)
 		if err != nil || nn == nil {

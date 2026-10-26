@@ -383,17 +383,25 @@ func handleError(ctx *sql.Context, runner sql.StatementRunner, stack *Interprete
 		return -1, err
 	}
 
-	_, _, _, rowIter, err := execOp(ctx, runner, stack, handlerOps[0], handlerOps, nil, -1)
-	if err != nil {
-		return -1, err
-	}
-	if rowIter != nil {
-		for {
-			_, err = rowIter.Next(ctx)
-			if err != nil {
-				return -1, err
+	// s2z patch: run every operation of the handler's statement (a BEGIN ...
+	// END body is several), each one's rows to their end. Upstream ran only
+	// the first, and returned its rows' io.EOF, which Call took for a jump
+	// to -1: the procedure started over, forever.
+	for hc := 0; hc < len(handlerOps); hc++ {
+		nc, _, _, rowIter, err := execOp(ctx, runner, stack, handlerOps[hc], handlerOps, nil, hc)
+		if err != nil {
+			return -1, err
+		}
+		if rowIter != nil {
+			for {
+				if _, err = rowIter.Next(ctx); err == io.EOF {
+					break
+				} else if err != nil {
+					return -1, err
+				}
 			}
 		}
+		hc = nc
 	}
 
 	switch matchingHandler.Action {
@@ -413,6 +421,14 @@ func handleError(ctx *sql.Context, runner sql.StatementRunner, stack *Interprete
 				remainingEndScopes--
 			default:
 			}
+		}
+		if remainingEndScopes == 0 {
+			// s2z patch: resume at the block's ScopeEnd (Call runs the
+			// operation after the returned counter), so that it runs and pops
+			// the block's handlers. Upstream resumed after it: the handler
+			// stayed in force for the rest of the procedure and, catching a
+			// later error, jumped back to the same place, forever.
+			return newCounter - 2, io.EOF
 		}
 		return newCounter - 1, io.EOF
 	case ast.DeclareHandlerAction_Undo:
@@ -449,12 +465,24 @@ func execOp(ctx *sql.Context, runner sql.StatementRunner, stack *InterpreterStac
 			return 0, nil, nil, nil, err
 		}
 		row, err := rowIter.Next(ctx)
+		if err == io.EOF {
+			// s2z patch: no row leaves the variables as they are, with
+			// MySQL's warning; upstream returned io.EOF, which Call took
+			// for a jump.
+			_ = rowIter.Close(ctx)
+			ctx.Warn(1329, "No data - zero rows fetched, selected, or processed")
+			return counter, nil, nil, nil, nil
+		}
 		if err != nil {
 			return 0, nil, nil, nil, err
 		}
 		if _, err = rowIter.Next(ctx); err != io.EOF {
 			if rErr := rowIter.Close(ctx); rErr != nil {
 				return 0, nil, nil, nil, rErr
+			}
+			if err == nil {
+				// s2z patch: MySQL's error for a second row
+				err = sql.ErrMoreThanOneRow.New()
 			}
 			return 0, nil, nil, nil, err
 		}
@@ -467,10 +495,14 @@ func execOp(ctx *sql.Context, runner sql.StatementRunner, stack *InterpreterStac
 		for i := range selectInto.Variables {
 			intoVar := strings.ToLower(selectInto.Variables[i].String())
 			if strings.HasPrefix(intoVar, "@") {
-				err = ctx.SetUserVariable(ctx, intoVar, row[i], schema[i].Type)
+				// s2z patch: a user variable, named without its @ (upstream
+				// kept it, then also looked for a local variable of that
+				// name and failed)
+				err = ctx.SetUserVariable(ctx, strings.TrimPrefix(intoVar, "@"), row[i], schema[i].Type)
 				if err != nil {
 					return 0, nil, nil, nil, err
 				}
+				continue
 			}
 			err = stack.SetVariable(intoVar, row[i])
 			if err != nil {

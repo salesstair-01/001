@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
 
@@ -33,6 +34,9 @@ var errCodes = []struct {
 	{regexp.MustCompile(`^Incorrect datetime value`), 1292, "22007"},
 	{regexp.MustCompile(`^Check constraint ".*" violated`), 3819, "HY000"},
 	{regexp.MustCompile(`^Constraint ".*" does not exist`), 3821, "HY000"},
+	{regexp.MustCompile(`^trigger ".*" does not exist`), 1360, "HY000"},
+	{regexp.MustCompile(`^Updating of (old|new) row is not allowed`), 1362, "HY000"},
+	{regexp.MustCompile(`^stored procedure ".*" does not exist`), 1305, "42000"},
 }
 
 var (
@@ -69,12 +73,47 @@ func withMySQLCode(err error) error {
 func (h autocommitHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string, callback mysql.ResultSpoolFn) error {
 	ctx, cancel := context.WithCancel(ctx) // ends a statement's max_execution_time timer (exectime.go)
 	defer cancel()
-	return withMySQLCode(h.Handler.ComQuery(ctx, c, query, padFractions(callback)))
+	return withQueryCode(h.Handler.ComQuery(ctx, c, query, padFractions(callback)), query)
 }
 
 func (h autocommitHandler) ComMultiQuery(ctx context.Context, c *mysql.Conn, query string, callback mysql.ResultSpoolFn) (string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	rest, err := h.Handler.ComMultiQuery(ctx, c, query, padFractions(callback))
-	return rest, withMySQLCode(err)
+	return rest, withQueryCode(err, query)
+}
+
+var (
+	reTriggerRowErr = regexp.MustCompile(`^table not found: (new|old)$`)
+	reTriggerEvent  = regexp.MustCompile(`(?is)^\s*create\s.*?\btrigger\s+\S+\s+(?:before|after)\s+(insert|update|delete)\b`)
+)
+
+// withQueryCode is withMySQLCode, knowing the statement: in CREATE TRIGGER,
+// go-mysql-server's "table not found: new" is MySQL's 1363 for the row the
+// event lacks (OLD in an INSERT trigger, NEW in a DELETE one) and 1054
+// otherwise (a column the table lacks).
+func withQueryCode(err error, query string) error {
+	if err == nil {
+		return nil
+	}
+	if m := reTriggerRowErr.FindStringSubmatch(sqlErrorMessage(err)); m != nil {
+		if e := reTriggerEvent.FindStringSubmatch(query); e != nil {
+			row, event := strings.ToUpper(m[1]), strings.ToUpper(e[1])
+			if (row == "OLD" && event == "INSERT") || (row == "NEW" && event == "DELETE") {
+				return mysql.NewSQLError(1363, "HY000", "There is no %s row in on %s trigger", row, event)
+			}
+			return mysql.NewSQLError(1054, "42S22", "Unknown column in '%s'", row)
+		}
+	}
+	return withMySQLCode(err)
+}
+
+func sqlErrorMessage(err error) string {
+	var se *mysql.SQLError
+	if errors.As(err, &se) {
+		return se.Message
+	}
+	return err.Error()
 }
 
 func (h autocommitHandler) ComPrepare(ctx context.Context, c *mysql.Conn, query string, prepare *mysql.PrepareData) ([]*querypb.Field, error) {

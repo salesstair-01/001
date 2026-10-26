@@ -203,14 +203,16 @@ type TableStats struct {
 type Catalog struct {
 	store *Store
 
-	mu      sync.RWMutex
-	loaded  bool
-	version uint64             // catalog version the cache reflects
-	checked time.Time          // when the version was last confirmed
-	dbs     map[string]*DBInfo // lower-case name
-	tables  map[uint32]*TableInfo
-	views   map[string]*ViewInfo // "db.name", lower-case
-	stats   map[uint32]TableStats
+	mu       sync.RWMutex
+	loaded   bool
+	version  uint64             // catalog version the cache reflects
+	checked  time.Time          // when the version was last confirmed
+	dbs      map[string]*DBInfo // lower-case name
+	tables   map[uint32]*TableInfo
+	views    map[string]*ViewInfo      // "db.name", lower-case
+	routines map[string]*RoutineInfo   // "db.kind.name", lower-case (routines.go)
+	trgCheck map[string]checkedTrigger // routines' keys (triggercheck.go)
+	stats    map[uint32]TableStats
 }
 
 func NewCatalog(s *Store) *Catalog {
@@ -224,6 +226,7 @@ func (c *Catalog) load(ctx context.Context) error {
 	dbs := map[string]*DBInfo{}
 	tables := map[uint32]*TableInfo{}
 	views := map[string]*ViewInfo{}
+	routines := map[string]*RoutineInfo{}
 	var version uint64
 	start, end := c.store.catalogPrefix(), encoding.PrefixEnd(c.store.catalogPrefix())
 	for {
@@ -255,6 +258,12 @@ func (c *Catalog) load(ctx context.Context) error {
 					return err
 				}
 				views[viewMapKey(v.DB, v.Name)] = v
+			case "routine":
+				r, err := decodeRoutine(resp.Values[i])
+				if err != nil {
+					return err
+				}
+				routines[routineMapKey(r.DB, r.Kind, r.Name)] = r
 			case "seq":
 				if bytes.Equal(k, c.store.seqKey("catalog_version")) {
 					_ = json.Unmarshal(resp.Values[i], &version)
@@ -279,7 +288,7 @@ func (c *Catalog) load(ctx context.Context) error {
 		}
 	}
 	c.mu.Lock()
-	c.dbs, c.tables, c.views, c.stats, c.version, c.checked, c.loaded = dbs, tables, views, stats, version, time.Now(), true
+	c.dbs, c.tables, c.views, c.routines, c.stats, c.version, c.checked, c.loaded = dbs, tables, views, routines, stats, version, time.Now(), true
 	c.mu.Unlock()
 	c.store.resumeJobs(tables)
 	return nil
@@ -477,8 +486,19 @@ func (c *Catalog) DropDatabase(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	var routines []*RoutineInfo
+	for _, kind := range []string{"trigger", "procedure"} {
+		rs, err := c.Routines(ctx, name, kind)
+		if err != nil {
+			return err
+		}
+		routines = append(routines, rs...)
+	}
 	return c.ddl(ctx, func(txn *Txn) error {
 		muts := []kv.Mutation{{Op: kv.OpDelete, Key: c.store.dbKey(name)}}
+		for _, r := range routines {
+			muts = append(muts, kv.Mutation{Op: kv.OpDelete, Key: c.store.routineKey(r.DB, r.Kind, r.Name)})
+		}
 		for _, v := range views {
 			muts = append(muts, kv.Mutation{Op: kv.OpDelete, Key: c.store.viewKey(v.DB, v.Name)})
 		}

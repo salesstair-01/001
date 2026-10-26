@@ -11735,6 +11735,7 @@ non_reserved_keyword3:
 // Keywords that cause grammar conflicts in some places, but are safe to use as column name / alias identifiers.
 column_name_safe_keyword:
   AVG
+| COPY // s2z patch: not reserved in MySQL (a column named copy)
 | COUNT
 | EVENT
 | MAX

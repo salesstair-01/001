@@ -12,6 +12,8 @@ import (
 // so one query engine can serve many tenants (slice 7's generic engines).
 type Provider struct {
 	def *Store // tenant for contexts without a Session (single-tenant engines); may be nil
+
+	binder sql.Catalog // the analyzer's, to bind stored triggers (triggercheck.go)
 }
 
 var (
@@ -55,7 +57,7 @@ func (p *Provider) Database(ctx *sql.Context, name string) (sql.Database, error)
 			return nil, sql.ErrDatabaseNotFound.New(name)
 		}
 	}
-	return &Database{cat: cat, name: d.Name, collation: d.Collation}, nil
+	return &Database{cat: cat, pro: p, name: d.Name, collation: d.Collation}, nil
 }
 
 func (p *Provider) HasDatabase(ctx *sql.Context, name string) bool {
@@ -75,7 +77,7 @@ func (p *Provider) AllDatabases(ctx *sql.Context) []sql.Database {
 	}
 	out := make([]sql.Database, 0, len(dbs))
 	for _, d := range dbs {
-		out = append(out, &Database{cat: cat, name: d.Name, collation: d.Collation})
+		out = append(out, &Database{cat: cat, pro: p, name: d.Name, collation: d.Collation})
 	}
 	return out
 }
@@ -106,6 +108,7 @@ func (p *Provider) DropDatabase(ctx *sql.Context, name string) error {
 // Database is one MySQL database of the tenant.
 type Database struct {
 	cat       *Catalog
+	pro       *Provider
 	name      string
 	collation string
 }

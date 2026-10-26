@@ -67,7 +67,15 @@ declared in `CREATE TABLE` or `ALTER TABLE ... ADD/DROP FOREIGN KEY`,
 enforced (1452 on an orphan child, 1451 on a referenced parent), with
 `ON DELETE`/`ON UPDATE` `CASCADE`, `SET NULL` and `RESTRICT`; a reference
 check takes a shared lock on the parent row, as InnoDB does, so a concurrent
-parent delete waits for the child's transaction. CHECK constraints are
+parent delete waits for the child's transaction. Triggers (BEFORE/AFTER
+INSERT/UPDATE/DELETE, `SET NEW.col`, `SIGNAL`, BEGIN ... END bodies) and
+stored procedures (IN/OUT parameters, loops, cursors with a `NOT FOUND`
+handler) are stored in the tenant's catalog and run by go-mysql-server;
+`SHOW TRIGGERS`, `SHOW PROCEDURE STATUS` and `information_schema.triggers`
+/ `routines` list them. A trigger whose body a later ALTER TABLE broke fails
+when it fires (1054), as in MySQL, and `SHOW CREATE TRIGGER` then shows a
+stand-in body; triggers don't fire for `REPLACE` and `INSERT ... ON
+DUPLICATE KEY UPDATE`'s update. CHECK constraints are
 enforced on INSERT and UPDATE (3819), named `<table>_chk_<n>` when unnamed,
 unique per database (3822), `NOT ENFORCED` honored, added and dropped with
 `ALTER TABLE ... ADD CONSTRAINT/DROP CHECK` (3821 for an unknown name), and
@@ -78,7 +86,8 @@ Not supported in v1 (statement fails with an error):
 
 | feature | error |
 |---|---|
-| Triggers, stored procedures, events | `database "app" doesn't support triggers` (and similar) |
+| Events, stored functions (`CREATE FUNCTION`) | refused by go-mysql-server 0.20 |
+| `DECLARE ... HANDLER` for conditions other than `NOT FOUND` | 1235: go-mysql-server's interpreter loops forever or skips the handler once one fires |
 | Savepoints | 1235 `savepoints are not supported in v1` |
 | FULLTEXT indexes | refused by go-mysql-server (its error text is garbled: `tables cannot be created on database %!s(MISSING)`) |
 | Spatial types | `spatial types are not supported in v1` |

@@ -45,7 +45,16 @@ func (o *exactUpdates) Build(ctx *sql.Context, n sql.Node, row sql.Row) (sql.Row
 	if err := ctx.Err(); err != nil {
 		return nil, err // past max_execution_time, or killed
 	}
+	if it, ok, err := o.buildSticky(ctx, n, row); ok || err != nil {
+		return it, err
+	}
 	switch n := n.(type) {
+	case *plan.IfElseBlock:
+		return o.buildTriggerIf(ctx, n, row)
+	case *plan.CreateTrigger:
+		return nil, checkCreateTrigger(ctx, n)
+	case *plan.CreateProcedure:
+		return nil, checkCreateProcedure(n)
 	case *plan.RecursiveCte:
 		nn, err := guardRecursiveCte(ctx, n)
 		if err != nil || nn == nil {

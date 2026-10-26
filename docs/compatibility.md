@@ -13,6 +13,11 @@ How it is checked:
 - **sqllogictest** (`make slt`, CI job `sqllogictest`): a subset of the
   SQLite-derived suite; results per file in
   [`scripts/slt/results.md`](../scripts/slt/results.md).
+- **MySQL's own test suite** (`make mtr`, CI job `mysql-test-suite`):
+  133 files of MySQL 8.0.46's `mysql-test` run by a Rust mysqltest
+  implementation (`mtr/`), each statement's output compared with MySQL's
+  recorded result; results per file in
+  [`scripts/mtr/results.md`](../scripts/mtr/results.md).
 - **MySQL 8 differential tests** (`internal/sqlengine/mysqldiff_test.go`):
   seeded random tables and queries run on a real MySQL 8.0 and on this
   engine, results compared: collation order, equality, index ranges, LIKE and
@@ -76,6 +81,8 @@ Not supported in v1 (statement fails with an error):
 | `CREATE USER`, `GRANT` | `database not found: mysql`; accounts live in the proxy's tenants file |
 | `SELECT ... FOR SHARE` | syntax error; use `LOCK IN SHARE MODE` |
 | `LOAD DATA` | not supported |
+| Files on the server: `SELECT ... INTO OUTFILE` / `DUMPFILE`, `LOAD DATA INFILE`, `LOAD_FILE()` | 1290, as MySQL with `secure_file_priv = NULL`: a query engine serves many tenants |
+| `CAST(x AS BINARY(n))` with `n` over `max_allowed_packet` | NULL with warning 1301, as in MySQL (go-mysql-server allocated `n` bytes) |
 | SERIALIZABLE | `SET ... ISOLATION LEVEL SERIALIZABLE` is accepted, transactions at that level are refused |
 
 Accepted but different:

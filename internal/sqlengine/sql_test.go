@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -791,5 +793,72 @@ func TestCaseOnlyUpdate(t *testing.T) {
 	}
 	if got := fmt.Sprint(queryStrings(t, db, "SELECT CAST(v AS BINARY) FROM child")); got != "[Z]" {
 		t.Fatalf("foreign-key table: stored %s, want [Z]", got)
+	}
+}
+
+// Statements that would read or write files on the query engine's host are
+// refused (1290), as MySQL refuses them with secure_file_priv = NULL.
+func TestNoServerFileAccess(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	mustExec(t, db, "CREATE TABLE f (a INT)")
+	out := filepath.Join(t.TempDir(), "out.txt")
+	for _, q := range []string{
+		"SELECT 1 INTO OUTFILE '" + out + "'",
+		"SELECT 1 INTO DUMPFILE '" + out + "'",
+		"SELECT LOAD_FILE('/etc/hostname')",
+		"SELECT (SELECT LOAD_FILE('/etc/hostname'))",
+		"LOAD DATA INFILE '/etc/hostname' INTO TABLE f",
+	} {
+		_, err := db.Exec(q)
+		var me *gomysql.MySQLError
+		if !errors.As(err, &me) || me.Number != 1290 {
+			t.Errorf("%s: got %v, want error 1290", q, err)
+		}
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("%s was written", out)
+	}
+	if got := fmt.Sprint(queryStrings(t, db, "SELECT 1")); got != "[1]" {
+		t.Fatalf("plain SELECT: %s", got)
+	}
+}
+
+// A binary cast longer than max_allowed_packet is NULL with warning 1301,
+// as in MySQL, instead of allocating its length.
+func TestCastBinaryOverMaxAllowedPacket(t *testing.T) {
+	c := startCluster(t)
+	db := c.db(t)
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var v sql.NullString
+	if err := conn.QueryRowContext(context.Background(), "SELECT CAST('a' AS BINARY(4294967294))").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Valid {
+		t.Fatalf("got %d bytes, want NULL", len(v.String))
+	}
+	rows, err := conn.QueryContext(context.Background(), "SHOW WARNINGS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var codes []int
+	for rows.Next() {
+		var level, msg string
+		var code int
+		if err := rows.Scan(&level, &code, &msg); err != nil {
+			t.Fatal(err)
+		}
+		codes = append(codes, code)
+	}
+	rows.Close()
+	if fmt.Sprint(codes) != "[1301]" {
+		t.Fatalf("warnings %v, want [1301]", codes)
+	}
+	if got := fmt.Sprint(queryStrings(t, db, "SELECT HEX(CAST('a' AS BINARY(3)))")); got != "[610000]" {
+		t.Fatalf("short cast %s, want [610000]", got)
 	}
 }

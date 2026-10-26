@@ -59,7 +59,11 @@ func registerVars() {
 }
 
 func newSQLEngine(pro *Provider) *sqle.Engine {
-	a := analyzer.NewBuilder(pro).AddPreAnalyzeRule(explicitLikeEscapeID, explicitLikeEscape).Build()
+	a := analyzer.NewBuilder(pro).
+		AddPreAnalyzeRule(explicitLikeEscapeID, explicitLikeEscape).
+		AddPreAnalyzeRule(castLimitID, castLimit). // CAST(x AS BINARY(huge)) is NULL (castlimit.go)
+		AddPreAnalyzeRule(noFilesID, noFiles).     // no server-side file access (nofiles.go)
+		Build()
 	a.ExecBuilder = newExecBuilder() // UPDATE compares bytes, as MySQL does (exactupdate.go)
 	e := sqle.New(a, nil)
 	e.Analyzer.Catalog.StatsProvider = &statsProvider{StatsProvider: e.Analyzer.Catalog.StatsProvider}

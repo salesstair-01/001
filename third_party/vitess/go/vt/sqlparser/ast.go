@@ -5976,6 +5976,9 @@ const (
 type SQLVal struct {
 	Type ValType
 	Val  []byte
+	// s2z patch: the type of a DATE, TIME or TIMESTAMP literal; see
+	// typedLiteral.
+	Typed string
 }
 
 // NewStrVal builds a new StrVal.

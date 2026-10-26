@@ -200,6 +200,15 @@ Accepted but different:
     bit operators (`& | ^ ~ << >>`) work in 64-bit unsigned integers, and
     bytewise on two binary strings, as in MySQL.
   - `ENUM ... LIKE` is always false.
+  - Temporal values: `20010202105916`, `010202105916`, `20010202` and
+    `010202` (numbers or digit strings) are datetimes in `INSERT`, `UPDATE
+    ... SET`, `CAST` and comparisons with a DATE, DATETIME or TIMESTAMP
+    column, as in MySQL. `DATE '...'` and `TIMESTAMP '...'` are dates.
+    `ADDTIME`, `SUBTIME`, `TIMEDIFF`, `TIME_TO_SEC`, `SEC_TO_TIME`,
+    `MAKETIME`, `MAKEDATE`, `PERIOD_ADD`, `PERIOD_DIFF`, `UTC_DATE` and
+    `UTC_TIME` follow MySQL, but their TIME results are typed as text (with
+    MySQL's digits); `TIME(n)` columns are not supported. `CONCAT` of a
+    DATE column gives `YYYY-MM-DD 00:00:00`.
   - Output formatting: `DATETIME(6)` prints without trailing
     zeros in the fraction (`.12`, MySQL `.120000`); `FLOAT` prints every
     digit of the float32 (`-565.3059`, MySQL `-565.306`).

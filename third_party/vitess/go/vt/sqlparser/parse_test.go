@@ -4500,50 +4500,50 @@ var (
 		// Date, Time, and Timestamp literals
 		{
 			input:  "select date '2020-10-01'",
-			output: "select '2020-10-01'",
+			output: "select s2z_date_literal('2020-10-01')", // s2z patch: typed literals are s2z_*_literal calls
 		},
 		{
 			input:  "select time '2020-10-01'",
-			output: "select '2020-10-01'",
+			output: "select s2z_time_literal('2020-10-01')", // s2z patch
 		},
 		{
 			input:  "select timestamp '2020-10-01'",
-			output: "select '2020-10-01'",
+			output: "select s2z_timestamp_literal('2020-10-01')", // s2z patch: typed literals are s2z_*_literal calls
 		},
 
 		{
 			input:  "select date'2020-10-01'",
-			output: "select '2020-10-01'",
+			output: "select s2z_date_literal('2020-10-01')", // s2z patch: typed literals are s2z_*_literal calls
 		},
 		{
 			input:  "select time'2020-10-01'",
-			output: "select '2020-10-01'",
+			output: "select s2z_time_literal('2020-10-01')", // s2z patch
 		},
 		{
 			input:  "select timestamp'2020-10-01'",
-			output: "select '2020-10-01'",
+			output: "select s2z_timestamp_literal('2020-10-01')", // s2z patch: typed literals are s2z_*_literal calls
 		},
 
 		{
 			input:  "select (date '2020-10-01')",
-			output: "select ('2020-10-01')",
+			output: "select (s2z_date_literal('2020-10-01'))", // s2z patch: typed literals are s2z_*_literal calls
 		},
 		{
 			input:  "select (time '2020-10-01')",
-			output: "select ('2020-10-01')",
+			output: "select (s2z_time_literal('2020-10-01'))", // s2z patch
 		},
 		{
 			input:  "select (timestamp '2020-10-01')",
-			output: "select ('2020-10-01')",
+			output: "select (s2z_timestamp_literal('2020-10-01'))", // s2z patch: typed literals are s2z_*_literal calls
 		},
 
 		{
 			input:  "insert into t values (date '2020-10-01'), (time '2020-10-01'), (timestamp '2020-10-01')",
-			output: "insert into t values ('2020-10-01'), ('2020-10-01'), ('2020-10-01')",
+			output: "insert into t values (s2z_date_literal('2020-10-01')), (s2z_time_literal('2020-10-01')), (s2z_timestamp_literal('2020-10-01'))", // s2z patch: typed literals are s2z_*_literal calls
 		},
 		{
 			input:  "select * from (values row(date '2020-10-01', time '12:34:56', timestamp '2001-02-03 12:34:56')) t;",
-			output: "select * from (values row('2020-10-01', '12:34:56', '2001-02-03 12:34:56')) as t",
+			output: "select * from (values row(s2z_date_literal('2020-10-01'), s2z_time_literal('12:34:56'), s2z_timestamp_literal('2001-02-03 12:34:56'))) as t", // s2z patch: typed literals are s2z_*_literal calls
 		},
 		{
 			input:  "set @@global.validate_password.length = 1",

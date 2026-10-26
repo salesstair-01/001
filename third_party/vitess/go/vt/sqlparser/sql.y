@@ -9032,7 +9032,7 @@ expression_list:
 value_expression:
   value
   {
-    $$ = tryCastExpr($1)
+    $$ = typedLiteral(tryCastExpr($1))
   }
 | ACCOUNT
   {
@@ -9982,15 +9982,15 @@ value:
   }
 | DATE STRING
   {
-    $$ = NewStrVal($2)
+    $$ = &SQLVal{Type: StrVal, Val: $2, Typed: "date"}
   }
 | TIME STRING
   {
-    $$ = NewStrVal($2)
+    $$ = &SQLVal{Type: StrVal, Val: $2, Typed: "time"}
   }
 | TIMESTAMP STRING
   {
-    $$ = NewStrVal($2)
+    $$ = &SQLVal{Type: StrVal, Val: $2, Typed: "timestamp"}
   }
 | HEX
   {

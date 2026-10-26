@@ -42,6 +42,12 @@ func (o *exactUpdates) Build(ctx *sql.Context, n sql.Node, row sql.Row) (sql.Row
 	if w, ok := n.(plan.ShowWarnings); ok {
 		return showWarnings(w), nil
 	}
+	if nn, err := simpleDML(ctx, n); err != nil || nn != nil {
+		if err != nil {
+			return nil, err
+		}
+		return o.base.Build(ctx, nn, row)
+	}
 	if ct, ok := n.(*plan.CreateTable); ok {
 		return nil, checkCreateChecks(ctx, ct)
 	}

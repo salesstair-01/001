@@ -43,3 +43,18 @@ func parenSelect(inner SelectStatement, order OrderBy, limit *Limit) SelectState
 		Limit:   limit,
 	}
 }
+
+// typedLiteral makes DATE '...', TIME '...' and TIMESTAMP '...' in an
+// expression a call of s2z_date_literal (s2z_time_literal,
+// s2z_timestamp_literal), which sqld defines to check and type the value as
+// MySQL does (issue #25); as a column default they stay strings.
+func typedLiteral(e Expr) Expr {
+	v, ok := e.(*SQLVal)
+	if !ok || v.Typed == "" {
+		return e
+	}
+	return &FuncExpr{
+		Name:  NewColIdent("s2z_" + v.Typed + "_literal"),
+		Exprs: SelectExprs{&AliasedExpr{Expr: &SQLVal{Type: v.Type, Val: v.Val}}},
+	}
+}

@@ -45,7 +45,9 @@ func (f *scalarFn) Resolved() bool {
 func (f *scalarFn) Type() sql.Type             { return f.typ(f.args) }
 func (f *scalarFn) IsNullable() bool           { return true }
 func (f *scalarFn) Children() []sql.Expression { return f.args }
-func (f *scalarFn) IsNonDeterministic() bool   { return f.name == "uuid_short" }
+func (f *scalarFn) IsNonDeterministic() bool {
+	return f.name == "uuid_short" || strings.HasPrefix(f.name, "utc_")
+}
 func (f *scalarFn) WithChildren(c ...sql.Expression) (sql.Expression, error) {
 	if len(c) != len(f.args) {
 		return nil, sql.ErrInvalidChildrenNumber.New(f, len(c), len(f.args))

@@ -23196,7 +23196,7 @@ yydefault:
 		yyDollar = yyS[yypt-1 : yypt+1]
 //line sql.y:9034
 		{
-			yyVAL.val = tryCastExpr(yyDollar[1].val)
+			yyVAL.val = typedLiteral(tryCastExpr(yyDollar[1].val))
 		}
 	case 1514:
 		yyDollar = yyS[yypt-1 : yypt+1]
@@ -24491,19 +24491,19 @@ yydefault:
 		yyDollar = yyS[yypt-2 : yypt+1]
 //line sql.y:9984
 		{
-			yyVAL.val = NewStrVal(yyDollar[2].bytes)
+			yyVAL.val = &SQLVal{Type: StrVal, Val: yyDollar[2].bytes, Typed: "date"}
 		}
 	case 1734:
 		yyDollar = yyS[yypt-2 : yypt+1]
 //line sql.y:9988
 		{
-			yyVAL.val = NewStrVal(yyDollar[2].bytes)
+			yyVAL.val = &SQLVal{Type: StrVal, Val: yyDollar[2].bytes, Typed: "time"}
 		}
 	case 1735:
 		yyDollar = yyS[yypt-2 : yypt+1]
 //line sql.y:9992
 		{
-			yyVAL.val = NewStrVal(yyDollar[2].bytes)
+			yyVAL.val = &SQLVal{Type: StrVal, Val: yyDollar[2].bytes, Typed: "timestamp"}
 		}
 	case 1736:
 		yyDollar = yyS[yypt-1 : yypt+1]

@@ -24,6 +24,12 @@ func TestMySQLSyntax(t *testing.T) {
 		{"SELECT * FROM s3 ORDER BY a", "[9,1,x 9,2,y 9,3,z]"},
 		{"CREATE TABLE s4 (k int primary key) AS SELECT a AS k FROM s1", "[]"},
 		{"SELECT * FROM s4 ORDER BY k", "[1 2 3]"},
+		// columns of NULLs and of user variables take MySQL's types (a NULL
+		// column made the table unreadable)
+		{"SET @a := 1, @b := 'x', @c := 1.5, @d := NULL, @e := 1e3", "[]"},
+		{"CREATE TABLE s5 SELECT @a, @b, @c, @d, @e, NULL AS n, @nosuch AS u", "[]"},
+		{"SELECT * FROM s5", "[1,x,1.500000000000000000000000000000,NULL,1000,NULL,NULL]"},
+		{"SELECT GROUP_CONCAT(column_type ORDER BY ordinal_position) FROM information_schema.columns WHERE table_name = 's5'", "[bigint,longtext,decimal(65,30),longblob,double,binary(0),longtext]"},
 		{"SELECT NULL IS UNKNOWN, 1 IS UNKNOWN, NULL IS NOT UNKNOWN, (1=1) IS NOT UNKNOWN", "[1,0,0,1]"},
 		{"LOCK TABLE s1 READ", "[]"},
 		{"UNLOCK TABLES", "[]"},

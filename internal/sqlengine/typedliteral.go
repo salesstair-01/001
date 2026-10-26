@@ -77,7 +77,7 @@ func (l *typedLiteral) Eval(ctx *sql.Context, row sql.Row) (any, error) {
 		if !ok || t.isDT || t.over {
 			return nil, bad
 		}
-		return types.Time.MicrosecondsToTimespan(t.us), nil
+		return formatTime(t.us, resultScale(t.us, t)), nil // a string: go-mysql-server casts and compares Timespans badly
 	case "date":
 		t, ok := parseDateLiteral(s)
 		if !ok {

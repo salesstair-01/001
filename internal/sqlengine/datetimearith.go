@@ -25,6 +25,7 @@ type intervalArith struct {
 	typ   sql.Type
 	text  bool // a string operand: format as MySQL does
 	date  bool // ... and it has no time, nor the unit
+	span  bool // a TIME operand: the result is a TIME
 }
 
 var _ sql.Expression = (*intervalArith)(nil)
@@ -63,6 +64,18 @@ func (e *intervalArith) Eval(ctx *sql.Context, row sql.Row) (any, error) {
 	d, err := intervalDelta(ctx, iv.(*expression.Interval), row)
 	if err != nil || d == nil {
 		return nil, err
+	}
+	if e.span {
+		t, ok := toTemporal(ctx, other, v)
+		if !ok || t.isDT || d.Years != 0 || d.Months != 0 {
+			return nil, nil
+		}
+		us := (((d.Days*24+d.Hours)*60+d.Minutes)*60+d.Seconds)*usPerSec + d.Microseconds
+		if a.Op == "-" {
+			us = -us
+		}
+		us = clampTime(t.us + us)
+		return formatTime(us, resultScale(us, t)), nil
 	}
 	tv, _, err := types.DatetimeMaxPrecision.Convert(ctx, v)
 	if err != nil || tv == nil {
@@ -151,6 +164,8 @@ func retypeIntervalArith(a *expression.Arithmetic) sql.Expression {
 	case types.IsTime(t):
 		p := typeScale(t)
 		return &intervalArith{arith: a, typ: types.MustCreateDatetimeType(sqltypes.Datetime, max(p, scale))}
+	case t == types.Time:
+		return &intervalArith{arith: a, typ: types.LongText, span: true}
 	case types.IsText(t):
 		date := dateUnits[unit]
 		if l, ok := other.(*expression.Literal); ok {

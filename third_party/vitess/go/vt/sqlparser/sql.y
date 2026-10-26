@@ -3753,7 +3753,9 @@ time_type:
   }
 | TIME length_opt
   {
-    $$ = ColumnType{Type: string($1), Length: $2.(*SQLVal)}
+    // s2z patch: TIME(n) is go-mysql-server's TIME, which keeps
+    // microseconds; it refuses a length below 6 (issue #25).
+    $$ = ColumnType{Type: string($1)}
   }
 | TIMESTAMP length_opt
   {

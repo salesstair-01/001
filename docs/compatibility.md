@@ -57,7 +57,8 @@ Supported and tested: `CREATE/DROP DATABASE`, `CREATE/DROP/RENAME TABLE`,
 engine), `INSERT ... ON DUPLICATE KEY UPDATE`, `REPLACE`, multi-row
 `INSERT`, `UPDATE`/`DELETE` with `LIMIT`, joins, subqueries,
 `UNION`/`EXCEPT`, CTEs including `WITH RECURSIVE`, window
-functions, JSON columns and functions, generated columns, `ENUM`/`SET`,
+functions (also over a grouped query: `RANK() OVER (ORDER BY SUM(x)) ...
+GROUP BY`), JSON columns and functions, generated columns, `ENUM`/`SET`,
 `SHOW CREATE TABLE`, `SHOW [FULL] TABLES`, `information_schema` tables and
 columns, `ANALYZE TABLE`, `GET_LOCK`/`RELEASE_LOCK`, `AUTO_INCREMENT`,
 tables without a primary key (hidden rowid), column defaults that are

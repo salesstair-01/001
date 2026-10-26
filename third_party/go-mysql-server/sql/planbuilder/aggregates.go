@@ -506,6 +506,7 @@ func isWindowFunc(name string) bool {
 		"first_value", "last_value",
 		"rank", "dense_rank",
 		"ntile",
+		"cume_dist", "nth_value", // s2z patch
 		"std", "stddev", "stddev_pop", "stddev_samp",
 		"variance", "var_pop", "var_samp":
 		return true

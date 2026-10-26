@@ -205,6 +205,8 @@ var BuiltIns = []sql.Function{
 	sql.Function0{Name: "row_count", Fn: NewRowCount},
 	sql.Function0{Name: "row_number", Fn: window.NewRowNumber},
 	sql.Function0{Name: "percent_rank", Fn: window.NewPercentRank},
+	sql.Function0{Name: "cume_dist", Fn: window.NewCumeDist}, // s2z patch
+	sql.Function2{Name: "nth_value", Fn: window.NewNthValue}, // s2z patch
 	sql.Function0{Name: "rank", Fn: window.NewRank},
 	sql.Function0{Name: "dense_rank", Fn: window.NewDenseRank},
 	sql.Function1{Name: "first_value", Fn: window.NewFirstValue},

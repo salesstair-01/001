@@ -10120,6 +10120,11 @@ order:
   {
     $$ = &Order{Expr: tryCastExpr($1), Direction: $2.(string)}
   }
+| alias_safe_aggregate asc_desc_opt
+  {
+    // s2z patch: ORDER BY a column alias named std, variance, ...
+    $$ = &Order{Expr: &ColName{Name: NewColIdent(string($1))}, Direction: $2.(string)}
+  }
 
 asc_desc_opt:
   {

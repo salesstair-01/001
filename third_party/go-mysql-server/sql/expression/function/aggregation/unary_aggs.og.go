@@ -978,7 +978,7 @@ func NewStdDevPop(e sql.Expression) *StdDevPop {
 }
 
 func (a *StdDevPop) Type() sql.Type {
-	return a.Child.Type()
+	return types.Float64 // s2z patch: a DOUBLE, as in MySQL (was the argument's type)
 }
 
 func (a *StdDevPop) IsNullable() bool {
@@ -1057,7 +1057,7 @@ func NewStdDevSamp(e sql.Expression) *StdDevSamp {
 }
 
 func (a *StdDevSamp) Type() sql.Type {
-	return a.Child.Type()
+	return types.Float64 // s2z patch: a DOUBLE, as in MySQL (was the argument's type)
 }
 
 func (a *StdDevSamp) IsNullable() bool {
@@ -1136,7 +1136,7 @@ func NewVarPop(e sql.Expression) *VarPop {
 }
 
 func (a *VarPop) Type() sql.Type {
-	return a.Child.Type()
+	return types.Float64 // s2z patch: a DOUBLE, as in MySQL (was the argument's type)
 }
 
 func (a *VarPop) IsNullable() bool {
@@ -1215,7 +1215,7 @@ func NewVarSamp(e sql.Expression) *VarSamp {
 }
 
 func (a *VarSamp) Type() sql.Type {
-	return a.Child.Type()
+	return types.Float64 // s2z patch: a DOUBLE, as in MySQL (was the argument's type)
 }
 
 func (a *VarSamp) IsNullable() bool {

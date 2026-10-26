@@ -33,6 +33,11 @@ var errCodes = []struct {
 	{regexp.MustCompile(`^Constraint ".*" does not exist`), 3821, "HY000"},
 }
 
+var (
+	errExecutionTime = mysql.NewSQLError(3024, "HY000", "Query execution was interrupted, maximum statement execution time exceeded")
+	errInterrupted   = mysql.NewSQLError(1317, "70100", "Query execution was interrupted")
+)
+
 func withMySQLCode(err error) error {
 	var se *mysql.SQLError
 	if err == nil || (errors.As(err, &se) && se.Num != mysql.ERUnknownError) {
@@ -41,6 +46,12 @@ func withMySQLCode(err error) error {
 	msg := err.Error()
 	if se != nil {
 		msg = se.Message
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || msg == context.DeadlineExceeded.Error():
+		return errExecutionTime
+	case errors.Is(err, context.Canceled) || msg == context.Canceled.Error():
+		return errInterrupted
 	}
 	for _, c := range errCodes {
 		if c.re.MatchString(msg) {
@@ -51,6 +62,8 @@ func withMySQLCode(err error) error {
 }
 
 func (h autocommitHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string, callback mysql.ResultSpoolFn) error {
+	ctx, cancel := context.WithCancel(ctx) // ends a statement's max_execution_time timer (exectime.go)
+	defer cancel()
 	return withMySQLCode(h.Handler.ComQuery(ctx, c, query, padFractions(callback)))
 }
 

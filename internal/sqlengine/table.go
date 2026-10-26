@@ -366,9 +366,14 @@ type rowIter struct {
 	seen      [][]byte
 	seenBytes int
 	fromCache bool
+
+	polled uint32 // rows since the context was last checked
 }
 
 func (it *rowIter) Next(ctx *sql.Context) (sql.Row, error) {
+	if err := pollCancel(ctx, &it.polled); err != nil {
+		return nil, err
+	}
 	for {
 		if len(it.page) > 0 {
 			v := it.page[0]

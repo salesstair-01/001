@@ -71,7 +71,7 @@ func newSQLEngine(pro *Provider) *sqle.Engine {
 		AddPostAnalyzeRule(intArithID, intArith).          // integer +, -, * with MySQL's types and range (intarith.go)
 		AddPostAnalyzeRule(createSelectID, createSelect).  // CREATE TABLE (cols) SELECT, columns by name (createselect.go)
 		Build()
-	a.ExecBuilder = newExecBuilder() // UPDATE compares bytes, as MySQL does (exactupdate.go)
+	a.ExecBuilder = rootBuilder{newExecBuilder()} // UPDATE compares bytes, as MySQL does (exactupdate.go)
 	e := sqle.New(a, nil)
 	e.Analyzer.Catalog.StatsProvider = &statsProvider{StatsProvider: e.Analyzer.Catalog.StatsProvider}
 	return e

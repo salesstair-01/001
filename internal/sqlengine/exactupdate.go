@@ -42,6 +42,26 @@ func (o *exactUpdates) Build(ctx *sql.Context, n sql.Node, row sql.Row) (sql.Row
 	if w, ok := n.(plan.ShowWarnings); ok {
 		return showWarnings(w), nil
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err // past max_execution_time, or killed
+	}
+	switch n := n.(type) {
+	case *plan.RecursiveCte:
+		nn, err := guardRecursiveCte(ctx, n)
+		if err != nil || nn == nil {
+			return nil, err
+		}
+		return o.base.Build(ctx, nn, row)
+	case *cteDepthGuard:
+		if err := n.next(); err != nil {
+			return nil, err
+		}
+		it, err := o.base.Build(ctx, n.child, row)
+		if err != nil {
+			return nil, err
+		}
+		return &cteRowsIter{RowIter: it, g: n}, nil
+	}
 	if nn, err := simpleDML(ctx, n); err != nil || nn != nil {
 		if err != nil {
 			return nil, err

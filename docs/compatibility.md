@@ -230,3 +230,9 @@ Accepted but different:
   default); point the tenant at the new partition.
 - Metrics: `-metrics-listen` on every binary serves Prometheus text format
   (wakes by reason, cold-start latency, commit and takeover latency).
+- Statement limits, as in MySQL: `@@cte_max_recursion_depth` (3636),
+  `@@max_execution_time` and the `MAX_EXECUTION_TIME(n)` hint for SELECTs
+  (3024), and `KILL QUERY` (1317). A recursive CTE buffers at most 4 Mi rows
+  (1114, "table is full"), so one whose rows double each iteration fails
+  instead of exhausting the query engine's memory. Sorts, hash joins and
+  GROUP BY have no memory budget yet: bound them with `max_execution_time`.

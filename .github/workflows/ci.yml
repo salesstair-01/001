@@ -26,6 +26,8 @@ jobs:
       - run: test -z "$(gofmt -l .)" || (gofmt -l . && false)
       - run: go vet ./...
       - run: (cd kvd-rs && cargo fmt --check)
+      - name: the MySQL test-suite runner's own tests (mtr)
+        run: cd mtr && cargo fmt --check && cargo test --release
       - name: the owner's tests (kvd-rs)
         run: cd kvd-rs && cargo test --release
       # The Go tests run kvd on a local store directory (internal/kvtest).
@@ -164,3 +166,35 @@ jobs:
         with:
           name: sqllogictest-results
           path: /tmp/results.md
+
+  mysql-test-suite:
+    name: MySQL 8.0.46 test suite subset (mtr)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kvd-rs/target
+            mtr/target
+          key: mtr-${{ hashFiles('kvd-rs/Cargo.lock', 'mtr/Cargo.lock') }}
+      - run: make build
+      - run: scripts/mtr/fetch.sh
+      - run: (cd mtr && cargo build --release)
+      - name: run (fails below the recorded pass rate)
+        run: |
+          mtr/target/release/mtr -bin bin -timeout 180 -list scripts/mtr/files.txt -baseline scripts/mtr/baseline.txt \
+            -summary /tmp/mtr-results.md -failures /tmp/mtr-failures.tsv \
+            -min-pass-rate "$(cat scripts/mtr/min-pass-rate)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mtr-results
+          path: |
+            /tmp/mtr-results.md
+            /tmp/mtr-failures.tsv

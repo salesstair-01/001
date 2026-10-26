@@ -1,0 +1,148 @@
+# MySQL 8.0.46 mysql-test files run by `make mtr` (scripts/mtr/fetch.sh
+# fetches them). Chosen from the main suite's 1,440 tests: SQL semantics
+# (functions, types, DML, DDL, joins, subqueries, CTEs, windows,
+# transactions), each checked to run under the harness against MySQL 8.0.46
+# itself (at least 90% of statements reproduce the recorded result). Left
+# out: tests of MySQL's optimizer switches and plan output, replication,
+# plugins, tools, privileges and server administration.
+alias
+bigint
+bool
+case
+cast
+comments
+commit
+commit_1innodb
+compare
+const_folding
+constraints
+count_distinct
+count_distinct2
+create
+ctype_binary
+ctype_utf8mb4_uca
+delete
+derived_correlated
+derived_cs
+derived_limit
+distinct
+distinct_innodb
+empty_table
+endspace
+func_aes
+func_aes_misc
+func_at_time_zone
+func_bitwise_ops
+func_concat
+func_date_add
+func_default
+func_equal
+func_gconcat
+func_group
+func_group_innodb
+func_if
+func_in_none
+func_isnull
+func_like
+func_math
+func_misc
+func_op
+func_prefix_key
+func_rand
+func_regexp
+func_rollback
+func_sapdb
+func_set
+func_system
+func_test
+func_time
+func_timestamp
+func_uuid
+group_by
+group_by_fd_no_prot
+having
+ignore_strict
+insert
+insert_select
+insert_update
+invisible_columns
+invisible_indexes
+join
+join_nested
+join_outer
+join_outer_innodb
+key
+key_diff
+key_primary
+keywords
+limit
+negation_elimination
+null
+null_key_none_innodb
+order_by_none
+order_by_sortkey
+order_fill_sortbuf
+replace
+round
+select_found
+subquery_antijoin
+subquery_bugs
+subquery_exists
+subquery_none
+subquery_scalar_to_derived
+subquery_table_to_derived
+sum_distinct
+temporal_literal
+truncate
+truth_value_transform
+type_binary
+type_bit_innodb
+type_blob
+type_date
+type_float
+type_nchar
+type_newdecimal
+type_ranges
+type_temporal_fractional
+type_time
+type_timestamp
+type_timestamp_explicit
+type_uint
+type_varchar
+type_year
+unary_query_term
+update
+view_alias
+window_bitwise_ops
+window_functions_bugs
+window_functions_in2exists
+window_jsonaggs
+window_min_max
+window_std_var
+with_non_recursive
+with_non_recursive_bugs
+with_recursive_bugs
+with_recursive_solver
+year-innodb
+# Features sqld does not have yet (triggers, stored routines, CHECK
+# constraints, temporary tables, events, prepared statements, user
+# variables, multi-table UPDATE, foreign keys, AUTO_INCREMENT corners): run
+# to measure the gap, see the issues they feed.
+trigger
+sp-error
+check_constraints
+temp_table
+user_var
+events_1
+multi_update
+foreign_key
+auto_increment
+ps
+variables
+lock
+# Left out until sqld bounds a query's memory and time (see the issues):
+# select_none          a join sqld plans badly: over 180 s and an enormous
+#                      result (5 s on MySQL)
+# with_recursive       an unbounded recursive CTE (MySQL refuses it with
+#                      ER_CTE_RECURSIVE_FORBIDDEN_JOIN_ORDER) grows sqld's
+#                      memory by ~40 MB/s

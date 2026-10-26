@@ -4,6 +4,9 @@
 *.out
 scripts/drivers/.deps/
 scripts/slt/test/
+scripts/mtr/mysql-server/
+scripts/mtr/failures.tsv
+/mtr/target/
 /slt
 scripts/orm/.deps/
 __pycache__/

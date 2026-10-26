@@ -1,0 +1,8 @@
+[package]
+name = "mtr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mysql = { version = "28.0.4", default-features = false, features = ["minimal"] }
+regex = "1.13.1"

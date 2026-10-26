@@ -1,4 +1,4 @@
-.PHONY: build kvd test fault-runs metamorphic slatedb-test kvsuite test-s3 crash-test restore-test wake-demo cold-start slt drivers orm ceph-up ceph-down proto
+.PHONY: build kvd test fault-runs metamorphic slatedb-test mtr mtr-baseline kvsuite test-s3 crash-test restore-test wake-demo cold-start slt drivers orm ceph-up ceph-down proto
 
 # Every binary into bin/: the Go ones (sqld, dird, proxyd, tools) and kvd,
 # the KV owner, from kvd-rs/ (Rust, on SlateDB).
@@ -55,6 +55,22 @@ cold-start: build
 slt: kvd
 	scripts/slt/fetch.sh
 	go run ./cmd/slt -parallel 4 -summary scripts/slt/results.md $$(grep -v '^#' scripts/slt/files.txt | sed 's|^|scripts/slt/test/|')
+
+# MySQL 8.0.46's own test suite (mtr/README.md): the files in
+# scripts/mtr/files.txt against a fresh kvd + sqld; writes scripts/mtr/results.md.
+mtr: build
+	scripts/mtr/fetch.sh
+	cd mtr && cargo build --release
+	mtr/target/release/mtr -bin bin -timeout 180 -list scripts/mtr/files.txt -baseline scripts/mtr/baseline.txt \
+		-summary scripts/mtr/results.md -failures scripts/mtr/failures.tsv
+
+# The statements that don't reproduce on MySQL itself under the harness, from
+# a scratch MySQL 8.0.46 at MTR_MYSQL (host:port; see mtr/README.md).
+mtr-baseline:
+	scripts/mtr/fetch.sh
+	cd mtr && cargo build --release
+	mtr/target/release/mtr -dsn $(MTR_MYSQL) -label "MySQL 8.0.46" -list scripts/mtr/files.txt \
+		-baseline-out scripts/mtr/baseline.txt -summary scripts/mtr/mysql-results.md
 
 # Driver matrix against DRV_HOST:DRV_PORT (see scripts/drivers/README.md).
 drivers:

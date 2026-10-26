@@ -380,7 +380,7 @@ func tryCastStatement(v interface{}) Statement {
 %type <val> compare
 %type <val> insert_data insert_data_alias insert_data_select insert_data_values
 %type <val> value value_expression num_val as_of_opt limit_val integral_or_interval_expr timestamp_value
-%type <bytes> time_unit non_microsecond_time_unit date_datetime_time_timestamp
+%type <bytes> time_unit non_microsecond_time_unit compound_time_unit date_datetime_time_timestamp
 %type <val> function_call_keyword function_call_nonkeyword function_call_generic function_call_conflict
 %type <val> func_datetime_prec_opt function_call_window function_call_aggregate_with_window function_call_on_update
 %type <val> is_suffix
@@ -8101,6 +8101,19 @@ non_microsecond_time_unit:
 | HOUR_SECOND
 | MINUTE_SECOND
 
+compound_time_unit:
+  YEAR_MONTH
+| DAY_HOUR
+| DAY_MINUTE
+| DAY_SECOND
+| DAY_MICROSECOND
+| HOUR_MINUTE
+| HOUR_SECOND
+| HOUR_MICROSECOND
+| MINUTE_SECOND
+| MINUTE_MICROSECOND
+| SECOND_MICROSECOND
+
 // TODO : support prepared statements
 integral_or_interval_expr:
   INTEGRAL
@@ -9169,6 +9182,12 @@ value_expression:
     // we'll need to revisit this. The solution
     // will be non-trivial because of grammar conflicts.
     $$ = &IntervalExpr{Expr: tryCastExpr($2), Unit: $3.(ColIdent).String()}
+  }
+| INTERVAL value_expression compound_time_unit
+  {
+    // s2z patch: compound units (YEAR_MONTH, DAY_HOUR, ...) are keywords,
+    // which sql_id doesn't take.
+    $$ = &IntervalExpr{Expr: tryCastExpr($2), Unit: string($3)}
   }
 | function_call_generic
 | function_call_keyword

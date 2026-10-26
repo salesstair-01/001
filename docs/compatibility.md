@@ -206,7 +206,8 @@ Accepted but different:
     column, as in MySQL. `DATE '...'` and `TIMESTAMP '...'` are dates.
     `ADDTIME`, `SUBTIME`, `TIMEDIFF`, `TIME_TO_SEC`, `SEC_TO_TIME`,
     `MAKETIME`, `MAKEDATE`, `PERIOD_ADD`, `PERIOD_DIFF`, `UTC_DATE` and
-    `UTC_TIME` follow MySQL, but their TIME results are typed as text (with
+    `UTC_TIME` follow MySQL, as do the compound `INTERVAL` units (`YEAR_MONTH`,
+    `DAY_SECOND`, `SECOND_MICROSECOND`, ...), but their TIME results are typed as text (with
     MySQL's digits); `TIME(n)` columns are not supported. `CONCAT` of a
     DATE column gives `YYYY-MM-DD 00:00:00`.
   - Output formatting: `DATETIME(6)` prints without trailing

@@ -167,8 +167,13 @@ Accepted but different:
 - All MySQL scalar types except spatial. DECIMAL keys are exact
   (memcomparable encoding); DATETIME/TIMESTAMP to microseconds.
 - Collations: `utf8mb4_0900_ai_ci` (the default, as in MySQL 8),
-  `utf8mb4_general_ci`, `utf8mb4_0900_bin`, `utf8mb4_bin`, `binary`. Others are
-  refused.
+  `utf8mb4_general_ci`, `utf8mb4_0900_bin`, `utf8mb4_bin`, `binary`, and for
+  older schemas `utf8mb3_general_ci` (`utf8`), `utf8mb3_bin`,
+  `latin1_swedish_ci` (`latin1`), `latin1_bin`, `ascii_general_ci`,
+  `ascii_bin`; each is checked against MySQL by the differential tests.
+  Values are stored as UTF-8 whatever the character set, and a character the
+  column's character set can't hold is refused (1366), as in strict mode.
+  Others are refused.
 - `CHAR(n)` drops trailing spaces on store, as MySQL does.
 - Known gaps, found by the differential tests and inherited from
   go-mysql-server's comparisons (keys follow the same rules, so results are

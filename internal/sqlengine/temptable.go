@@ -429,7 +429,30 @@ func (t *tempTable) set(slot int, row sql.Row) {
 	t.rows[slot] = row
 }
 
+// repertoire refuses strings a column's character set can't hold, as the
+// KV tables do (checkRepertoire).
+func (t *tempTable) repertoire(row sql.Row) error {
+	for i, v := range row {
+		var b []byte
+		switch x := v.(type) {
+		case string:
+			b = []byte(x)
+		case []byte:
+			b = x
+		default:
+			continue
+		}
+		if err := checkRepertoire(t.codecs[i].typ, t.sch.Schema[i].Name, b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (t *tempTable) insert(ctx *sql.Context, row sql.Row) error {
+	if err := t.repertoire(row); err != nil {
+		return err
+	}
 	if err := t.check(ctx, row, -1); err != nil {
 		return err
 	}
@@ -453,6 +476,9 @@ func (t *tempTable) delete(ctx *sql.Context, row sql.Row) error {
 func (t *tempTable) update(ctx *sql.Context, old, new sql.Row) error {
 	slot, err := t.find(ctx, old)
 	if err != nil || slot < 0 {
+		return err
+	}
+	if err := t.repertoire(new); err != nil {
 		return err
 	}
 	if err := t.check(ctx, new, slot); err != nil {

@@ -33,7 +33,8 @@ var (
 // They are left out of the generated data unless -diff-known-gaps is set.
 var expansionPieces = map[string]bool{"ß": true, "ẞ": true, "æ": true, "ﬁ": true}
 
-var padSpaceCollations = map[string]bool{"utf8mb4_bin": true, "utf8mb4_general_ci": true}
+var padSpaceCollations = map[string]bool{"utf8mb4_bin": true, "utf8mb4_general_ci": true,
+	"utf8mb3_general_ci": true, "utf8mb3_bin": true, "latin1_swedish_ci": true, "latin1_bin": true, "ascii_general_ci": true, "ascii_bin": true}
 
 type diffPair struct {
 	t           *testing.T
@@ -214,7 +215,8 @@ func randStringFor(r *rand.Rand, coll string) string {
 
 func TestMySQLDiffCollations(t *testing.T) {
 	d := newDiffPair(t)
-	collations := []string{"utf8mb4_0900_ai_ci", "utf8mb4_general_ci", "utf8mb4_0900_bin", "utf8mb4_bin"}
+	collations := []string{"utf8mb4_0900_ai_ci", "utf8mb4_general_ci", "utf8mb4_0900_bin", "utf8mb4_bin",
+		"utf8mb3_general_ci", "utf8mb3_bin", "latin1_swedish_ci", "latin1_bin", "ascii_general_ci", "ascii_bin"}
 	for seed := *diffSeed; seed < *diffSeed+int64(*diffRounds); seed++ {
 		r := rand.New(rand.NewSource(seed))
 		for ci, coll := range collations {
@@ -223,12 +225,19 @@ func TestMySQLDiffCollations(t *testing.T) {
 			var vals []string
 			for id := 1; id <= 60; id++ {
 				v := randStringFor(r, coll)
-				vals = append(vals, v)
 				if r.Intn(10) == 0 {
 					d.must(fmt.Sprintf("INSERT INTO %s VALUES (%d, NULL)", tbl, id))
 					continue
 				}
-				d.exec(fmt.Sprintf("INSERT INTO %s VALUES (?, ?)", tbl), id, v)
+				// A value the character set can't hold fails on both (1366);
+				// pivots are values both stored (a parameter MySQL can't
+				// convert to the column's character set fails with 3988).
+				if d.exec(fmt.Sprintf("INSERT INTO %s VALUES (?, ?)", tbl), id, v) {
+					vals = append(vals, v)
+				}
+			}
+			if len(vals) == 0 {
+				continue
 			}
 			// Order and equality, with ties broken by id.
 			d.query(fmt.Sprintf("SELECT id FROM %s ORDER BY s, id", tbl), plain)

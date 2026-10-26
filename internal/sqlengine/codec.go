@@ -12,6 +12,7 @@ import (
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/types"
+	"github.com/dolthub/vitess/go/mysql"
 	"github.com/dolthub/vitess/go/sqltypes"
 	"github.com/shopspring/decimal"
 
@@ -63,7 +64,13 @@ func (c *colCodec) encodeValue(ctx context.Context, v any) ([]byte, error) {
 		return []byte(s), err
 	case types.IsText(t) || types.IsBinaryType(t):
 		b, err := toBytes(v)
-		return trimChar(t, b), err
+		if err != nil {
+			return nil, err
+		}
+		if err := checkRepertoire(t, c.info.Name, b); err != nil {
+			return nil, err
+		}
+		return trimChar(t, b), nil
 	case types.IsGeometry(t):
 		return nil, fmt.Errorf("spatial types are not supported in v1")
 	}
@@ -196,8 +203,16 @@ func sortKey(t sql.Type, raw []byte) ([]byte, error) {
 	if coll.PadAttribute() == "PAD SPACE" {
 		s = strings.TrimRight(s, " ")
 	}
-	if coll == sql.Collation_utf8mb4_bin || coll == sql.Collation_utf8mb4_0900_bin {
+	switch coll {
+	case sql.Collation_utf8mb4_bin, sql.Collation_utf8mb4_0900_bin, sql.Collation_utf8mb3_bin, sql.Collation_ascii_bin:
 		return []byte(s), nil
+	case sql.Collation_latin1_bin:
+		// latin1 (cp1252) byte order: 'ž' is 0x9E, before 'á' (0xE1).
+		out := make([]byte, 0, len(s))
+		for _, r := range s {
+			out = append(out, latin1Byte(r))
+		}
+		return out, nil
 	}
 	sorter := coll.Sorter()
 	if sorter == nil {
@@ -449,4 +464,57 @@ func appendDecimalKey(b []byte, d decimal.Decimal) []byte {
 	}
 	digits := new(big.Int).Abs(d.Coefficient()).String()
 	return encoding.AppendDecimal(b, d.Sign(), d.Exponent()+int32(len(digits)), digits, false)
+}
+
+// cp1252 is what MySQL's latin1 holds in 0x80-0x9F, besides U+0000-U+007F
+// and U+00A0-U+00FF.
+var cp1252 = map[rune]byte{
+	'€': 0x80, '‚': 0x82, 'ƒ': 0x83, '„': 0x84, '…': 0x85, '†': 0x86, '‡': 0x87, 'ˆ': 0x88, '‰': 0x89,
+	'Š': 0x8A, '‹': 0x8B, 'Œ': 0x8C, 'Ž': 0x8E, '‘': 0x91, '’': 0x92, '“': 0x93, '”': 0x94, '•': 0x95,
+	'–': 0x96, '—': 0x97, '˜': 0x98, '™': 0x99, 'š': 0x9A, '›': 0x9B, 'œ': 0x9C, 'ž': 0x9E, 'Ÿ': 0x9F,
+}
+
+// latin1Byte is r's byte in MySQL's latin1 (checkRepertoire has refused
+// anything else).
+func latin1Byte(r rune) byte {
+	if b, ok := cp1252[r]; ok {
+		return b
+	}
+	return byte(r)
+}
+
+// checkRepertoire refuses, as MySQL does in strict mode (1366), a string
+// with characters its column's character set can't hold: values are stored
+// as UTF-8 whatever the character set, so utf8mb3, latin1 and ascii
+// columns are checked here.
+func checkRepertoire(t sql.Type, column string, b []byte) error {
+	tc, ok := t.(sql.TypeWithCollation)
+	if !ok {
+		return nil
+	}
+	var fits func(r rune) bool
+	switch tc.Collation().CharacterSet() {
+	case sql.CharacterSet_utf8mb3:
+		fits = func(r rune) bool { return r <= 0xFFFF }
+	case sql.CharacterSet_latin1:
+		fits = func(r rune) bool { _, ok := cp1252[r]; return r < 0x80 || (r >= 0xA0 && r <= 0xFF) || ok }
+	case sql.CharacterSet_ascii:
+		fits = func(r rune) bool { return r < 0x80 }
+	default:
+		return nil
+	}
+	for i, r := range string(b) {
+		if !fits(r) {
+			bad := b[i:]
+			if len(bad) > 6 {
+				bad = bad[:6]
+			}
+			var hex strings.Builder
+			for _, c := range bad {
+				fmt.Fprintf(&hex, "\\x%02X", c)
+			}
+			return mysql.NewSQLError(1366, "HY000", "Incorrect string value: '%s' for column '%s' at row 1", hex.String(), column)
+		}
+	}
+	return nil
 }

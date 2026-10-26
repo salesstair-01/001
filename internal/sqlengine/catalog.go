@@ -117,6 +117,15 @@ var supportedCollations = map[sql.CollationID]bool{
 	sql.Collation_utf8mb4_0900_bin:   true,
 	sql.Collation_utf8mb4_bin:        true,
 	sql.Collation_binary:             true,
+	// Older schemas' character sets (issue #24): values are stored as
+	// UTF-8 like the others; keys use the collation's weights, or the
+	// code points for _bin (which is the byte order of latin1 and ascii).
+	sql.Collation_utf8mb3_general_ci: true,
+	sql.Collation_utf8mb3_bin:        true,
+	sql.Collation_latin1_swedish_ci:  true,
+	sql.Collation_latin1_bin:         true,
+	sql.Collation_ascii_general_ci:   true,
+	sql.Collation_ascii_bin:          true,
 }
 
 // collationSupported checks by name: go-mysql-server has several ids for

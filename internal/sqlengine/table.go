@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/vitess/go/mysql"
 
 	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/kv"
@@ -154,6 +155,9 @@ func (t *Table) encodeRow(ctx context.Context, row sql.Row) ([]byte, error) {
 		}
 		b, err := c.encodeValue(ctx, row[i])
 		if err != nil {
+			if se, ok := err.(*mysql.SQLError); ok {
+				return nil, se // already names the column, with MySQL's code
+			}
 			return nil, fmt.Errorf("column %s: %w", c.info.Name, err)
 		}
 		vals[i].Bytes = b

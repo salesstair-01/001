@@ -201,8 +201,8 @@ func exactJoinSource(n sql.Node) (sql.Node, transform.TreeIdentity, error) {
 type exactJoinRows struct{ plan.UnaryNode }
 
 func (e *exactJoinRows) Schema() sql.Schema { return exactSchema(e.Child.Schema()) }
-func (e *exactJoinRows) String() string    { return e.Child.String() }
-func (e *exactJoinRows) IsReadOnly() bool  { return true }
+func (e *exactJoinRows) String() string     { return e.Child.String() }
+func (e *exactJoinRows) IsReadOnly() bool   { return true }
 func (e *exactJoinRows) WithChildren(children ...sql.Node) (sql.Node, error) {
 	if len(children) != 1 {
 		return nil, sql.ErrInvalidChildrenNumber.New(e, len(children), 1)

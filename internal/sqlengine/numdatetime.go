@@ -76,6 +76,10 @@ func numDatetime(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan
 					return expression.NewBetween(e.Val, lo, hi), transform.NewTree, nil
 				}
 			}
+		case *expression.Arithmetic:
+			if r := retypeIntervalArith(e); r != sql.Expression(e) {
+				return r, transform.NewTree, nil
+			}
 		case *expression.Interval:
 			// '4.5' SECOND_MICROSECOND is 4.5 seconds in MySQL, 4 seconds
 			// and 5 microseconds in go-mysql-server: pad the fraction.

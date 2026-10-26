@@ -210,9 +210,12 @@ Accepted but different:
     `DAY_SECOND`, `SECOND_MICROSECOND`, ...), but their TIME results are typed as text (with
     MySQL's digits); `TIME(n)` columns are not supported. `CONCAT` of a
     DATE column gives `YYYY-MM-DD 00:00:00`.
-  - Output formatting: `DATETIME(6)` prints without trailing
-    zeros in the fraction (`.12`, MySQL `.120000`); `FLOAT` prints every
-    digit of the float32 (`-565.3059`, MySQL `-565.306`).
+  - Output formatting: `DATETIME(n)` prints n fractional digits as in MySQL,
+    but `TIMESTAMP(n)` without trailing zeros (`.12`, MySQL `.120`;
+    go-mysql-server sends no precision for it); `FLOAT` prints every digit of
+    the float32 (`-565.3059`, MySQL `-565.306`). `x + INTERVAL ...` has
+    MySQL's type and precision (a DATE stays a DATE for units of a day or
+    more).
 - `AUTO_INCREMENT` within a multi-row insert comes from doubling
   reservations, so bulk inserts can leave gaps (like
   `innodb_autoinc_lock_mode=2`).

@@ -51,11 +51,11 @@ func withMySQLCode(err error) error {
 }
 
 func (h autocommitHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string, callback mysql.ResultSpoolFn) error {
-	return withMySQLCode(h.Handler.ComQuery(ctx, c, query, callback))
+	return withMySQLCode(h.Handler.ComQuery(ctx, c, query, padFractions(callback)))
 }
 
 func (h autocommitHandler) ComMultiQuery(ctx context.Context, c *mysql.Conn, query string, callback mysql.ResultSpoolFn) (string, error) {
-	rest, err := h.Handler.ComMultiQuery(ctx, c, query, callback)
+	rest, err := h.Handler.ComMultiQuery(ctx, c, query, padFractions(callback))
 	return rest, withMySQLCode(err)
 }
 
@@ -65,5 +65,6 @@ func (h autocommitHandler) ComPrepare(ctx context.Context, c *mysql.Conn, query 
 }
 
 func (h autocommitHandler) ComStmtExecute(ctx context.Context, c *mysql.Conn, prepare *mysql.PrepareData, callback func(*sqltypes.Result) error) error {
-	return withMySQLCode(h.Handler.ComStmtExecute(ctx, c, prepare, callback))
+	spool := padFractions(func(r *sqltypes.Result, _ bool) error { return callback(r) })
+	return withMySQLCode(h.Handler.ComStmtExecute(ctx, c, prepare, func(r *sqltypes.Result) error { return spool(r, false) }))
 }

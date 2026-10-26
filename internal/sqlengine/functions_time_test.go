@@ -2,6 +2,9 @@ package sqlengine
 
 import (
 	"context"
+	gosql "database/sql"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +83,55 @@ func TestTemporalFunctions(t *testing.T) {
 			"[2001-02-02 10:59:16,2001-02-02T00:00:00Z,2001-02-02 10:59:16]"},
 	} {
 		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}
+
+// TestDatetimeFractions checks DATETIME(n) values as sent, without the
+// driver's parsing: n fractional digits, and + INTERVAL at full precision
+// with MySQL's result types (MySQL 8.0.46's output).
+func TestDatetimeFractions(t *testing.T) {
+	c := startCluster(t)
+	db, err := gosql.Open("mysql", fmt.Sprintf("root@tcp(%s)/app", c.addr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	raw := func(q string) string {
+		rows, err := db.Query(q)
+		if err != nil {
+			return "ERR " + err.Error()
+		}
+		defer rows.Close()
+		cols, _ := rows.Columns()
+		var out []string
+		for rows.Next() {
+			v := make([]gosql.RawBytes, len(cols))
+			p := make([]any, len(cols))
+			for i := range v {
+				p[i] = &v[i]
+			}
+			if err := rows.Scan(p...); err != nil {
+				return "ERR " + err.Error()
+			}
+			for _, x := range v {
+				out = append(out, string(x))
+			}
+		}
+		return strings.Join(out, "|")
+	}
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE f6 (a datetime(6), c datetime, d datetime(2))", ""},
+		{"INSERT INTO f6 VALUES ('2001-01-01 10:10:10.12', '2001-01-01 10:10:10', '2001-01-01 10:10:10.5')", ""},
+		{"SELECT * FROM f6", "2001-01-01 10:10:10.120000|2001-01-01 10:10:10|2001-01-01 10:10:10.50"},
+		{"SELECT TIMESTAMP'2010-01-01 10:10:10.12', TIMESTAMP'2010-01-01 10:10:10.120'", "2010-01-01 10:10:10.12|2010-01-01 10:10:10.120"},
+		{"SELECT a + INTERVAL 1 SECOND, a - INTERVAL 1 MICROSECOND, c + INTERVAL 1 MICROSECOND, c + INTERVAL 1.5 SECOND, DATE_ADD(a, INTERVAL 1 DAY) FROM f6",
+			"2001-01-01 10:10:11.120000|2001-01-01 10:10:10.119999|2001-01-01 10:10:10.000001|2001-01-01 10:10:11.5|2001-01-02 10:10:10.120000"},
+		{"SELECT DATE'2001-01-01' + INTERVAL 1 DAY, DATE'2001-01-01' + INTERVAL 1 HOUR, DATE'2001-01-01' + INTERVAL '1-1' YEAR_MONTH, '2001-01-01' + INTERVAL 1 DAY, '2001-01-01 10:00:00.5' + INTERVAL 1 DAY, DATE_ADD(DATE'2001-01-01', INTERVAL 1 DAY)",
+			"2001-01-02|2001-01-01 01:00:00|2002-02-01|2001-01-02|2001-01-02 10:00:00.500000|2001-01-02"},
+	} {
+		if got := raw(s.q); got != s.want {
 			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
 		}
 	}

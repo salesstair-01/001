@@ -17,6 +17,7 @@ package sql
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/shopspring/decimal"
@@ -134,11 +135,16 @@ func (b *MySQLIndexBuilder) Equals(ctx *Context, colExpr string, keys ...interfa
 		}
 
 		var err error
-		k, _, err = typ.Convert(ctx, k)
+		var side int
+		k, side, err = rangeKey(ctx, typ, k) // s2z patch
 		if err != nil {
 			b.isInvalid = true
 			b.err = err
 			return b
+		}
+		if side != 0 {
+			potentialRanges[i] = EmptyRangeColumnExpr(typ)
+			continue
 		}
 		potentialRanges[i] = ClosedRangeColumnExpr(k, k, typ)
 	}
@@ -172,10 +178,14 @@ func (b *MySQLIndexBuilder) NotEquals(ctx *Context, colExpr string, key interfac
 		}
 	}
 
-	key, _, err := typ.Convert(ctx, key)
+	key, side, err := rangeKey(ctx, typ, key) // s2z patch
 	if err != nil {
 		b.isInvalid = true
 		b.err = err
+		return b
+	}
+	if side != 0 {
+		b.updateCol(ctx, colExpr, NotNullRangeColumnExpr(typ))
 		return b
 	}
 
@@ -212,10 +222,17 @@ func (b *MySQLIndexBuilder) GreaterThan(ctx *Context, colExpr string, key interf
 		key = floor(key)
 	}
 
-	key, _, err := typ.Convert(ctx, key)
+	key, side, err := rangeKey(ctx, typ, key) // s2z patch
 	if err != nil {
 		b.isInvalid = true
 		b.err = err
+		return b
+	}
+	if side < 0 {
+		b.updateCol(ctx, colExpr, NotNullRangeColumnExpr(typ))
+		return b
+	} else if side > 0 {
+		b.updateCol(ctx, colExpr, EmptyRangeColumnExpr(typ))
 		return b
 	}
 
@@ -247,10 +264,17 @@ func (b *MySQLIndexBuilder) GreaterOrEqual(ctx *Context, colExpr string, key int
 		key = newKey
 	}
 
-	key, _, err := typ.Convert(ctx, key)
+	key, side, err := rangeKey(ctx, typ, key) // s2z patch
 	if err != nil {
 		b.isInvalid = true
 		b.err = err
+		return b
+	}
+	if side < 0 {
+		b.updateCol(ctx, colExpr, NotNullRangeColumnExpr(typ))
+		return b
+	} else if side > 0 {
+		b.updateCol(ctx, colExpr, EmptyRangeColumnExpr(typ))
 		return b
 	}
 
@@ -280,10 +304,17 @@ func (b *MySQLIndexBuilder) LessThan(ctx *Context, colExpr string, key interface
 	if t, ok := typ.(NumberType); ok && !t.IsFloat() {
 		key = ceil(key)
 	}
-	key, _, err := typ.Convert(ctx, key)
+	key, side, err := rangeKey(ctx, typ, key) // s2z patch
 	if err != nil {
 		b.isInvalid = true
 		b.err = err
+		return b
+	}
+	if side < 0 {
+		b.updateCol(ctx, colExpr, EmptyRangeColumnExpr(typ))
+		return b
+	} else if side > 0 {
+		b.updateCol(ctx, colExpr, NotNullRangeColumnExpr(typ))
 		return b
 	}
 
@@ -315,10 +346,17 @@ func (b *MySQLIndexBuilder) LessOrEqual(ctx *Context, colExpr string, key interf
 		key = newKey
 	}
 
-	key, _, err := typ.Convert(ctx, key)
+	key, side, err := rangeKey(ctx, typ, key) // s2z patch
 	if err != nil {
 		b.isInvalid = true
 		b.err = err
+		return b
+	}
+	if side < 0 {
+		b.updateCol(ctx, colExpr, EmptyRangeColumnExpr(typ))
+		return b
+	} else if side > 0 {
+		b.updateCol(ctx, colExpr, NotNullRangeColumnExpr(typ))
 		return b
 	}
 
@@ -588,4 +626,72 @@ func (b *EqualityIndexBuilder) Build(_ *Context) (IndexLookup, error) {
 		Ranges:       MySQLRangeCollection{b.rng},
 		IsEmptyRange: b.empty,
 	}, nil
+}
+
+// rangeKey is key as a value of the index column's type typ. s2z patch: a
+// number, or a numeric string, outside an integer column's range is below
+// (side -1) or above (side 1) every value of the column, as MySQL compares
+// it, and a string with a numeric prefix ('1x') is that number; the
+// conversion failed (1366: '-1' is not a valid value for 'smallint
+// unsigned'), and with it the query.
+func rangeKey(ctx *Context, typ Type, key interface{}) (interface{}, int, error) {
+	k, _, err := typ.Convert(ctx, key)
+	if err == nil {
+		return k, 0, nil
+	}
+	nt, ok := typ.(NumberType)
+	if !ok || nt.IsFloat() {
+		return nil, 0, err
+	}
+	var f float64
+	switch v := key.(type) {
+	case string:
+		f, ok = numericPrefix(v)
+		if !ok {
+			return nil, 0, err
+		}
+	case []byte:
+		f, ok = numericPrefix(string(v))
+		if !ok {
+			return nil, 0, err
+		}
+	case int8, int16, int32, int64, int, uint8, uint16, uint32, uint64, uint, float32, float64, decimal.Decimal:
+		f, _ = strconv.ParseFloat(fmt.Sprint(v), 64)
+	default:
+		return nil, 0, err
+	}
+	if f != math.Trunc(f) {
+		// an integer column never equals it: compare with the integers
+		// either side, as for a float key
+		return nil, 0, err
+	}
+	if k, _, cerr := typ.Convert(ctx, f); cerr == nil {
+		return k, 0, nil
+	}
+	if f < 0 {
+		return nil, -1, nil
+	}
+	return nil, 1, nil
+}
+
+// numericPrefix is the number a string starts with, as MySQL reads a
+// string compared with a number: 0 when there is none.
+func numericPrefix(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
+	end := 0
+	for end < len(s) {
+		c := s[end]
+		if (c >= '0' && c <= '9') || c == '.' || ((c == '-' || c == '+') && end == 0) || ((c == 'e' || c == 'E') && end > 0) {
+			end++
+			continue
+		}
+		break
+	}
+	for end > 0 {
+		if f, err := strconv.ParseFloat(s[:end], 64); err == nil {
+			return f, true
+		}
+		end--
+	}
+	return 0, true // no number: 0, as in MySQL
 }

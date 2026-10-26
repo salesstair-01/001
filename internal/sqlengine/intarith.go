@@ -262,20 +262,37 @@ func stringToInt(ctx *sql.Context, s string, signed bool) any {
 	return out
 }
 
-// mixedIntCompare reports whether a comparison is between integers of which
-// one is unsigned and one signed, with a literal on one side (so as not to
-// change join conditions the planner chose).
+// mixedIntCompare reports whether a comparison is one go-mysql-server makes
+// in float64 that MySQL makes exactly, with a literal on one side (so as not
+// to change join conditions the planner chose): a signed integer with an
+// unsigned one, or an integer with a numeric string literal (MySQL folds
+// colA < '18446744073709551616' to an exact comparison).
 func mixedIntCompare(c expression.Comparer) bool {
 	l, r := c.Left(), c.Right()
-	if !isInt(l.Type()) || !isInt(r.Type()) || types.IsUnsigned(l.Type()) == types.IsUnsigned(r.Type()) {
-		return false
+	litL, okL := l.(*expression.Literal)
+	litR, okR := r.(*expression.Literal)
+	switch {
+	case isInt(l.Type()) && isInt(r.Type()):
+		return types.IsUnsigned(l.Type()) != types.IsUnsigned(r.Type()) && (okL || okR)
+	case isInt(l.Type()) && okR:
+		return numericString(litR.Value())
+	case isInt(r.Type()) && okL:
+		return numericString(litL.Value())
 	}
-	_, litL := l.(*expression.Literal)
-	_, litR := r.(*expression.Literal)
-	return litL || litR
+	return false
 }
 
-// exactCmp is a comparison of integers made exactly.
+func numericString(v any) bool {
+	s, ok := v.(string)
+	if !ok {
+		return false
+	}
+	_, ok = new(big.Rat).SetString(strings.TrimSpace(s))
+	return ok
+}
+
+// exactCmp is a comparison of integers, or of an integer with a numeric
+// string, made exactly.
 type exactCmp struct{ expression.Comparer }
 
 func (c *exactCmp) Compare(ctx *sql.Context, row sql.Row) (int, error) {
@@ -289,7 +306,7 @@ func (c *exactCmp) Compare(ctx *sql.Context, row sql.Row) (int, error) {
 	return l.Cmp(r), nil
 }
 
-func (c *exactCmp) operands(ctx *sql.Context, row sql.Row) (*big.Int, *big.Int, bool, error) {
+func (c *exactCmp) operands(ctx *sql.Context, row sql.Row) (*big.Rat, *big.Rat, bool, error) {
 	lv, err := c.Left().Eval(ctx, row)
 	if err != nil {
 		return nil, nil, false, err
@@ -298,9 +315,20 @@ func (c *exactCmp) operands(ctx *sql.Context, row sql.Row) (*big.Int, *big.Int, 
 	if err != nil {
 		return nil, nil, false, err
 	}
-	l, okL := bigInt(lv)
-	r, okR := bigInt(rv)
+	l, okL := exactNumber(lv)
+	r, okR := exactNumber(rv)
 	return l, r, okL && okR, nil
+}
+
+func exactNumber(v any) (*big.Rat, bool) {
+	if s, ok := v.(string); ok {
+		return new(big.Rat).SetString(strings.TrimSpace(s))
+	}
+	i, ok := bigInt(v)
+	if !ok {
+		return nil, false
+	}
+	return new(big.Rat).SetInt(i), true
 }
 
 func (c *exactCmp) Eval(ctx *sql.Context, row sql.Row) (any, error) {

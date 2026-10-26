@@ -33,7 +33,7 @@ jobs:
       - run: go test -race -timeout 20m ./...
 
   owner:
-    name: owner fault injection (200 seeds) and metamorphic test (100 seeds)
+    name: owner fault injection (200 seeds), metamorphic test (100 seeds), SlateDB's tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,9 +43,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             kvd-rs/target
-          key: kvd-rs-${{ hashFiles('kvd-rs/Cargo.lock') }}
+            kvd-rs/vendor/slatedb/target
+            kvd-rs/vendor/slatedb-txn-obj/target
+          key: kvd-rs-${{ hashFiles('kvd-rs/Cargo.lock', 'kvd-rs/vendor/slatedb/Cargo.lock') }}
       - run: make fault-runs
       - run: make metamorphic
+      # SlateDB is vendored with changes to its open (kvd-rs/vendor/README.md).
+      - run: make slatedb-test
 
   ceph:
     name: "on Ceph RGW (MicroCeph): S3 compatibility, KV suites, crash test, restore, scale to zero, drivers, ORM"

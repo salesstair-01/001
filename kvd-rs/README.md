@@ -38,6 +38,7 @@ an in-memory store. Longer runs: `KVD_FAULT_SEEDS=200` for `durability`,
 | `src/restore.rs` | point-in-time restore |
 | `src/localstore.rs` | the local-directory store (`-store-dir`) |
 | `src/metrics.rs` | Prometheus metrics, and the store wrapper that counts PUTs by partition |
+| `vendor/` | SlateDB 0.17.0, patched to open in fewer object-store round trips (`vendor/README.md`) |
 
 ## How it maps onto SlateDB
 

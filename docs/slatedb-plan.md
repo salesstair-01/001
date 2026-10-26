@@ -124,7 +124,12 @@ The Rust owner reached parity and replaced the Go owner (phase 6).
   the GC boundary object (four times: SlateDB checks it around every
   manifest read and write), probe the WAL, write the fencing manifest and
   WAL object, read the manifest again; then the first read fetches an SST's
-  index and one block. Fewer would need changes in SlateDB.
+  index and one block. SlateDB is now vendored with three changes to its
+  open (`kvd-rs/vendor/README.md`): the GC boundary is read concurrently
+  with the manifest, the WAL is probed while the epoch is claimed, and the
+  manifest is not read again after the WAL is fenced. 12 sequential round
+  trips became 8 (at 5 ms each, 79 ms → 51 ms); SlateDB's own test suites
+  pass on the patched copy (`make slatedb-test`).
 - **Catalog reloads** (found by the sqllogictest job, 48 min against 9):
   every query reloaded `sqld`'s catalog (go-mysql-server looks up the
   absent `mysql` database), which the restore window made expensive: each
@@ -141,9 +146,12 @@ The Rust owner reached parity and replaced the Go owner (phase 6).
   object store by the partition's prefix, since SlateDB makes the PUTs.
 
 Found along the way, in the SQL layer and so for both owners:
-go-mysql-server v0.20.0 skips an UPDATE whose new row equals the old one
+go-mysql-server v0.20.0 skipped an UPDATE whose new row equals the old one
 under the column's collation, so `UPDATE t SET v='B'` on a row holding `b`
-(case-insensitive collation) changes nothing, where MySQL stores `B`.
+(case-insensitive collation) changed nothing, where MySQL stores `B`.
+Fixed in `sqld` (`internal/sqlengine/exactupdate.go`): an UPDATE compares
+text byte by byte, as MySQL does; the MySQL differential test now flips
+case in UPDATEs and compares rows affected and the stored bytes.
 
 ## Open questions carried from the spike
 

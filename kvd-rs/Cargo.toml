@@ -24,3 +24,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [build-dependencies]
 protox = "0.7"
 tonic-build = "0.12"
+
+# SlateDB 0.17.0 with fewer object-store round trips when a database opens
+# (vendor/README.md lists the changes).
+[patch.crates-io]
+slatedb = { path = "vendor/slatedb" }
+slatedb-txn-obj = { path = "vendor/slatedb-txn-obj" }

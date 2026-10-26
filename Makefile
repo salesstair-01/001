@@ -1,4 +1,4 @@
-.PHONY: build kvd test fault-runs metamorphic kvsuite test-s3 crash-test restore-test wake-demo cold-start slt drivers orm ceph-up ceph-down proto
+.PHONY: build kvd test fault-runs metamorphic slatedb-test kvsuite test-s3 crash-test restore-test wake-demo cold-start slt drivers orm ceph-up ceph-down proto
 
 # Every binary into bin/: the Go ones (sqld, dird, proxyd, tools) and kvd,
 # the KV owner, from kvd-rs/ (Rust, on SlateDB).
@@ -20,6 +20,12 @@ fault-runs:
 	cd kvd-rs && KVD_FAULT_SEEDS=200 cargo test --release --test durability faults
 metamorphic:
 	cd kvd-rs && KVD_META_SEEDS=100 KVD_META_OPS=500 cargo test --release --test metamorphic
+
+# SlateDB's own tests, on the vendored and patched copy (kvd-rs/vendor).
+slatedb-test:
+	cd kvd-rs/vendor/slatedb && cargo test --release \
+		--config 'patch.crates-io.slatedb-txn-obj.path="../slatedb-txn-obj"' --lib --tests
+	cd kvd-rs/vendor/slatedb-txn-obj && cargo test --release --lib
 
 # The KV suites over gRPC against kvd (on S3 when MINIO_ENDPOINT is set).
 kvsuite: kvd

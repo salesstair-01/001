@@ -14,3 +14,4 @@ __pycache__/
 
 # Rust KV owner build output
 /kvd-rs/target/
+/kvd-rs/vendor/*/target/

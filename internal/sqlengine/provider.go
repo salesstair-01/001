@@ -121,6 +121,9 @@ var (
 func (d *Database) Name() string { return d.name }
 
 func (d *Database) GetTableInsensitive(ctx *sql.Context, name string) (sql.Table, bool, error) {
+	if t := sessionTemps(ctx).get(d.name, name); t != nil {
+		return t, true, nil
+	}
 	info, err := d.cat.Table(ctx, d.name, name)
 	if err != nil || info == nil {
 		return nil, false, err
@@ -184,6 +187,9 @@ func (d *Database) CreateTable(ctx *sql.Context, name string, schema sql.Primary
 }
 
 func (d *Database) DropTable(ctx *sql.Context, name string) error {
+	if d.dropTemp(ctx, name) {
+		return nil
+	}
 	info, err := d.cat.Table(ctx, d.name, name)
 	if err != nil {
 		return err
@@ -195,6 +201,9 @@ func (d *Database) DropTable(ctx *sql.Context, name string) error {
 }
 
 func (d *Database) RenameTable(ctx *sql.Context, oldName, newName string) error {
+	if ok, err := d.renameTemp(ctx, oldName, newName); ok {
+		return err
+	}
 	info, err := d.cat.Table(ctx, d.name, oldName)
 	if err != nil {
 		return err

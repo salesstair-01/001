@@ -21,6 +21,7 @@ import (
 type Session struct {
 	*sql.BaseSession
 	store *Store
+	temps tempTables    // CREATE TEMPORARY TABLE (temptable.go)
 	stmt  atomic.Uint64 // statement id; one per client command
 
 	locksMu sync.Mutex
@@ -221,7 +222,9 @@ func (s *Session) CommitTransaction(ctx *sql.Context, tx sql.Transaction) error 
 		return nil
 	}
 	defer s.finished(t)
-	return mysqlError(t.Commit(ctx))
+	err := mysqlError(t.Commit(ctx))
+	s.temps.endTransaction(err == nil)
+	return err
 }
 
 func (s *Session) Rollback(ctx *sql.Context, tx sql.Transaction) error {
@@ -230,6 +233,7 @@ func (s *Session) Rollback(ctx *sql.Context, tx sql.Transaction) error {
 		return nil
 	}
 	defer s.finished(t)
+	s.temps.endTransaction(false)
 	return mysqlError(t.Rollback(ctx))
 }
 

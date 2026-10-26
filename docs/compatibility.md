@@ -75,7 +75,6 @@ Not supported in v1 (statement fails with an error):
 |---|---|
 | Triggers, stored procedures, events | `database "app" doesn't support triggers` (and similar) |
 | CHECK constraints | `the table does not support check constraint operations` |
-| Temporary tables | `database does not support temporary tables` |
 | Savepoints | 1235 `savepoints are not supported in v1` |
 | FULLTEXT indexes | refused by go-mysql-server (its error text is garbled: `tables cannot be created on database %!s(MISSING)`) |
 | Spatial types | `spatial types are not supported in v1` |
@@ -87,6 +86,15 @@ Not supported in v1 (statement fails with an error):
 | SERIALIZABLE | `SET ... ISOLATION LEVEL SERIALIZABLE` is accepted; a statement that reads or writes data at that level fails, while `COMMIT`, `ROLLBACK` and `SET` (to change the level back) work |
 
 Accepted but different:
+
+- Temporary tables live in the query engine's memory, in the session that
+  created them, and are never written to storage. They shadow a permanent
+  table of the same name; a failed statement and `ROLLBACK` undo their rows,
+  as with InnoDB temporary tables; `CREATE`, `DROP` and `ALTER` are not
+  transactional. The proxy keeps a session that created one on its query
+  engine; a reconnect loses them, as in MySQL. Reads scan the rows (their
+  indexes enforce uniqueness but don't speed up lookups), and their size is
+  bounded only by the query engine's memory.
 
 - `PARTITION BY` clauses are parsed and ignored (a tenant is one KV
   partition already).
@@ -112,9 +120,12 @@ Accepted but different:
   1831 for a duplicate index and note 1050 for `CREATE TABLE IF NOT EXISTS`
   on an existing table. Other warnings MySQL gives are often missing
   (issue #28).
-- Error codes: duplicate key 1062, lock wait timeout 1205, deadlock and
-  schema-changed 1213, unknown table 1146, unknown database 1049; most other
-  errors are 1105 with go-mysql-server's message.
+- Error codes: go-mysql-server's generic 1105 errors get MySQL's code where
+  the message identifies it (syntax error 1064, unknown column 1054, table
+  exists 1050, no database 1046, ambiguous column 1052, value count 1136,
+  invalid default 1067, unknown function 1305). Duplicate key 1062, lock wait
+  timeout 1205, deadlock and schema-changed 1213, unknown table 1146, unknown
+  database 1049; most other errors are 1105 with go-mysql-server's message.
 
 ## Transactions and locking
 

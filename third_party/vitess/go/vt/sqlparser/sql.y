@@ -340,6 +340,7 @@ func tryCastStatement(v interface{}) Statement {
 %type <val> declare_handler_action
 %type <bytes> signal_condition_value
 %type <bytes> char_or_character
+%type <bytes> alias_safe_aggregate
 %type <val> trigger_time trigger_event
 %type <val> with_or_without
 %type <val> alter_statement alter_table_statement alter_database_statement alter_event_statement alter_user_statement
@@ -371,7 +372,7 @@ func tryCastStatement(v interface{}) Statement {
 %type <val> as_of_clause as_of_point_clause between_times between_versions all_times all_versions
 %type <val> procedure_name
 %type <val> event_name rename_event_name_opt
-%type <val> index_hint_list
+%type <val> index_hint_list index_hints index_hint paren_select_statement index_hint_names index_hint_name
 %type <val> where_expression_opt
 %type <val> condition
 %type <val> boolean_value
@@ -563,6 +564,10 @@ command:
   {
     $$ = $1.(SelectStatement)
   }
+| paren_select_statement
+  {
+    $$ = $1.(SelectStatement)
+  }
 | values_select_statement
   {
     $$ = $1.(SelectStatement)
@@ -686,6 +691,14 @@ values_select_statement:
 | openb values_select_statement closeb
   {
     $$ = $2.(SelectStatement)
+  }
+
+// s2z patch: a parenthesized query as a statement, optionally followed by
+// ORDER BY and LIMIT ((SELECT ... LIMIT 7) ORDER BY a LIMIT 4), as in MySQL.
+paren_select_statement:
+  openb select_statement_with_no_trailing_into closeb order_by_opt limit_opt
+  {
+    $$ = parenSelect($2.(SelectStatement), $4.(OrderBy), $5.(*Limit))
   }
 
 select_statement_with_no_trailing_into:
@@ -1234,6 +1247,25 @@ create_statement:
 | create_table_prefix LIKE table_name
   {
     $1.(*DDL).OptLike = &OptLike{LikeTables: []TableName{$3.(TableName)}}
+    $$ = $1.(*DDL)
+  }
+  // s2z patch: column definitions followed by a SELECT, as in MySQL.
+| create_table_prefix table_spec create_query_select_expression
+  {
+    $1.(*DDL).TableSpec = $2.(*TableSpec)
+    if len($1.(*DDL).TableSpec.Constraints) > 0 {
+      $1.(*DDL).ConstraintAction = AddStr
+    }
+    $1.(*DDL).OptSelect = &OptSelect{Select: $3.(SelectStatement)}
+    $$ = $1.(*DDL)
+  }
+| create_table_prefix table_spec AS create_query_expression
+  {
+    $1.(*DDL).TableSpec = $2.(*TableSpec)
+    if len($1.(*DDL).TableSpec.Constraints) > 0 {
+      $1.(*DDL).ConstraintAction = AddStr
+    }
+    $1.(*DDL).OptSelect = &OptSelect{Select: $4.(SelectStatement)}
     $$ = $1.(*DDL)
   }
 | CREATE key_type_opt INDEX sql_id using_opt ON table_name '(' index_column_list ')' index_option_list_opt
@@ -3731,9 +3763,10 @@ time_type:
   {
     $$ = ColumnType{Type: string($1), Length: $2.(*SQLVal)}
   }
-| YEAR
+| YEAR length_opt
   {
-    $$ = ColumnType{Type: string($1)}
+    // s2z patch: YEAR(n) parses; the engine accepts YEAR(4) only, as MySQL.
+    $$ = ColumnType{Type: string($1), Length: $2.(*SQLVal)}
   }
 
 char_type:
@@ -3792,6 +3825,16 @@ char_type:
 | TEXT
   {
     $$ = ColumnType{Type: string($1)}
+  }
+// s2z patch: TEXT(n) and BLOB(n) are the smallest type that holds n
+// characters or bytes, as in MySQL.
+| TEXT '(' INTEGRAL ')'
+  {
+    $$ = ColumnType{Type: sizedLobType("text", $3, 4)}
+  }
+| BLOB '(' INTEGRAL ')'
+  {
+    $$ = ColumnType{Type: sizedLobType("blob", $3, 1)}
   }
 | TINYTEXT
   {
@@ -4438,6 +4481,12 @@ index_definition:
 | index_info '(' index_column_list ')'
   {
     $$ = &IndexDefinition{Info: $1.(*IndexInfo), Columns: $3.([]*IndexColumn)}
+  }
+  // s2z patch: the index type before the columns, as in MySQL (KEY USING BTREE (c)).
+| index_info USING any_identifier '(' index_column_list ')' index_option_list_opt
+  {
+    opts := append([]*IndexOption{{Name: string($2), Using: string($3)}}, $7.([]*IndexOption)...)
+    $$ = &IndexDefinition{Info: $1.(*IndexInfo), Columns: $5.([]*IndexColumn), Options: opts}
   }
 
 index_option_list_opt:
@@ -5217,6 +5266,11 @@ constraint_symbol_opt:
   }
 
 pk_name_opt:
+  {
+    $$ = string("")
+  }
+// s2z patch: ADD CONSTRAINT PRIMARY KEY, with no name, as in MySQL.
+| CONSTRAINT
   {
     $$ = string("")
   }
@@ -6565,7 +6619,7 @@ rename_user_list:
   }
 
 drop_statement:
-  DROP temp_opt TABLE exists_opt table_name_list drop_statement_action
+  DROP temp_opt table_or_tables exists_opt table_name_list drop_statement_action
   {
     var temp bool
     if $2.(int) != 0 {
@@ -8088,6 +8142,20 @@ col_alias:
   {
     $$ = NewColIdent(string($1))
   }
+// s2z patch: aggregate names MySQL does not reserve, usable as aliases.
+| alias_safe_aggregate
+  {
+    $$ = NewColIdent(string($1))
+  }
+
+alias_safe_aggregate:
+  STD
+| STDDEV
+| STDDEV_POP
+| STDDEV_SAMP
+| VARIANCE
+| VAR_POP
+| VAR_SAMP
 
 table_references:
   table_reference
@@ -8658,18 +8726,65 @@ index_hint_list:
   {
     $$ = (*IndexHints)(nil)
   }
-| USE INDEX openb column_list closeb
+| index_hints
   {
-    $$ = &IndexHints{Type: UseStr, Indexes: $4.(Columns)}
+    $$ = $1
   }
-| IGNORE INDEX openb column_list closeb
+
+// s2z patch: KEY for INDEX, a FOR JOIN / ORDER BY / GROUP BY scope (ignored)
+// and several hints, as in MySQL; the first hint is kept.
+index_hints:
+  index_hint
   {
-    $$ = &IndexHints{Type: IgnoreStr, Indexes: $4.(Columns)}
+    $$ = $1
   }
-| FORCE INDEX openb column_list closeb
+| index_hints index_hint
   {
-    $$ = &IndexHints{Type: ForceStr, Indexes: $4.(Columns)}
+    $$ = $1
   }
+
+index_hint:
+  USE index_or_key index_hint_for_opt openb index_hint_names closeb
+  {
+    $$ = &IndexHints{Type: UseStr, Indexes: $5.(Columns)}
+  }
+| IGNORE index_or_key index_hint_for_opt openb index_hint_names closeb
+  {
+    $$ = &IndexHints{Type: IgnoreStr, Indexes: $5.(Columns)}
+  }
+| FORCE index_or_key index_hint_for_opt openb index_hint_names closeb
+  {
+    $$ = &IndexHints{Type: ForceStr, Indexes: $5.(Columns)}
+  }
+
+index_hint_names:
+  index_hint_name
+  {
+    $$ = Columns{$1.(ColIdent)}
+  }
+| index_hint_names ',' index_hint_name
+  {
+    $$ = append($1.(Columns), $3.(ColIdent))
+  }
+
+index_hint_name:
+  sql_id
+  {
+    $$ = $1.(ColIdent)
+  }
+| PRIMARY
+  {
+    $$ = NewColIdent(string($1))
+  }
+
+index_hint_for_opt:
+  {}
+| FOR JOIN
+  {}
+| FOR ORDER BY
+  {}
+| FOR GROUP BY
+  {}
 
 where_expression_opt:
   {
@@ -8800,6 +8915,23 @@ is_suffix:
 | NOT FALSE
   {
     $$ = IsNotFalseStr
+  }
+// s2z patch: IS [NOT] UNKNOWN is IS [NOT] NULL, as in MySQL.
+| ID
+  {
+    if !strings.EqualFold(string($1), "unknown") {
+      yylex.Error("syntax error")
+      return 1
+    }
+    $$ = IsNullStr
+  }
+| NOT ID
+  {
+    if !strings.EqualFold(string($2), "unknown") {
+      yylex.Error("syntax error")
+      return 1
+    }
+    $$ = IsNotNullStr
   }
 
 compare:
@@ -10566,10 +10698,15 @@ lines_option_list:
   }
 
 lock_statement:
-  LOCK TABLES lock_table_list
+  LOCK table_or_tables lock_table_list
   {
     $$ = &LockTables{Tables: $3.(TableAndLockTypes)}
   }
+
+// s2z patch: DROP TABLES and LOCK TABLE are synonyms, as in MySQL.
+table_or_tables:
+  TABLE
+| TABLES
 
 lock_table_list:
   lock_table

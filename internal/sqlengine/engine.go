@@ -67,7 +67,8 @@ func newSQLEngine(pro *Provider) *sqle.Engine {
 		AddPreAnalyzeRule(dropTemporaryID, dropTemporary). // DROP TEMPORARY TABLE drops only those (temptable.go)
 		AddPreAnalyzeRule(constFoldID, constFold).         // integer column vs constant, as MySQL folds it (constfold.go)
 		AddPreAnalyzeRule(distinctSortID, distinctSort).   // DISTINCT ... ORDER BY 1 (distinctsort.go)
-		AddPostAnalyzeRule(intArithID, intArith).          // integer +, -, * with MySQL's types and range (intarith.go)
+		AddPostAnalyzeRule(intArithID, intArith).
+		AddPostAnalyzeRule(createSelectID, createSelect). // CREATE TABLE (cols) SELECT, columns by name (createselect.go)          // integer +, -, * with MySQL's types and range (intarith.go)
 		Build()
 	a.ExecBuilder = newExecBuilder() // UPDATE compares bytes, as MySQL does (exactupdate.go)
 	e := sqle.New(a, nil)

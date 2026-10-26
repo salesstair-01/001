@@ -8028,9 +8028,6 @@ var (
 		input:  "select /* vitess-reserved keyword as unqualified column */ * from t where escape = 'test'",
 		output: "syntax error at position 81 near 'escape'",
 	}, {
-		input:  "(select /* parenthesized select */ * from t)",
-		output: "syntax error at position 45 near 't'",
-	}, {
 		input:  "select * from t where id = ((select a from t1 union select b from t2) order by a limit 1)",
 		output: "syntax error at position 76 near 'order'",
 	}, {

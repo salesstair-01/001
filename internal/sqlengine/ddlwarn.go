@@ -9,6 +9,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"github.com/dolthub/go-mysql-server/sql/plan"
 	"github.com/dolthub/go-mysql-server/sql/transform"
+	"github.com/dolthub/vitess/go/mysql"
 	"github.com/dolthub/vitess/go/vt/sqlparser"
 )
 
@@ -41,6 +42,13 @@ func ddlWarnings(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan
 	if ddlStatement.MatchString(ctx.Query()) {
 		if st, err := sqlparser.Parse(ctx.Query()); err == nil {
 			for _, c := range columnDefinitions(st) {
+				if strings.EqualFold(c.Type.Type, "year") && c.Type.Length != nil {
+					// YEAR(4) is deprecated; other widths are refused.
+					if string(c.Type.Length.Val) != "4" {
+						return nil, transform.SameTree, mysql.NewSQLError(1818, "HY000", "Invalid display width. Use YEAR instead.")
+					}
+					ctx.Warn(1287, "'YEAR(4)' is deprecated and will be removed in a future release. Please use YEAR instead")
+				}
 				for _, w := range columnTypeWarnings(&c.Type) {
 					ctx.Warn(1681, "%s", w)
 				}

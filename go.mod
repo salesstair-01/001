@@ -61,3 +61,5 @@ require (
 )
 
 replace github.com/dolthub/vitess => ./third_party/vitess
+
+replace github.com/dolthub/go-mysql-server => ./third_party/go-mysql-server

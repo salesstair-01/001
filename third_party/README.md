@@ -33,3 +33,14 @@ v0.38.0 was used, with no grammar conflicts):
 
 To upgrade: copy the new version over `vitess/` and re-apply the changes
 above.
+
+## go-mysql-server
+
+`github.com/dolthub/go-mysql-server` at `v0.20.0` (Apache-2.0), used through
+a `replace` in `../go.mod`: sqld's query engine. Left out of the copy: tests
+and test data, `enginetest`, `_example`, `_integration` and the collation
+table generator (`sql/encodings/generate`, a `package main` nothing
+imports). Changes, each marked `s2z patch` in the code:
+
+| change | file |
+|---|---|

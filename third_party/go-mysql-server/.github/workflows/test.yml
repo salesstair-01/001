@@ -1,0 +1,30 @@
+name: Test
+on: [pull_request]
+
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        platform: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Install Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+    - name: Test
+      if: ${{ matrix.platform != 'ubuntu-latest' }}
+      run: go test ./...
+      env:
+        CI_TEST: "true"
+    - name: Test
+      if: ${{ matrix.platform == 'ubuntu-latest' }}
+      run: go test -race ./...
+      env:
+        CI_TEST: "true"

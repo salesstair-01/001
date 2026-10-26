@@ -120,6 +120,8 @@ Accepted but different:
   1831 for a duplicate index and note 1050 for `CREATE TABLE IF NOT EXISTS`
   on an existing table. Other warnings MySQL gives are often missing
   (issue #28).
+- A multi-table `UPDATE` of a table without a primary key is refused
+  (`keyless tables unsupported for UPDATE JOIN`, go-mysql-server).
 - Error codes: go-mysql-server's generic 1105 errors get MySQL's code where
   the message identifies it (syntax error 1064, unknown column 1054, table
   exists 1050, no database 1046, ambiguous column 1052, value count 1136,
@@ -189,10 +191,6 @@ Accepted but different:
     bit operators (`& | ^ ~ << >>`) work in 64-bit unsigned integers, and
     bytewise on two binary strings, as in MySQL.
   - `ENUM ... LIKE` is always false.
-  - A multi-table `UPDATE` (`UPDATE a JOIN b ... SET a.v = 'B'`) still skips
-    a row whose new value equals the old one under the collation (`b` →
-    `B`); a single-table `UPDATE` stores the new bytes and counts the row,
-    as MySQL does.
   - Output formatting: `DATETIME(6)` prints without trailing
     zeros in the fraction (`.12`, MySQL `.120000`); `FLOAT` prints every
     digit of the float32 (`-565.3059`, MySQL `-565.306`).

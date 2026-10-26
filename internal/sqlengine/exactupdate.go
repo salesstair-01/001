@@ -19,8 +19,10 @@ import (
 // execution of an UPDATE swaps in a copy of the table whose Schema() gives
 // every text column the binary collation; reads, WHERE and the indexes
 // still use the column's own collation, from the table's internal schema.
-// A multi-table UPDATE (plan.UpdateJoin) compares with the join's schema
-// and is not covered (docs/compatibility.md).
+// A multi-table UPDATE (plan.UpdateJoin) compares old and new join rows
+// with the schema of the join under its UpdateSource; there the join is
+// wrapped in exactJoinRows, which passes its rows through with that schema
+// byte-exact.
 
 // exactUpdates is the execution-builder override that does the swap.
 type exactUpdates struct {
@@ -40,9 +42,23 @@ func (o *exactUpdates) Build(ctx *sql.Context, n sql.Node, row sql.Row) (sql.Row
 	if w, ok := n.(plan.ShowWarnings); ok {
 		return showWarnings(w), nil
 	}
+	if e, ok := n.(*exactJoinRows); ok {
+		return o.base.Build(ctx, e.Child, row)
+	}
 	u, ok := n.(*plan.Update)
 	if !ok {
 		return nil, nil
+	}
+	if hasUpdateJoin(u.Child) {
+		child, same, err := transform.Node(u.Child, exactJoinSource)
+		if err != nil || same {
+			return nil, err
+		}
+		nu, err := u.WithChildren(child)
+		if err != nil {
+			return nil, err
+		}
+		return o.base.Build(ctx, nu, row)
 	}
 	if t, err := plan.GetUpdatable(u.Child); err != nil || !needsExact(t) {
 		return nil, nil // not ours, or already rewritten
@@ -155,4 +171,41 @@ func showWarnings(w plan.ShowWarnings) sql.RowIter {
 		rows[len(w)-1-i] = sql.NewRow(x.Level, x.Code, x.Message)
 	}
 	return sql.RowsToRowIter(rows...)
+}
+
+func hasUpdateJoin(n sql.Node) bool {
+	found := false
+	transform.Inspect(n, func(n sql.Node) bool {
+		if _, ok := n.(*plan.UpdateJoin); ok {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// exactJoinSource wraps the join under an UPDATE JOIN's UpdateSource.
+func exactJoinSource(n sql.Node) (sql.Node, transform.TreeIdentity, error) {
+	us, ok := n.(*plan.UpdateSource)
+	if !ok {
+		return n, transform.SameTree, nil
+	}
+	if _, done := us.Child.(*exactJoinRows); done {
+		return n, transform.SameTree, nil
+	}
+	nn, err := us.WithChildren(&exactJoinRows{plan.UnaryNode{Child: us.Child}})
+	return nn, transform.NewTree, err
+}
+
+// exactJoinRows is its child, with text columns compared byte by byte.
+type exactJoinRows struct{ plan.UnaryNode }
+
+func (e *exactJoinRows) Schema() sql.Schema { return exactSchema(e.Child.Schema()) }
+func (e *exactJoinRows) String() string    { return e.Child.String() }
+func (e *exactJoinRows) IsReadOnly() bool  { return true }
+func (e *exactJoinRows) WithChildren(children ...sql.Node) (sql.Node, error) {
+	if len(children) != 1 {
+		return nil, sql.ErrInvalidChildrenNumber.New(e, len(children), 1)
+	}
+	return &exactJoinRows{plan.UnaryNode{Child: children[0]}}, nil
 }

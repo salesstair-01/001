@@ -5,6 +5,8 @@ import (
 	"errors"
 	"regexp"
 
+	"github.com/dolthub/go-mysql-server/sql"
+
 	"github.com/dolthub/vitess/go/mysql"
 	"github.com/dolthub/vitess/go/sqltypes"
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
@@ -52,6 +54,9 @@ func withMySQLCode(err error) error {
 		return errExecutionTime
 	case errors.Is(err, context.Canceled) || msg == context.Canceled.Error():
 		return errInterrupted
+	case sql.ErrNoMemoryAvailable.Is(err) || msg == "no memory available":
+		memRejected.Inc()
+		return errOutOfMemory
 	}
 	for _, c := range errCodes {
 		if c.re.MatchString(msg) {

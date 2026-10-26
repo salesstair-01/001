@@ -234,5 +234,9 @@ Accepted but different:
   `@@max_execution_time` and the `MAX_EXECUTION_TIME(n)` hint for SELECTs
   (3024), and `KILL QUERY` (1317). A recursive CTE buffers at most 4 Mi rows
   (1114, "table is full"), so one whose rows double each iteration fails
-  instead of exhausting the query engine's memory. Sorts, hash joins and
-  GROUP BY have no memory budget yet: bound them with `max_execution_time`.
+  instead of exhausting the query engine's memory. `sqld -max-memory MiB`
+  (`SQLD_MAX_MEMORY_MB`) is the query engine's memory budget: past it, a
+  statement that buffers rows (sort, GROUP BY, DISTINCT, hash join) fails
+  with 1041 instead of growing the process (`s2z_sqld_heap_bytes`,
+  `s2z_sqld_memory_rejections_total` in `/metrics`). The budget is per
+  query engine, not per tenant.

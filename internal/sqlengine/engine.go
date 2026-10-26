@@ -73,6 +73,7 @@ func newSQLEngine(pro *Provider) *sqle.Engine {
 		Build()
 	a.ExecBuilder = rootBuilder{newExecBuilder()} // UPDATE compares bytes, as MySQL does (exactupdate.go)
 	e := sqle.New(a, nil)
+	e.MemoryManager = newMemoryManager() // the memory budget (memlimit.go)
 	e.Analyzer.Catalog.StatsProvider = &statsProvider{StatsProvider: e.Analyzer.Catalog.StatsProvider}
 	return e
 }

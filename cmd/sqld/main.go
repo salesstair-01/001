@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"google.golang.org/grpc"
@@ -26,6 +27,13 @@ func env(name, def string) string {
 	return def
 }
 
+func envUint(name string, def uint64) uint64 {
+	if v, err := strconv.ParseUint(os.Getenv(name), 10, 64); err == nil {
+		return v
+	}
+	return def
+}
+
 func main() {
 	listen := flag.String("listen", env("SQLD_LISTEN", "127.0.0.1:3306"), "MySQL protocol listen address")
 	kvAddr := flag.String("kv", env("SQLD_KV", "127.0.0.1:7070"), "KV owner gRPC address")
@@ -34,7 +42,9 @@ func main() {
 	generic := flag.Bool("generic", false, "serve any tenant: the connecting user s2z_p<partition> picks it (used behind proxyd; needs -directory)")
 	createDB := flag.String("create-db", "app", "create this database at startup if it does not exist (empty = none)")
 	metricsListen := flag.String("metrics-listen", "", "serve Prometheus metrics at http://<addr>/metrics (empty = off)")
+	maxMemory := flag.Uint64("max-memory", envUint("SQLD_MAX_MEMORY_MB", 0), "memory budget in MiB: past it, statements that buffer rows (sorts, GROUP BY, hash joins) fail with 1041 (0 = none)")
 	flag.Parse()
+	sqlengine.SetMemoryLimit(*maxMemory << 20)
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := metrics.Serve(*metricsListen); err != nil {

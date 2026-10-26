@@ -70,3 +70,28 @@ func TestStatementLimits(t *testing.T) {
 		t.Errorf("after KILL QUERY: got %s", got)
 	}
 }
+
+// TestMemoryBudget: past the budget, a statement that buffers rows fails
+// with 1041 and the engine serves the next one.
+func TestMemoryBudget(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	SetMemoryLimit(heapReporter.UsedMemory() + 64<<20)
+	defer SetMemoryLimit(0)
+	before := memRejected.Value()
+	const big = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 300) " +
+		"SELECT COUNT(*) FROM (SELECT a.n, b.n AS m, d.n AS k, REPEAT('x', 50) AS s FROM c a, c b, c d GROUP BY a.n, b.n, d.n) g"
+	if got := connRun(t, conn, big); got != "ERR 1041" {
+		t.Errorf("over budget: got %s, want ERR 1041", got)
+	}
+	if memRejected.Value() <= before {
+		t.Error("s2z_sqld_memory_rejections_total did not count it")
+	}
+	if got := connRun(t, conn, "SELECT COUNT(*) FROM (SELECT 1 UNION ALL SELECT 2) t"); got != "[2]" {
+		t.Errorf("after: got %s", got)
+	}
+}

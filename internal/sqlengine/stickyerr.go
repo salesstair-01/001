@@ -8,12 +8,13 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/plan"
 )
 
-// A stored program's CONTINUE handler resumes after the statement that
-// raised the condition. go-mysql-server's block instead calls Next on the
-// statement's iterator again after the handler runs, and SIGNAL's iterator
-// raises again, so CALL looped forever (MySQL's sp-error.test, issue #19).
-// The builder wraps a statement's iterator so that after an error it is
-// finished, as a statement is once it has failed.
+// A CONTINUE handler resumes after the statement that raised the condition.
+// go-mysql-server's block executor (rowexec's Block, which runs trigger
+// bodies) instead calls Next on the statement's iterator again after the
+// handler ran, and a SIGNAL's iterator raises again, so the block would
+// loop forever. The builder wraps SIGNAL's iterator so that after its
+// error it is finished. (Stored procedures run in go-mysql-server's
+// interpreter, whose handler bug routines.go guards against.)
 
 var stickyBuilding sync.Map // nodes being built under a stickyIter
 

@@ -100,6 +100,8 @@ type TableInfo struct {
 	Comment   string `json:"comment,omitempty"`
 	// ForeignKeys are the constraints this table declares (fk.go).
 	ForeignKeys []ForeignKeyInfo `json:"foreign_keys,omitempty"`
+	// Checks are its CHECK constraints (checks.go).
+	Checks []CheckInfo `json:"checks,omitempty"`
 }
 
 // clone deep-copies a table so the cached original is never mutated.

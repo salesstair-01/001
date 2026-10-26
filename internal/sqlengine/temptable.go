@@ -202,6 +202,7 @@ type tempTable struct {
 	indexes  []*tempIndex
 	autoNext uint64
 	undo     []tempUndo // since the transaction began
+	checks   []CheckInfo
 }
 
 var (

@@ -67,14 +67,18 @@ declared in `CREATE TABLE` or `ALTER TABLE ... ADD/DROP FOREIGN KEY`,
 enforced (1452 on an orphan child, 1451 on a referenced parent), with
 `ON DELETE`/`ON UPDATE` `CASCADE`, `SET NULL` and `RESTRICT`; a reference
 check takes a shared lock on the parent row, as InnoDB does, so a concurrent
-parent delete waits for the child's transaction.
+parent delete waits for the child's transaction. CHECK constraints are
+enforced on INSERT and UPDATE (3819), named `<table>_chk_<n>` when unnamed,
+unique per database (3822), `NOT ENFORCED` honored, added and dropped with
+`ALTER TABLE ... ADD CONSTRAINT/DROP CHECK` (3821 for an unknown name), and
+listed in `information_schema.check_constraints`, whose `check_clause` does
+not backquote column names as MySQL does.
 
 Not supported in v1 (statement fails with an error):
 
 | feature | error |
 |---|---|
 | Triggers, stored procedures, events | `database "app" doesn't support triggers` (and similar) |
-| CHECK constraints | `the table does not support check constraint operations` |
 | Savepoints | 1235 `savepoints are not supported in v1` |
 | FULLTEXT indexes | refused by go-mysql-server (its error text is garbled: `tables cannot be created on database %!s(MISSING)`) |
 | Spatial types | `spatial types are not supported in v1` |

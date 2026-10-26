@@ -29,6 +29,8 @@ var errCodes = []struct {
 	{regexp.MustCompile(`^Invalid default value for`), 1067, "42000"},
 	{regexp.MustCompile(`^function: '[^']*' not found`), 1305, "42000"},
 	{regexp.MustCompile(`^Incorrect datetime value`), 1292, "22007"},
+	{regexp.MustCompile(`^Check constraint ".*" violated`), 3819, "HY000"},
+	{regexp.MustCompile(`^Constraint ".*" does not exist`), 3821, "HY000"},
 }
 
 func withMySQLCode(err error) error {

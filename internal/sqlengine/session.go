@@ -194,7 +194,7 @@ func (s *Session) isolation(ctx *sql.Context) (kv.Isolation, error) {
 		ctx.Warn(1105, "READ UNCOMMITTED runs as READ COMMITTED")
 		return kv.ReadCommitted, nil
 	case "SERIALIZABLE":
-		return 0, mysql.NewSQLError(mysql.ERNotSupportedYet, mysql.SSUnknownSQLState,
+		return kv.RepeatableRead, mysql.NewSQLError(mysql.ERNotSupportedYet, mysql.SSUnknownSQLState,
 			"SERIALIZABLE is not supported: without gap locks it would be a false promise; use REPEATABLE READ")
 	}
 	return kv.RepeatableRead, nil
@@ -203,11 +203,9 @@ func (s *Session) isolation(ctx *sql.Context) (kv.Isolation, error) {
 // StartTransaction creates a transaction; the KV side begins on first use.
 func (s *Session) StartTransaction(ctx *sql.Context, tc sql.TransactionCharacteristic) (sql.Transaction, error) {
 	s.endOrphan()
-	iso, err := s.isolation(ctx)
-	if err != nil {
-		return nil, err
-	}
+	iso, refused := s.isolation(ctx)
 	t := s.store.NewTxn(iso, tc == sql.ReadOnly)
+	t.refused = refused
 	s.txnMu.Lock()
 	if old := s.current; old != nil && old != t {
 		defer func() { _ = old.Rollback(context.Background()) }()

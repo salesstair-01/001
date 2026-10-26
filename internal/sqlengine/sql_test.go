@@ -297,12 +297,20 @@ func TestTransactions(t *testing.T) {
 	}
 	mustExecConn(t, a, "COMMIT")
 
-	_, err = a.ExecContext(ctx, "SET SESSION transaction_isolation = 'SERIALIZABLE'")
-	if err == nil {
-		_, err = a.ExecContext(ctx, "SELECT * FROM acct")
+	// SERIALIZABLE is refused when a transaction reads or writes data. The
+	// session can still commit, roll back and change the level back.
+	mustExecConn(t, a, "SET SESSION transaction_isolation = 'SERIALIZABLE'")
+	for _, q := range []string{"SELECT * FROM acct", "UPDATE acct SET bal = 0", "INSERT INTO acct VALUES (9, 9)"} {
+		if _, err := a.ExecContext(ctx, q); err == nil || !strings.Contains(err.Error(), "SERIALIZABLE is not supported") {
+			t.Fatalf("%s under SERIALIZABLE: %v", q, err)
+		}
 	}
-	if err == nil {
-		t.Fatal("SERIALIZABLE must be refused")
+	for _, q := range []string{"SELECT 1", "START TRANSACTION", "COMMIT", "BEGIN", "ROLLBACK", "SET @@autocommit = 0", "COMMIT", "SET @@autocommit = 1",
+		"SET TRANSACTION ISOLATION LEVEL READ COMMITTED", "SET SESSION transaction_isolation = 'REPEATABLE-READ'"} {
+		mustExecConn(t, a, q)
+	}
+	if got := connStrings(t, a, "SELECT bal FROM acct WHERE id = 2"); fmt.Sprint(got) != "[7]" {
+		t.Fatalf("after leaving SERIALIZABLE: %v", got)
 	}
 }
 

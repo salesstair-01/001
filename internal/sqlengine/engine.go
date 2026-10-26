@@ -61,8 +61,11 @@ func registerVars() {
 func newSQLEngine(pro *Provider) *sqle.Engine {
 	a := analyzer.NewBuilder(pro).
 		AddPreAnalyzeRule(explicitLikeEscapeID, explicitLikeEscape).
-		AddPreAnalyzeRule(castLimitID, castLimit). // CAST(x AS BINARY(huge)) is NULL (castlimit.go)
-		AddPreAnalyzeRule(noFilesID, noFiles).     // no server-side file access (nofiles.go)
+		AddPreAnalyzeRule(castLimitID, castLimit).       // CAST(x AS BINARY(huge)) is NULL (castlimit.go)
+		AddPreAnalyzeRule(noFilesID, noFiles).           // no server-side file access (nofiles.go)
+		AddPreAnalyzeRule(ddlWarningsID, ddlWarnings).   // MySQL's deprecation warnings for column types (ddlwarn.go)
+		AddPreAnalyzeRule(distinctSortID, distinctSort). // DISTINCT ... ORDER BY 1 (distinctsort.go)
+		AddPostAnalyzeRule(intArithID, intArith).        // integer +, -, * with MySQL's types and range (intarith.go)
 		Build()
 	a.ExecBuilder = newExecBuilder() // UPDATE compares bytes, as MySQL does (exactupdate.go)
 	e := sqle.New(a, nil)

@@ -167,6 +167,10 @@ type Txn struct {
 	wrote  bool // any Mutate sent
 	dead   error
 	guards map[string][]byte // commit preconditions: schema versions of written tables
+	// refused, if set, is returned by the transaction's first KV access: the
+	// session asked for something the KV store can't provide (SERIALIZABLE).
+	// COMMIT, ROLLBACK and SET still work, as they touch no data.
+	refused error
 }
 
 // Guard adds a commit precondition: key's latest value must be value.
@@ -192,6 +196,9 @@ func (t *Txn) ID() kv.TxnID     { return t.id }
 func (t *Txn) ensure(ctx context.Context) (kvrpc.Header, error) {
 	if t.dead != nil {
 		return kvrpc.Header{}, t.dead
+	}
+	if t.refused != nil {
+		return kvrpc.Header{}, t.refused
 	}
 	if t.begun {
 		return kvrpc.Header{Partition: t.store.partition, Epoch: t.epoch, Background: t.background}, nil

@@ -4,6 +4,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"github.com/dolthub/go-mysql-server/sql/expression"
+	"github.com/dolthub/go-mysql-server/sql/expression/function"
 	"github.com/dolthub/go-mysql-server/sql/plan"
 	"github.com/dolthub/go-mysql-server/sql/transform"
 	"github.com/dolthub/go-mysql-server/sql/types"
@@ -23,7 +24,14 @@ func explicitLikeEscape(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scop
 		switch e := e.(type) {
 		case *expression.Like:
 			if e.Escape != nil {
-				return e, transform.SameTree, nil
+				if !isEmptyString(e.Escape) {
+					return e, transform.SameTree, nil
+				}
+				// ESCAPE '' means no escape character (go-mysql-server
+				// panicked on it): every backslash in the pattern is
+				// literal, as a doubled one is under the default escape.
+				pattern := function.NewReplace(e.RightChild, expression.NewLiteral(`\`, types.LongText), expression.NewLiteral(`\\`, types.LongText))
+				return expression.NewLike(e.LeftChild, pattern, expression.NewLiteral(`\`, types.LongText)), transform.NewTree, nil
 			}
 			return expression.NewLike(e.LeftChild, e.RightChild, expression.NewLiteral(`\`, types.LongText)), transform.NewTree, nil
 		case *plan.Subquery:
@@ -35,4 +43,13 @@ func explicitLikeEscape(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scop
 		}
 		return e, transform.SameTree, nil
 	})
+}
+
+func isEmptyString(e sql.Expression) bool {
+	l, ok := e.(*expression.Literal)
+	if !ok {
+		return false
+	}
+	v, ok := l.Value().(string)
+	return ok && v == ""
 }

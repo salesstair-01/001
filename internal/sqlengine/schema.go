@@ -720,11 +720,24 @@ type statsProvider struct {
 }
 
 func (p *statsProvider) AnalyzeTable(ctx *sql.Context, table sql.Table, db string) error {
-	if err := p.StatsProvider.AnalyzeTable(ctx, table, db); err != nil {
+	if err := p.histograms(ctx, table, db); err != nil {
 		return err
 	}
 	if t, ok := sql.GetUnderlyingTable(table).(*Table); ok {
 		return t.store.analyze(ctx, t.info)
 	}
 	return nil
+}
+
+// histograms runs go-mysql-server's sampling, which divides by zero on an
+// empty table and panics comparing []byte keys (BLOB, VARBINARY); found by
+// MySQL's test suite (issue #17). Such a table gets no histogram, as one
+// that was never analyzed, and its row count is still stored.
+func (p *statsProvider) histograms(ctx *sql.Context, table sql.Table, db string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = nil
+		}
+	}()
+	return p.StatsProvider.AnalyzeTable(ctx, table, db)
 }

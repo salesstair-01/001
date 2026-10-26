@@ -44,6 +44,7 @@ How it is checked:
 | Prepared statements | Binary protocol supported (tested with Go, mysql2 `execute()`, Connector/J `useServerPrepStmts=true`). The proxy keeps statements and runs them as text on the query engine, so a backend restart needs no re-prepare. |
 | Pings, `SELECT 1` | Answered by the proxy; they never wake compute. |
 | Results | Buffered whole at the proxy before sending (no row streaming); very large results cost proxy memory. |
+| OK packets | Info strings (`Rows matched: 2  Changed: 2  Warnings: 0`, `Statement prepared`) as MySQL writes them, and warning counts, through the proxy too. go-mysql-server writes no info for `INSERT`. |
 | Multi-statements | Supported (`CLIENT_MULTI_STATEMENTS`). |
 | Autocommit | The handshake announces autocommit on, as MySQL's does, so drivers that switch it off (PyMySQL, SQLAlchemy) send `SET autocommit = 0` and get implicit transactions. |
 
@@ -83,7 +84,7 @@ Not supported in v1 (statement fails with an error):
 | `LOAD DATA` | not supported |
 | Files on the server: `SELECT ... INTO OUTFILE` / `DUMPFILE`, `LOAD DATA INFILE`, `LOAD_FILE()` | 1290, as MySQL with `secure_file_priv = NULL`: a query engine serves many tenants |
 | `CAST(x AS BINARY(n))` with `n` over `max_allowed_packet` | NULL with warning 1301, as in MySQL (go-mysql-server allocated `n` bytes) |
-| SERIALIZABLE | `SET ... ISOLATION LEVEL SERIALIZABLE` is accepted, transactions at that level are refused |
+| SERIALIZABLE | `SET ... ISOLATION LEVEL SERIALIZABLE` is accepted; a statement that reads or writes data at that level fails, while `COMMIT`, `ROLLBACK` and `SET` (to change the level back) work |
 
 Accepted but different:
 
@@ -105,6 +106,12 @@ Accepted but different:
   join, are served from a per-statement read cache. Joins are planned by
   go-mysql-server; a many-table join without useful statistics can be planned
   as a large cross product (see `scripts/slt/README.md`).
+- Warnings: `SHOW WARNINGS` lists them in the order raised, as MySQL does.
+  `CREATE`/`ALTER TABLE` give MySQL's deprecation warnings (1681: integer
+  display widths, `ZEROFILL`, `FLOAT(M,D)`, `UNSIGNED` decimals and floats),
+  1831 for a duplicate index and note 1050 for `CREATE TABLE IF NOT EXISTS`
+  on an existing table. Other warnings MySQL gives are often missing
+  (issue #28).
 - Error codes: duplicate key 1062, lock wait timeout 1205, deadlock and
   schema-changed 1213, unknown table 1146, unknown database 1049; most other
   errors are 1105 with go-mysql-server's message.
@@ -164,8 +171,10 @@ Accepted but different:
     (`e < 'b'` means "declared before b"); MySQL compares the strings. `ORDER
     BY` on an ENUM is by index in both.
   - A `BIGINT UNSIGNED` compared with a string literal goes through float64,
-    so values within about 2^11 of 2^64 compare equal; integer literals and
-    parameters compare exactly.
+    so values within about 2^11 of 2^64 compare equal; integer literals
+    compare exactly. Integer `+`, `-` and `*` follow MySQL: unsigned if
+    either operand is, 1690 when out of range; `CAST(... AS SIGNED /
+    UNSIGNED)` of a string converts as MySQL does, with its warnings.
   - `ENUM ... LIKE` is always false.
   - A multi-table `UPDATE` (`UPDATE a JOIN b ... SET a.v = 'B'`) still skips
     a row whose new value equals the old one under the collation (`b` →

@@ -34,8 +34,12 @@ func newExecBuilder() sql.NodeExecBuilder {
 }
 
 // Build rewrites an UPDATE of a KV table and builds it with the default
-// builder; nil for every other node, which the default builder then builds.
+// builder, and lists SHOW WARNINGS in MySQL's order; nil for every other
+// node, which the default builder then builds.
 func (o *exactUpdates) Build(ctx *sql.Context, n sql.Node, row sql.Row) (sql.RowIter, error) {
+	if w, ok := n.(plan.ShowWarnings); ok {
+		return showWarnings(w), nil
+	}
 	u, ok := n.(*plan.Update)
 	if !ok {
 		return nil, nil
@@ -141,4 +145,14 @@ func isExact(sch sql.Schema) bool {
 		}
 	}
 	return true
+}
+
+// showWarnings lists warnings in the order they were raised, as MySQL does.
+// go-mysql-server's session returns them newest first.
+func showWarnings(w plan.ShowWarnings) sql.RowIter {
+	rows := make([]sql.Row, len(w))
+	for i, x := range w {
+		rows[len(w)-1-i] = sql.NewRow(x.Level, x.Code, x.Message)
+	}
+	return sql.RowsToRowIter(rows...)
 }

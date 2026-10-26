@@ -76,6 +76,7 @@ func newSQLEngine(pro *Provider) *sqle.Engine {
 	e.MemoryManager = newMemoryManager() // the memory budget (memlimit.go)
 	e.Analyzer.Catalog.StatsProvider = &statsProvider{StatsProvider: e.Analyzer.Catalog.StatsProvider}
 	pro.binder = e.Analyzer.Catalog
+	pro.runner = e
 	return e
 }
 

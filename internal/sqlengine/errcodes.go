@@ -38,7 +38,12 @@ var errCodes = []struct {
 	{regexp.MustCompile(`^Updating of (old|new) row is not allowed`), 1362, "HY000"},
 	{regexp.MustCompile(`^stored procedure ".*" does not exist`), 1305, "42000"},
 	{regexp.MustCompile(`^Result consisted of more than one row`), 1172, "42000"},
+	{regexp.MustCompile(`^Can't update table \S+ in stored function/trigger`), 1442, "HY000"},
 }
+
+// reMissingFunction is DropStoredProcedure's error for a stored function
+// (routines.go).
+var reMissingFunction = regexp.MustCompile(`^stored procedure "s2z_fn_(.*)" does not exist`)
 
 var (
 	errExecutionTime = mysql.NewSQLError(3024, "HY000", "Query execution was interrupted, maximum statement execution time exceeded")
@@ -53,6 +58,9 @@ func withMySQLCode(err error) error {
 	msg := err.Error()
 	if se != nil {
 		msg = se.Message
+	}
+	if m := reMissingFunction.FindStringSubmatch(msg); m != nil {
+		return mysql.NewSQLError(1305, "42000", "FUNCTION %s does not exist", m[1])
 	}
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || msg == context.DeadlineExceeded.Error():

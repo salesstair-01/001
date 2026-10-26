@@ -12,6 +12,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/mysql_db"
 	"github.com/dolthub/go-mysql-server/sql/plan"
 	"github.com/dolthub/vitess/go/mysql"
+	"github.com/dolthub/vitess/go/vt/sqlparser"
 
 	"github.com/salesstair-01/001/internal/encoding"
 	"github.com/salesstair-01/001/internal/kv"
@@ -27,7 +28,7 @@ import (
 // RoutineInfo is a stored trigger or procedure.
 type RoutineInfo struct {
 	DB         string    `json:"db"`
-	Kind       string    `json:"kind"` // "trigger" or "procedure"
+	Kind       string    `json:"kind"` // "trigger", "procedure" or "function"
 	Name       string    `json:"name"`
 	Create     string    `json:"create"`
 	SQLMode    string    `json:"sql_mode,omitempty"`
@@ -153,11 +154,16 @@ func procedureDetails(r *RoutineInfo) sql.StoredProcedureDetails {
 }
 
 func (d *Database) GetStoredProcedure(ctx *sql.Context, name string) (sql.StoredProcedureDetails, bool, error) {
-	r, err := d.cat.Routine(ctx, d.name, "procedure", name)
+	kind, name := routineKind(name)
+	r, err := d.cat.Routine(ctx, d.name, kind, name)
 	if err != nil || r == nil {
 		return sql.StoredProcedureDetails{}, false, err
 	}
-	return procedureDetails(r), true, nil
+	spd := procedureDetails(r)
+	if kind == "function" {
+		spd.Name = sqlparser.FunctionProcedurePrefix + spd.Name
+	}
+	return spd, true, nil
 }
 
 func (d *Database) GetStoredProcedures(ctx *sql.Context) ([]sql.StoredProcedureDetails, error) {
@@ -181,12 +187,28 @@ func (d *Database) SaveStoredProcedure(ctx *sql.Context, spd sql.StoredProcedure
 	if mod.IsZero() {
 		mod = at
 	}
-	return d.cat.CreateRoutine(ctx, &RoutineInfo{DB: d.name, Kind: "procedure", Name: spd.Name, Create: spd.CreateStatement,
-		SQLMode: spd.SqlMode, CreatedAt: at, ModifiedAt: mod}, mysql.NewSQLError(1304, "42000", "PROCEDURE %s already exists", spd.Name))
+	kind, name := routineKind(spd.Name)
+	return d.cat.CreateRoutine(ctx, &RoutineInfo{DB: d.name, Kind: kind, Name: name, Create: spd.CreateStatement,
+		SQLMode: spd.SqlMode, CreatedAt: at, ModifiedAt: mod}, mysql.NewSQLError(1304, "42000", "%s %s already exists", strings.ToUpper(kind), name))
 }
 
 func (d *Database) DropStoredProcedure(ctx *sql.Context, name string) error {
-	return d.cat.DropRoutine(ctx, d.name, "procedure", name, sql.ErrStoredProcedureDoesNotExist.New(name))
+	kind, bare := routineKind(name)
+	if kind == "function" {
+		// errcodes.go reports it as MySQL does, FUNCTION db.f
+		name = sqlparser.FunctionProcedurePrefix + d.name + "." + bare
+	}
+	return d.cat.DropRoutine(ctx, d.name, kind, bare, sql.ErrStoredProcedureDoesNotExist.New(name))
+}
+
+// routineKind is where a procedure name is stored: a stored function is
+// stored as the procedure s2z_fn_<name> (the grammar's rewrite,
+// third_party/vitess), which is kept as the function <name>.
+func routineKind(name string) (kind, bare string) {
+	if f, ok := strings.CutPrefix(strings.ToLower(name), sqlparser.FunctionProcedurePrefix); ok {
+		return "function", f
+	}
+	return "procedure", name
 }
 
 // allPrivileges is every session's privilege set: sqld has no grant tables

@@ -487,7 +487,7 @@ func (c *Catalog) DropDatabase(ctx context.Context, name string) error {
 		return err
 	}
 	var routines []*RoutineInfo
-	for _, kind := range []string{"trigger", "procedure"} {
+	for _, kind := range []string{"trigger", "procedure", "function"} {
 		rs, err := c.Routines(ctx, name, kind)
 		if err != nil {
 			return err

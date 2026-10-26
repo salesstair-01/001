@@ -522,6 +522,7 @@ var keywords = map[string]int{
 	"resource_group_user":           RESOURCE_GROUP_USER,
 	"restrict":                      RESTRICT,
 	"return":                        RETURN,
+	"returns":                       RETURNS, // s2z patch
 	"reuse":                         REUSE,
 	"revoke":                        REVOKE,
 	"right":                         RIGHT,

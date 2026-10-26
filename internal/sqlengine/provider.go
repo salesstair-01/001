@@ -13,7 +13,8 @@ import (
 type Provider struct {
 	def *Store // tenant for contexts without a Session (single-tenant engines); may be nil
 
-	binder sql.Catalog // the analyzer's, to bind stored triggers (triggercheck.go)
+	binder sql.Catalog         // the analyzer's, to bind stored triggers (triggercheck.go)
+	runner sql.StatementRunner // the engine, to run stored functions (storedfunc.go)
 }
 
 var (

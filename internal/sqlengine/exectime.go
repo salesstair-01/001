@@ -30,6 +30,9 @@ func (b rootBuilder) Build(ctx *sql.Context, n sql.Node, row sql.Row) (sql.RowIt
 			context.AfterFunc(ctx.Context, cancel)
 		}
 	}
+	if err := checkFuncWrites(n); err != nil {
+		return nil, err // storedfunc.go
+	}
 	return b.NodeExecBuilder.Build(ctx, n, row)
 }
 

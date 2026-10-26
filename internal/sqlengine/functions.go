@@ -28,9 +28,11 @@ var overrides = map[string]sql.Function{
 
 var _ sql.FunctionProvider = (*Provider)(nil)
 
-func (p *Provider) Function(_ *sql.Context, name string) (sql.Function, bool) {
-	f, ok := overrides[strings.ToLower(name)]
-	return f, ok
+func (p *Provider) Function(ctx *sql.Context, name string) (sql.Function, bool) {
+	if f, ok := overrides[strings.ToLower(name)]; ok {
+		return f, true
+	}
+	return p.storedFunction(ctx, name) // storedfunc.go
 }
 
 // inet6Aton is NULL for an argument that is not a string, as in MySQL

@@ -58,3 +58,64 @@ func typedLiteral(e Expr) Expr {
 		Exprs: SelectExprs{&AliasedExpr{Expr: &SQLVal{Type: v.Type, Val: v.Val}}},
 	}
 }
+
+// Stored functions (s2z patch): CREATE FUNCTION f(a INT) RETURNS T body is
+// stored and run as the procedure s2z_fn_f(IN a INT, OUT s2z_ret T), whose
+// body is s2z_fn: BEGIN body END with each RETURN e turned into
+// BEGIN SET s2z_ret = e; LEAVE s2z_fn; END. sqld calls it where f(...) is
+// used. go-mysql-server 0.20 has no stored functions.
+const (
+	FunctionProcedurePrefix = "s2z_fn_"
+	FunctionReturnParam     = "s2z_ret"
+	functionBodyLabel       = "s2z_fn"
+)
+
+func functionAsProcedure(name ProcedureName, definer string, params []ProcedureParam, ret ColumnType, chars []Characteristic, body Statement) *ProcedureSpec {
+	name.Name = NewColIdent(FunctionProcedurePrefix + name.Name.String())
+	params = append(append([]ProcedureParam(nil), params...), ProcedureParam{Direction: ProcedureParamDirection_Out, Name: FunctionReturnParam, Type: ret})
+	return &ProcedureSpec{
+		ProcName:        name,
+		Definer:         definer,
+		Params:          params,
+		Characteristics: chars,
+		Body:            &BeginEndBlock{Label: functionBodyLabel, Statements: Statements{rewriteReturns(body)}},
+	}
+}
+
+func rewriteReturns(s Statement) Statement {
+	each := func(ss Statements) {
+		for i := range ss {
+			ss[i] = rewriteReturns(ss[i])
+		}
+	}
+	switch n := s.(type) {
+	case *Return:
+		return &BeginEndBlock{Statements: Statements{
+			&Set{Exprs: SetVarExprs{&SetVarExpr{Scope: SetScope_None, Name: &ColName{Name: NewColIdent(FunctionReturnParam)}, Expr: n.Expr}}},
+			&Leave{Label: functionBodyLabel},
+		}}
+	case *BeginEndBlock:
+		each(n.Statements)
+	case *IfStatement:
+		for i := range n.Conditions {
+			each(n.Conditions[i].Statements)
+		}
+		each(n.Else)
+	case *CaseStatement:
+		for i := range n.Cases {
+			each(n.Cases[i].Statements)
+		}
+		each(n.Else)
+	case *Loop:
+		each(n.Statements)
+	case *While:
+		each(n.Statements)
+	case *Repeat:
+		each(n.Statements)
+	case *Declare:
+		if n.Handler != nil {
+			n.Handler.Statement = rewriteReturns(n.Handler.Statement)
+		}
+	}
+	return s
+}

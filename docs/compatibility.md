@@ -77,7 +77,16 @@ when it fires (1054), as in MySQL, and `SHOW CREATE TRIGGER` then shows a
 stand-in body; triggers don't fire for `REPLACE` and `INSERT ... ON
 DUPLICATE KEY UPDATE`'s update. A procedure returns only its last result
 set; handlers for SQLWARNING, an SQLSTATE or an error number are not
-supported. CHECK constraints are
+supported. Stored functions (`CREATE FUNCTION f(...) RETURNS type body`,
+`DROP FUNCTION`) are stored as a procedure with an OUT parameter for the
+value and called through it, in expressions, triggers and procedures; a
+built-in of the same name wins, as in MySQL, and a recursive call (1424),
+a wrong number of arguments (1318) and a write to a table the calling
+statement uses (1442) fail as in MySQL. They are not listed by `SHOW
+FUNCTION STATUS` or `information_schema.routines`, and `SHOW CREATE
+FUNCTION` and `ALTER FUNCTION` are not supported; `RETURNS INT (SELECT
+...)`, a body that starts with a parenthesis right after the type, needs a
+BEGIN ... END. CHECK constraints are
 enforced on INSERT and UPDATE (3819), named `<table>_chk_<n>` when unnamed,
 unique per database (3822), `NOT ENFORCED` honored, added and dropped with
 `ALTER TABLE ... ADD CONSTRAINT/DROP CHECK` (3821 for an unknown name), and
@@ -88,7 +97,7 @@ Not supported in v1 (statement fails with an error):
 
 | feature | error |
 |---|---|
-| Events, stored functions (`CREATE FUNCTION`) | refused by go-mysql-server 0.20 |
+| Events (`CREATE EVENT`) | refused by go-mysql-server 0.20 |
 | Savepoints | 1235 `savepoints are not supported in v1` |
 | FULLTEXT indexes | refused by go-mysql-server (its error text is garbled: `tables cannot be created on database %!s(MISSING)`) |
 | Spatial types | `spatial types are not supported in v1` |

@@ -237,6 +237,14 @@ func (is *InterpreterStack) SetVariable(name string, val any) error {
 	if iv == nil {
 		return fmt.Errorf("variable `%s` could not be found", name)
 	}
+	// s2z patch: a value takes the variable's declared type, as in MySQL
+	// (SELECT SUM(x) INTO an INT variable kept the float, which ToAST
+	// wrote back as an invalid integer).
+	if _, isAST := val.(ast.Expr); !isAST && val != nil && iv.Type != nil {
+		if cv, _, err := iv.Type.Convert(sql.NewEmptyContext(), val); err == nil {
+			val = cv
+		}
+	}
 	iv.Value = val
 	iv.HasBeenSet = true
 	return nil

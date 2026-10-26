@@ -145,6 +145,10 @@ func tryCastStatement(v interface{}) Statement {
 %right <bytes> UNDERSCORE_UJIS UNDERSCORE_UTF16 UNDERSCORE_UTF16LE UNDERSCORE_UTF32 UNDERSCORE_UTF8 UNDERSCORE_UTF8MB3 UNDERSCORE_UTF8MB4
 %right <bytes> INTERVAL
 %nonassoc <bytes> '.'
+// s2z patch: CREATE FUNCTION ... RETURNS INT (SELECT ...): a '(' after a
+// column type is its length, never the start of the body.
+%nonassoc LOWER_THAN_PAREN
+%nonassoc '('
 
 // There is no need to define precedence for the JSON
 // operators because the syntax is restricted enough that
@@ -176,6 +180,7 @@ func tryCastStatement(v interface{}) Statement {
 // Stored Procedure Tokens
 %token <bytes> DECLARE CONDITION CURSOR CONTINUE EXIT UNDO HANDLER FOUND SQLWARNING SQLEXCEPTION FETCH OPEN CLOSE
 %token <bytes> LOOP LEAVE ITERATE REPEAT UNTIL WHILE DO RETURN
+%token <bytes> RETURNS // s2z patch: CREATE FUNCTION ... RETURNS
 
 // Permissions Tokens
 %token <bytes> USER IDENTIFIED ROLE REUSE GRANT GRANTS REVOKE NONE ATTRIBUTE RANDOM PASSWORD INITIAL AUTHENTICATION
@@ -1393,6 +1398,27 @@ create_statement:
         AuthType: AuthType_TRIGGER,
         TargetType: AuthTargetType_SingleTableIdentifier,
         TargetNames: []string{tableName.DbQualifier.String(), tableName.Name.String()},
+      },
+    }
+  }
+| CREATE definer_opt FUNCTION not_exists_opt procedure_name '(' proc_param_list_opt ')' RETURNS column_type charset_opt collate_opt characteristic_list_opt lexer_old_position special_comment_mode statement_list_statement lexer_position
+  {
+    // s2z patch: a stored function is stored and run as a procedure (see
+    // functionAsProcedure); go-mysql-server 0.20 has no stored functions.
+    procName := $5.(ProcedureName)
+    retType := $10.(ColumnType)
+    retType.Charset = $11.(string)
+    retType.Collate = $12.(string)
+    $$ = &DDL{
+      Action: CreateStr,
+      ProcedureSpec: functionAsProcedure(procName, $2.(string), $7.([]ProcedureParam), retType, $13.([]Characteristic), tryCastStatement($16)),
+      SpecialCommentMode: $15.(bool),
+      SubStatementPositionStart: $14.(int),
+      SubStatementPositionEnd: $17.(int) - 1,
+      Auth: AuthInformation{
+        AuthType: AuthType_CREATE_ROUTINE,
+        TargetType: AuthTargetType_DatabaseIdentifiers,
+        TargetNames: []string{procName.Qualifier.String()},
       },
     }
   }
@@ -3824,7 +3850,7 @@ char_type:
   {
     $$ = ColumnType{Type: string($1), Length: $2.(*SQLVal)}
   }
-| TEXT
+| TEXT %prec LOWER_THAN_PAREN
   {
     $$ = ColumnType{Type: string($1)}
   }
@@ -3858,7 +3884,7 @@ char_type:
   {
     $$ = ColumnType{Type: string($1) + " " + string($2)}
   }
-| BLOB
+| BLOB %prec LOWER_THAN_PAREN
   {
     $$ = ColumnType{Type: string($1)}
   }
@@ -3934,6 +3960,7 @@ enum_values:
   }
 
 length_opt:
+  %prec LOWER_THAN_PAREN
   {
     $$ = (*SQLVal)(nil)
   }
@@ -3943,6 +3970,7 @@ length_opt:
   }
 
 char_length_opt:
+  %prec LOWER_THAN_PAREN
   {
     $$ = (*SQLVal)(nil)
   }
@@ -3956,6 +3984,7 @@ char_length_opt:
   }
 
 float_length_opt:
+  %prec LOWER_THAN_PAREN
   {
     $$ = LengthScaleOption{}
   }
@@ -3968,6 +3997,7 @@ float_length_opt:
   }
 
 decimal_length_opt:
+  %prec LOWER_THAN_PAREN
   {
     $$ = LengthScaleOption{}
   }
@@ -6735,6 +6765,24 @@ drop_statement:
         AuthType: AuthType_TRIGGER,
         TargetType: AuthTargetType_SingleTableIdentifier,
         TargetNames: []string{triggerName.Qualifier.String(), triggerName.Name.String()},
+      },
+    }
+  }
+| DROP FUNCTION exists_opt procedure_name
+  {
+    // s2z patch: drops the procedure that runs the function
+    procName := $4.(ProcedureName)
+    procName.Name = NewColIdent(FunctionProcedurePrefix + procName.Name.String())
+    $$ = &DDL{
+      Action: DropStr,
+      ProcedureSpec: &ProcedureSpec{
+        ProcName: procName,
+      },
+      IfExists: $3.(int) != 0,
+      Auth: AuthInformation{
+        AuthType: AuthType_ALTER_ROUTINE,
+        TargetType: AuthTargetType_DatabaseIdentifiers,
+        TargetNames: []string{procName.Qualifier.String()},
       },
     }
   }
@@ -11411,6 +11459,7 @@ qualified_column_name_safe_reserved_keyword:
 */
 non_reserved_keyword:
   ACTION
+| RETURNS // s2z patch
 | ACTIVE
 | ADMIN
 | AFTER

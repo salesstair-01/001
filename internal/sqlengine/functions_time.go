@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/expression/function"
 	"github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/mysql"
 	"github.com/shopspring/decimal"
@@ -15,7 +16,7 @@ import (
 
 // Temporal functions go-mysql-server 0.20 lacks or gets wrong (issue #25):
 // ADDTIME, SUBTIME, TIMEDIFF, TIME_TO_SEC, SEC_TO_TIME, MAKETIME, MAKEDATE,
-// PERIOD_ADD, PERIOD_DIFF, UTC_DATE and UTC_TIME. A TIME result is returned
+// PERIOD_ADD, PERIOD_DIFF, UTC_DATE, UTC_TIME and TIMESTAMP(expr, time). A TIME result is returned
 // as MySQL prints it, with the fractional digits its arguments give
 // (go-mysql-server's TIME has no precision), so it is typed as text.
 
@@ -35,6 +36,47 @@ func init() {
 	} {
 		overrides[name] = f
 	}
+	ts2 := fnN("timestamp", 2, 2, fixedType(types.LongText), false, evalTimestamp2)
+	overrides["timestamp"] = sql.FunctionN{Name: "timestamp", Fn: func(args ...sql.Expression) (sql.Expression, error) {
+		if len(args) == 2 {
+			return ts2.NewInstance(args)
+		}
+		return function.NewDatetime(args...)
+	}}
+}
+
+// evalTimestamp2 is TIMESTAMP(expr, time): expr as a DATETIME plus the
+// time (go-mysql-server has only the one-argument form).
+func evalTimestamp2(ctx *sql.Context, args []sql.Expression, v []any) (any, error) {
+	a, ok := toTemporal(ctx, args[0], v[0])
+	if s, isStr := v[0].(string); isStr && (!ok || !a.isDT) {
+		t, _, err := types.DatetimeMaxPrecision.Convert(ctx, s)
+		if err != nil {
+			return nil, nil
+		}
+		a, ok = temporal{isDT: true, dt: t.(time.Time), text: true}, true
+	}
+	if !ok || !a.isDT {
+		return nil, nil
+	}
+	b, ok := toTemporal(ctx, args[1], v[1])
+	if !ok || b.isDT {
+		return nil, nil
+	}
+	// a string shows the fractional digits it has, unlike ADDTIME's
+	for i, t := range []*temporal{&a, &b} {
+		if s, isStr := v[i].(string); isStr {
+			t.text, t.scale = false, 0
+			if _, f, ok := strings.Cut(strings.TrimSpace(s), "."); ok {
+				t.scale = min(6, len(f))
+			}
+		}
+	}
+	t := a.dt.Add(time.Duration(b.us) * time.Microsecond)
+	if !validDatetime(t) {
+		return nil, nil
+	}
+	return formatDatetime(t, resultScale(int64(t.Nanosecond())/1000, a, b)), nil
 }
 
 const (

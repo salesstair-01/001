@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dolthub/vitess/go/mysql"
@@ -56,6 +57,9 @@ type session struct {
 	inTxn     bool   // the backend reported SERVER_STATUS_IN_TRANS
 	pinned    string // why the backend may not be released ("" = it may)
 	lastUsed  time.Time
+	// warnings is the last statement's warning count, for the OK and EOF
+	// packets (read by WarningCount while the session is locked).
+	warnings atomic.Uint32
 	// coldStart is when the statement that opened the current backend began;
 	// the statement's result records the cold-start latency.
 	coldStart  time.Time
@@ -283,7 +287,16 @@ func (p *Proxy) ComStmtExecute(ctx context.Context, c *mysql.Conn, prepare *mysq
 	return callback(res)
 }
 
-func (p *Proxy) WarningCount(*mysql.Conn) uint16 { return 0 }
+// WarningCount is the backend's warning count for the last statement.
+func (p *Proxy) WarningCount(c *mysql.Conn) uint16 {
+	p.mu.Lock()
+	s := p.sessions[c.ConnectionID]
+	p.mu.Unlock()
+	if s == nil {
+		return 0
+	}
+	return uint16(s.warnings.Load())
+}
 
 func (p *Proxy) ComResetConnection(c *mysql.Conn) error {
 	s, err := p.session(c)
@@ -316,6 +329,7 @@ func oneRow() *sqltypes.Result {
 // run executes one statement for a session; s.mu is held.
 func (p *Proxy) run(ctx context.Context, c *mysql.Conn, s *session, query string) (*sqltypes.Result, error) {
 	s.lastUsed = time.Now()
+	s.warnings.Store(0)
 	if pingQuery.MatchString(query) {
 		return oneRow(), nil
 	}
@@ -423,10 +437,14 @@ func (p *Proxy) forward(ctx context.Context, c *mysql.Conn, s *session, query st
 	if err := p.ensureBackend(ctx, s); err != nil {
 		return nil, err
 	}
-	res, status, err := s.backend.conn.ExecuteFetchMulti(ctx, query, 1<<30, true)
+	if err := s.backend.conn.WriteComQuery(query); err != nil {
+		return nil, p.backendErr(s, err)
+	}
+	res, status, warnings, err := s.backend.conn.ReadQueryResult(ctx, 1<<30, true)
 	if err != nil {
 		return nil, p.backendErr(s, err)
 	}
+	s.warnings.Store(uint32(warnings))
 	s.inTxn = uint16(status)&mysql.ServerInTransaction != 0
 	c.StatusFlags = uint16(status) & (mysql.ServerInTransaction | mysql.ServerStatusAutocommit)
 	s.lastUsed = time.Now()

@@ -23,7 +23,7 @@ jobs:
             ~/.cargo/git
             kvd-rs/target
           key: kvd-rs-${{ hashFiles('kvd-rs/Cargo.lock') }}
-      - run: test -z "$(gofmt -l .)" || (gofmt -l . && false)
+      - run: test -z "$(gofmt -l $(git ls-files '*.go' | grep -v '^third_party/'))" || (gofmt -l $(git ls-files '*.go' | grep -v '^third_party/') && false)
       - run: go vet ./...
       - run: (cd kvd-rs && cargo fmt --check)
       - name: the MySQL test-suite runner's own tests (mtr)
@@ -33,6 +33,8 @@ jobs:
       # The Go tests run kvd on a local store directory (internal/kvtest).
       - run: make kvd
       - run: go test -race -timeout 20m ./...
+      - name: the vendored vitess's protocol and parser tests (third_party)
+        run: cd third_party/vitess/go && go test ./mysql ./vt/sqlparser
 
   owner:
     name: owner fault injection (200 seeds), metamorphic test (100 seeds), SlateDB's tests

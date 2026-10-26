@@ -1,0 +1,25 @@
+name: check_make_parser
+on: [push, pull_request]
+jobs:
+
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    steps:
+
+    - name: Check out code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+
+    - name: Get dependencies
+      run: |
+        go mod download
+
+    - name: check_make_parser
+      run: |
+        tools/check_make_parser.sh
+

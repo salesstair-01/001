@@ -209,6 +209,21 @@ func (b *BaseBuilder) buildCall(ctx *sql.Context, n *plan.Call, row sql.Row) (sq
 		}, nil
 	}
 
+	// s2z patch: parameters live in the session by name; a routine's
+	// parameter takes its own type (it kept the type of the last routine
+	// with a parameter of that name), and the caller's parameters of the
+	// same names are as they were once the call returns.
+	type savedParam struct {
+		spp *sql.StoredProcParam
+		was sql.StoredProcParam
+	}
+	var saved []savedParam
+	defer func() {
+		for _, sp := range saved {
+			*sp.spp = sp.was
+		}
+	}()
+
 	// Initialize parameters
 	for i, paramExpr := range n.Params {
 		param := n.Procedure.Params[i]
@@ -221,6 +236,10 @@ func (b *BaseBuilder) buildCall(ctx *sql.Context, n *plan.Call, row sql.Row) (sq
 			return nil, err
 		}
 		paramName := strings.ToLower(param.Name)
+		if spp := ctx.Session.GetStoredProcParam(paramName); spp != nil {
+			saved = append(saved, savedParam{spp: spp, was: *spp})
+			spp.Type = param.Type
+		}
 		for spp := ctx.Session.GetStoredProcParam(paramName); spp != nil; {
 			spp.Value = paramVal
 			if spp.Reference == spp {

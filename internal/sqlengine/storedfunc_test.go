@@ -40,6 +40,14 @@ func TestStoredFunctions(t *testing.T) {
 		{"DROP FUNCTION add1", "ERR 1305"},
 		{"DROP FUNCTION IF EXISTS add1", "[]"},
 		{"SELECT add1(1)", "ERR 1305"},
+		// routines with parameters of the same name keep their own types and
+		// values (they took the last routine's)
+		{"CREATE FUNCTION p1d (par1 decimal(18,2)) RETURNS decimal(18,2) RETURN par1", "[]"},
+		{"CREATE FUNCTION p1i (par1 int) RETURNS int RETURN par1 + 1", "[]"},
+		{"SELECT p1i(1), p1d(1.5), p1i(1)", "[2,1.50,2]"},
+		{"CREATE PROCEDURE p1s (par1 varchar(5), OUT r varchar(10)) SET r = concat(par1, '!')", "[]"},
+		{"CREATE PROCEDURE p1o (par1 int) BEGIN CALL p1s('ab', @r); SELECT @r, par1 + 1, p1i(par1); END", "[]"},
+		{"CALL p1o(41)", "[ab!,42,42]"},
 	} {
 		if got := connRun(t, conn, s.q); got != s.want {
 			t.Errorf("%s: got %s, want %s", s.q, got, s.want)

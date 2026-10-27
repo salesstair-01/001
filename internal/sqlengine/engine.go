@@ -3,6 +3,7 @@ package sqlengine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	sqle "github.com/dolthub/go-mysql-server"
@@ -55,7 +56,57 @@ func registerVars() {
 			c.Default = sql.Collation_utf8mb4_0900_ai_ci.Name()
 			sql.SystemVariables.AddSystemVariables([]sql.SystemVariable{&c})
 		}
+		// MySQL warns (3135) when strict mode and NO_ZERO_DATE,
+		// NO_ZERO_IN_DATE and ERROR_FOR_DIVISION_BY_ZERO are not set
+		// together, all or none of them.
+		if v, _, ok := sql.SystemVariables.GetGlobal("sql_mode"); ok {
+			if mv, isMy := v.(*sql.MysqlSystemVariable); isMy {
+				c := *mv
+				// MySQL 8's default; go-mysql-server's lacks the three modes
+				// (which it does not act on)
+				c.Default = "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"
+				prev := c.NotifyChanged
+				c.NotifyChanged = func(ctx *sql.Context, scope sql.SystemVariableScope, val sql.SystemVarValue) error {
+					if prev != nil {
+						if err := prev(ctx, scope, val); err != nil {
+							return err
+						}
+					}
+					mode, ok := val.Val.(string)
+					if bits, isBits := val.Val.(uint64); isBits {
+						if st, isSet := c.Type.(interface{ BitsToString(uint64) (string, error) }); isSet {
+							mode, _ = st.BitsToString(bits)
+							ok = true
+						}
+					}
+					if ok && !sqlModeCoherent(mode) {
+						ctx.Warn(3135, "%s", warnStrictModes)
+					}
+					return nil
+				}
+				sql.SystemVariables.AddSystemVariables([]sql.SystemVariable{&c})
+			}
+		}
 	})
+}
+
+const warnStrictModes = "'NO_ZERO_DATE', 'NO_ZERO_IN_DATE' and 'ERROR_FOR_DIVISION_BY_ZERO' sql modes should be used with strict mode. They will be merged with strict mode in a future release."
+
+// sqlModeCoherent is whether strict mode and the three modes MySQL means to
+// merge into it are all set, or none is.
+func sqlModeCoherent(mode string) bool {
+	has := map[string]bool{}
+	for _, m := range strings.Split(strings.ToUpper(mode), ",") {
+		has[strings.TrimSpace(m)] = true
+	}
+	strict := has["STRICT_TRANS_TABLES"] || has["STRICT_ALL_TABLES"] || has["TRADITIONAL"]
+	n := 0
+	for _, m := range []string{"NO_ZERO_DATE", "NO_ZERO_IN_DATE", "ERROR_FOR_DIVISION_BY_ZERO"} {
+		if has[m] || has["TRADITIONAL"] {
+			n++
+		}
+	}
+	return (strict && n == 3) || (!strict && n == 0)
 }
 
 func newSQLEngine(pro *Provider) *sqle.Engine {

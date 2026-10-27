@@ -34,7 +34,7 @@ type Table struct {
 	// fulltext are the FULLTEXT indexes (fulltext.go), which writers
 	// maintain through go-mysql-server's tables, not as KV entries.
 	fulltext []*fulltextIndex
-	autoOrd int // ordinal of the AUTO_INCREMENT column, or -1
+	autoOrd  int // ordinal of the AUTO_INCREMENT column, or -1
 	// instantAdd marks the table object of an ADD COLUMN statement after the
 	// column was added: it reads no rows and writes nothing (see AddColumn).
 	instantAdd bool
@@ -145,7 +145,6 @@ func (t *Table) pkKey(ctx context.Context, row sql.Row) ([]byte, error) {
 	}
 	return k, nil
 }
-
 
 // encodeRow encodes a row in row format v2, every column included (D3).
 func (t *Table) encodeRow(ctx context.Context, row sql.Row) ([]byte, error) {
@@ -569,7 +568,7 @@ func (e *editor) StatementComplete(ctx *sql.Context) error {
 	e.checkpointed = true
 	return e.flush(ctx)
 }
-func (e *editor) Close(ctx *sql.Context) error             { return e.flush(ctx) }
+func (e *editor) Close(ctx *sql.Context) error { return e.flush(ctx) }
 
 func (e *editor) flush(ctx *sql.Context) error {
 	if len(e.buf) == 0 {

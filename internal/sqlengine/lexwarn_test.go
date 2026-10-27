@@ -48,6 +48,12 @@ func TestLexWarnings(t *testing.T) {
 		{"SET @a = 1, @b := 2", ""},
 		{"SELECT SQL_CALC_FOUND_ROWS 1", "1287"},
 		{"SELECT FOUND_ROWS()", "1287"},
+		{"SET SQL_MODE='NO_ZERO_DATE'", "3135"},
+		{"SET SQL_MODE='STRICT_TRANS_TABLES'", "3135"},
+		{"SET SQL_MODE=''", ""},
+		{"SET SQL_MODE='TRADITIONAL'", ""},
+		{"SET SQL_MODE='ERROR_FOR_DIVISION_BY_ZERO,NO_ZERO_IN_DATE'", "3135"},
+		{"SET SQL_MODE=DEFAULT", ""},
 		// duplicate keys skipped by INSERT IGNORE: MySQL's text
 		{"CREATE TABLE dup (a int PRIMARY KEY)", ""},
 		{"INSERT IGNORE INTO dup VALUES (1), (1)", "1062"},

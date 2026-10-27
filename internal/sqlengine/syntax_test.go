@@ -51,6 +51,7 @@ func TestMySQLSyntax(t *testing.T) {
 		{"DELETE LOW_PRIORITY FROM d1 WHERE a = 2", "[]"},
 		{"DELETE LOW_PRIORITY IGNORE d1 FROM d1 WHERE a = 3", "[]"},
 		{"SELECT COUNT(*) FROM d1", "[0]"},
+		{"CREATE TABLE p1 (a int) PARTITION BY LIST (a) (PARTITION x1 VALUES IN (2,5), PARTITION x2 VALUES IN (3))", "[]"},
 		// columns of NULLs and of user variables take MySQL's types (a NULL
 		// column made the table unreadable)
 		{"SET @a := 1, @b := 'x', @c := 1.5, @d := NULL, @e := 1e3", "[]"},

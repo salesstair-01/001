@@ -6497,6 +6497,10 @@ partition_definition:
   {
     $$ = &PartitionDefinition{Name: $2.(ColIdent), Maxvalue: true}
   }
+| PARTITION sql_id VALUES IN openb expression_list closeb // s2z patch: LIST partitions, accepted (tables are not partitioned)
+  {
+    $$ = &PartitionDefinition{Name: $2.(ColIdent)}
+  }
 
 alter_event_statement:
   ALTER definer_opt EVENT event_name event_on_completion_preserve_opt rename_event_name_opt event_status_opt comment_keyword_opt

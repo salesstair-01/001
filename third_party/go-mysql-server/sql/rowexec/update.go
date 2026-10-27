@@ -90,6 +90,12 @@ func (u *updateIter) Next(ctx *sql.Context) (sql.Row, error) {
 // Applies the update expressions given to the row given, returning the new resultant row. In the case that ignore is
 // provided and there is a type conversion error, this function sets the value to the zero value as per the MySQL standard.
 func applyUpdateExpressionsWithIgnore(ctx *sql.Context, updateExprs []sql.Expression, tableSchema sql.Schema, row sql.Row, ignore bool) (sql.Row, error) {
+	return applyUpdateExpressionsWithIgnoreRow(ctx, updateExprs, tableSchema, row, ignore, 1)
+}
+
+// applyUpdateExpressionsWithIgnoreRow is applyUpdateExpressionsWithIgnore
+// for row number rowNum of the statement (s2z patch: MySQL's warnings).
+func applyUpdateExpressionsWithIgnoreRow(ctx *sql.Context, updateExprs []sql.Expression, tableSchema sql.Schema, row sql.Row, ignore bool, rowNum int) (sql.Row, error) {
 	var secondPass []int
 
 	for i, updateExpr := range updateExprs {
@@ -111,7 +117,7 @@ func applyUpdateExpressionsWithIgnore(ctx *sql.Context, updateExprs []sql.Expres
 
 			cpy := row.Copy()
 			cpy[wtce.OffendingIdx] = wtce.OffendingVal // Needed for strings
-			val = convertDataAndWarn(ctx, tableSchema, cpy, wtce.OffendingIdx, wtce.Err)
+			val = convertDataAndWarnRow(ctx, tableSchema, cpy, wtce.OffendingIdx, wtce.Err, rowNum)
 		}
 		var ok bool
 		row, ok = val.(sql.Row)

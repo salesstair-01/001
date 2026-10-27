@@ -57,3 +57,31 @@ func TestLexWarnings(t *testing.T) {
 		}
 	}
 }
+
+// TestIgnoreWarnings pins the warnings INSERT and UPDATE give for values
+// they adjust to a column, against MySQL 8.0.46.
+func TestIgnoreWarnings(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE w1 (a tinyint, b varchar(3), c enum('x','y'), d decimal(5,2), e int)", "[]"},
+		{"INSERT IGNORE INTO w1 VALUES (300, 'abcdef', 'z', 1.234, 1)", "[]"},
+		{"SHOW WARNINGS", "[Warning,1264,Out of range value for column 'a' at row 1 Warning,1265,Data truncated for column 'b' at row 1 Warning,1265,Data truncated for column 'c' at row 1 Note,1265,Data truncated for column 'd' at row 1]"},
+		{"INSERT IGNORE INTO w1 (e) VALUES (1), ('abc')", "[]"},
+		{"SHOW WARNINGS", "[Warning,1366,Incorrect integer value: 'abc' for column 'e' at row 2]"},
+		{"INSERT INTO w1 (d) VALUES (10.0/3)", "[]"},
+		{"SHOW WARNINGS", "[Note,1265,Data truncated for column 'd' at row 1]"},
+		{"INSERT INTO w1 (d) VALUES (1.5)", "[]"},
+		{"SHOW WARNINGS", "[]"},
+		{"UPDATE IGNORE w1 SET b = 'toolong' WHERE e = 1", "[]"},
+		{"SHOW WARNINGS", "[Warning,1265,Data truncated for column 'b' at row 1 Warning,1265,Data truncated for column 'b' at row 2]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}

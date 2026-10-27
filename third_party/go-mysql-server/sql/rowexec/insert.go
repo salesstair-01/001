@@ -49,6 +49,10 @@ type insertIter struct {
 	firstGeneratedAutoIncRowIdx int
 
 	deferredDefaults sql.FastIntSet
+
+	// rowNum is the number of the row being inserted, from 1, for MySQL's
+	// warnings (s2z patch)
+	rowNum int
 }
 
 func getInsertExpressions(values sql.Node) []sql.Expression {
@@ -69,6 +73,7 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 	if err == io.EOF {
 		return nil, err
 	}
+	i.rowNum++
 
 	if err != nil {
 		return nil, i.ignoreOrClose(ctx, row, err)
@@ -100,6 +105,9 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 			if cErr == nil && !inRange {
 				cErr = sql.ErrValueOutOfRange.New(row[idx], col.Type)
 			}
+			if cErr == nil {
+				noteDecimalRounding(ctx, col, row[idx], converted, i.rowNum) // s2z patch
+			}
 			if cErr != nil {
 				// Ignore individual column errors when INSERT IGNORE, UPDATE IGNORE, etc. is specified.
 				// For JSON column types, always throw an error. MySQL throws the following error even when
@@ -108,18 +116,15 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 				// 'table.column'.
 				if i.ignore && col.Type.Type() != query.Type_JSON {
 					if _, ok := col.Type.(sql.NumberType); ok {
+						orig := row[idx]
 						if converted == nil {
 							converted = i.schema[idx].Type.Zero()
 						}
 						row[idx] = converted
-						// Add a warning instead
-						ctx.Session.Warn(&sql.Warning{
-							Level:   "Note",
-							Code:    sql.CastSQLError(cErr).Num,
-							Message: cErr.Error(),
-						})
+						// Add a warning instead (s2z patch: MySQL's)
+						ctx.Session.Warn(ignoreWarning(col, orig, cErr, i.rowNum))
 					} else {
-						row = convertDataAndWarn(ctx, i.schema, row, idx, cErr)
+						row = convertDataAndWarnRow(ctx, i.schema, row, idx, cErr, i.rowNum)
 					}
 					continue
 				} else {
@@ -338,6 +343,13 @@ func (i *insertIter) ignoreOrClose(ctx *sql.Context, row sql.Row, err error) err
 // Per MySQL docs "Rows set to values that would cause data conversion errors are set to the closest valid values instead"
 // cc. https://dev.mysql.com/doc/refman/8.0/en/sql-mode.html#sql-mode-strict
 func convertDataAndWarn(ctx *sql.Context, tableSchema sql.Schema, row sql.Row, columnIdx int, err error) sql.Row {
+	return convertDataAndWarnRow(ctx, tableSchema, row, columnIdx, err, 1)
+}
+
+// convertDataAndWarnRow is convertDataAndWarn for row number rowNum, with
+// MySQL's warning (s2z patch).
+func convertDataAndWarnRow(ctx *sql.Context, tableSchema sql.Schema, row sql.Row, columnIdx int, err error, rowNum int) sql.Row {
+	orig := row[columnIdx]
 	if types.ErrLengthBeyondLimit.Is(err) {
 		maxLength := tableSchema[columnIdx].Type.(sql.StringType).MaxCharacterLength()
 		row[columnIdx] = row[columnIdx].(string)[:maxLength] // truncate string
@@ -345,15 +357,9 @@ func convertDataAndWarn(ctx *sql.Context, tableSchema sql.Schema, row sql.Row, c
 		row[columnIdx] = tableSchema[columnIdx].Type.Zero()
 	}
 
-	sqlerr := sql.CastSQLError(err)
-
 	// Add a warning instead
 	if ctx != nil && ctx.Session != nil {
-		ctx.Session.Warn(&sql.Warning{
-			Level:   "Note",
-			Code:    sqlerr.Num,
-			Message: err.Error(),
-		})
+		ctx.Session.Warn(ignoreWarning(tableSchema[columnIdx], orig, err, rowNum))
 	}
 
 	return row

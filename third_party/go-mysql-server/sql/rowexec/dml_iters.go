@@ -733,6 +733,7 @@ type updateSourceIter struct {
 	updateExprs []sql.Expression
 	tableSchema sql.Schema
 	ignore      bool
+	rowNum      int // s2z patch: for MySQL's warnings
 }
 
 func (u *updateSourceIter) Next(ctx *sql.Context) (sql.Row, error) {
@@ -740,8 +741,9 @@ func (u *updateSourceIter) Next(ctx *sql.Context) (sql.Row, error) {
 	if err != nil {
 		return nil, err
 	}
+	u.rowNum++
 
-	newRow, err := applyUpdateExpressionsWithIgnore(ctx, u.updateExprs, u.tableSchema, oldRow, u.ignore)
+	newRow, err := applyUpdateExpressionsWithIgnoreRow(ctx, u.updateExprs, u.tableSchema, oldRow, u.ignore, u.rowNum)
 	if err != nil {
 		return nil, err
 	}

@@ -71,6 +71,9 @@ type IndexInfo struct {
 	Columns []IndexColumn `json:"columns"`
 	Unique  bool          `json:"unique,omitempty"`
 	Comment string        `json:"comment,omitempty"`
+	// Fulltext marks a FULLTEXT index (fulltext.go): go-mysql-server keeps
+	// it in these tables; it has no entries of its own.
+	Fulltext *FulltextInfo `json:"fulltext,omitempty"`
 	// State is "" (public), or IndexWriteOnly while it is built or dropped:
 	// writers maintain it but readers don't use it (the F1/TiDB states).
 	State string `json:"state,omitempty"`

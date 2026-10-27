@@ -144,9 +144,11 @@ func (d *Database) GetTableNames(ctx *sql.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, len(ts))
-	for i, t := range ts {
-		names[i] = t.Name
+	names := make([]string, 0, len(ts))
+	for _, t := range ts {
+		if !isFulltextTable(t.Name) { // a FULLTEXT index's own table (fulltext.go)
+			names = append(names, t.Name)
+		}
 	}
 	return names, nil
 }

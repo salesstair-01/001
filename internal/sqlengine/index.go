@@ -113,6 +113,9 @@ func (t *Table) GetIndexes(*sql.Context) ([]sql.Index, error) {
 			out = append(out, &tableIndex{t: t, sec: ix})
 		}
 	}
+	for _, ft := range t.fulltext {
+		out = append(out, ft)
+	}
 	return out, nil
 }
 

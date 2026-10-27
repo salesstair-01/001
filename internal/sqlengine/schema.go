@@ -414,6 +414,9 @@ func (t *Table) DropIndex(ctx *sql.Context, name string) error {
 		return sql.ErrIndexNotFound.New(name)
 	}
 	id := t.info.Indexes[i].ID
+	if t.info.Indexes[i].Fulltext != nil {
+		return t.dropFulltextIndex(ctx, id) // fulltext.go
+	}
 	err := t.cat.AlterTable(ctx, t.info, func(_ *Txn, ti *TableInfo) error {
 		if x := findIndex(ti, id); x != nil {
 			x.State, x.Dropping, x.Since = IndexWriteOnly, true, time.Now().UnixNano()

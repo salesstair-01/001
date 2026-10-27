@@ -1044,8 +1044,7 @@ func (b *Builder) buildMatchAgainst(inScope *scope, v *ast.MatchExpr) *expressio
 		searchModifier = fulltext.SearchModifier_NaturalLangaugeQueryExpansion
 		err = fmt.Errorf(`"IN NATURAL LANGUAGE MODE WITH QUERY EXPANSION" is not supported yet`)
 	case ast.BooleanModeStr:
-		searchModifier = fulltext.SearchModifier_Boolean
-		err = fmt.Errorf(`"IN BOOLEAN MODE" is not supported yet`)
+		searchModifier = fulltext.SearchModifier_Boolean // s2z patch: supported
 	case ast.QueryExpansionStr:
 		searchModifier = fulltext.SearchModifier_QueryExpansion
 		err = fmt.Errorf(`"WITH QUERY EXPANSION" is not supported yet`)

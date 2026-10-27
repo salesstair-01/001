@@ -421,7 +421,21 @@ func (expr *MatchAgainst) inNaturalLanguageModeWithQueryExpansion(ctx *sql.Conte
 
 // inBooleanMode calculates the result using "IN BOOLEAN MODE".
 func (expr *MatchAgainst) inBooleanMode(ctx *sql.Context, row sql.Row) (float32, error) {
-	return 0, fmt.Errorf("'IN BOOLEAN MODE' has not yet been implemented")
+	// s2z patch: evaluated on the row's text (s2z_match_boolean.go)
+	q, err := expr.Expr.Eval(ctx, row)
+	if err != nil || q == nil {
+		return 0, err
+	}
+	docs := make([]interface{}, len(expr.Columns))
+	for i, c := range expr.Columns {
+		if docs[i], err = c.Eval(ctx, row); err != nil {
+			return 0, err
+		}
+		if docs[i], err = sql.UnwrapAny(ctx, docs[i]); err != nil {
+			return 0, err
+		}
+	}
+	return booleanMatch(fmt.Sprint(q), docs)
 }
 
 // withQueryExpansion calculates the result using "WITH QUERY EXPANSION".

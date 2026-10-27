@@ -57,7 +57,7 @@ Supported and tested: `CREATE/DROP DATABASE`, `CREATE/DROP/RENAME TABLE`,
 engine), `INSERT ... ON DUPLICATE KEY UPDATE`, `REPLACE`, multi-row
 `INSERT`, `UPDATE`/`DELETE` with `LIMIT`, joins, subqueries (also
 `x > ALL (subquery)`, `= ANY`, `SOME`), row constructors, `@v := expr`,
-`DO`, `GROUP BY ... WITH ROLLUP` with `GROUPING()`,
+`DO`, `GROUP BY ... WITH ROLLUP` with `GROUPING()`, FULLTEXT indexes with `MATCH ... AGAINST` in natural language and boolean mode (boolean-mode relevance is a count of matching terms, not MySQL's score; `WITH QUERY EXPANSION` is not supported),
 `UNION`/`EXCEPT`, CTEs including `WITH RECURSIVE`, window
 functions (also over a grouped query: `RANK() OVER (ORDER BY SUM(x)) ...
 GROUP BY`), JSON columns and functions, generated columns, `ENUM`/`SET`,
@@ -102,7 +102,6 @@ Not supported in v1 (statement fails with an error):
 |---|---|
 | Events (`CREATE EVENT`) | refused by go-mysql-server 0.20 |
 | Savepoints | 1235 `savepoints are not supported in v1` |
-| FULLTEXT indexes | refused by go-mysql-server (its error text is garbled: `tables cannot be created on database %!s(MISSING)`) |
 | Spatial types | `spatial types are not supported in v1` |
 | `CREATE USER`, `GRANT` | `database not found: mysql`; accounts live in the proxy's tenants file |
 | `SELECT ... FOR SHARE` | syntax error; use `LOCK IN SHARE MODE` |

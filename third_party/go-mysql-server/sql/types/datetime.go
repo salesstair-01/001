@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/dolthub/vitess/go/sqltypes"
@@ -235,7 +236,10 @@ func (t datetimeType) ConvertWithoutRangeCheck(ctx context.Context, v interface{
 	}
 	switch value := v.(type) {
 	case string:
-		if value == ZeroDateStr || value == ZeroTimestampDatetimeStr {
+		// s2z patch: surrounding spaces, and a zero date with a zero
+		// fraction ('0000-00-00 00:00:00.000'), as MySQL reads them
+		value = strings.TrimSpace(value)
+		if value == ZeroDateStr || value == ZeroTimestampDatetimeStr || isZeroDatetime(value) {
 			return zeroTime, nil
 		}
 		// TODO: consider not using time.Parse if we want to match MySQL exactly ('2010-06-03 11:22.:.:.:.:' is a valid timestamp)
@@ -477,4 +481,11 @@ func ValidateTime(t time.Time) interface{} {
 		return nil
 	}
 	return t
+}
+
+// isZeroDatetime is whether s is 0000-00-00 00:00:00 with a fraction of
+// zeros (s2z patch).
+func isZeroDatetime(s string) bool {
+	rest, ok := strings.CutPrefix(s, ZeroTimestampDatetimeStr+".")
+	return ok && strings.Trim(rest, "0") == ""
 }

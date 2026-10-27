@@ -299,6 +299,7 @@ func int64Abs(v int64) int64 {
 }
 
 func stringToTimespan(s string) (Timespan, error) {
+	s = strings.TrimSpace(s) // s2z patch: ' 07:08:09' is a TIME, as in MySQL
 	var negative bool
 	var hours int16
 	var minutes int8

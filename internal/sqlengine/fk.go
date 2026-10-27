@@ -167,7 +167,15 @@ func (e *fkEditor) IndexedAccess(ctx *sql.Context, lookup sql.IndexLookup) sql.I
 	if err := e.flush(ctx); err != nil {
 		ctx.GetLogger().Warnf("foreign key lookup: flush: %v", err)
 	}
-	return e.t.IndexedAccess(ctx, lookup)
+	it := e.t.IndexedAccess(ctx, lookup)
+	if isFulltextTable(e.t.info.Name) {
+		// the fulltext editor reads the counts it wrote for earlier rows
+		// of the statement (fulltext.go)
+		if x, ok := it.(*indexedTable); ok {
+			_ = x.SetReferenceCheck()
+		}
+	}
+	return it
 }
 
 func (e *fkEditor) GetIndexes(ctx *sql.Context) ([]sql.Index, error) { return e.t.GetIndexes(ctx) }

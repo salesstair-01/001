@@ -31,6 +31,9 @@ type Table struct {
 	pkOrd   []int      // schema ordinals of the primary-key columns, in key order
 	colOrd  map[uint32]int
 	indexes []*secIndex
+	// fulltext are the FULLTEXT indexes (fulltext.go), which writers
+	// maintain through go-mysql-server's tables, not as KV entries.
+	fulltext []*fulltextIndex
 	autoOrd int // ordinal of the AUTO_INCREMENT column, or -1
 	// instantAdd marks the table object of an ADD COLUMN statement after the
 	// column was added: it reads no rows and writes nothing (see AddColumn).
@@ -86,6 +89,14 @@ func newTable(ctx *sql.Context, cat *Catalog, info *TableInfo) (*Table, error) {
 	}
 	t.schema = sql.NewPrimaryKeySchema(cols, t.pkOrd...)
 	for i := range info.Indexes {
+		if info.Indexes[i].Fulltext != nil {
+			ft, err := newFulltextIndex(t, &info.Indexes[i])
+			if err != nil {
+				return nil, err
+			}
+			t.fulltext = append(t.fulltext, ft)
+			continue
+		}
 		ix := &secIndex{t: t, info: &info.Indexes[i]}
 		for _, c := range ix.info.Columns {
 			ord, ok := t.colOrd[c.ColID]
@@ -495,10 +506,26 @@ func (it *rowIter) Close(*sql.Context) error {
 
 // ---- writes --------------------------------------------------------------------
 
-func (t *Table) Inserter(ctx *sql.Context) sql.RowInserter { return t.editor(ctx) }
-func (t *Table) Updater(ctx *sql.Context) sql.RowUpdater   { return t.editor(ctx) }
-func (t *Table) Deleter(ctx *sql.Context) sql.RowDeleter   { return t.editor(ctx) }
-func (t *Table) Replacer(ctx *sql.Context) sql.RowReplacer { return t.editor(ctx) }
+func (t *Table) Inserter(ctx *sql.Context) sql.RowInserter { return t.writer(ctx) }
+func (t *Table) Updater(ctx *sql.Context) sql.RowUpdater   { return t.writer(ctx) }
+func (t *Table) Deleter(ctx *sql.Context) sql.RowDeleter   { return t.writer(ctx) }
+func (t *Table) Replacer(ctx *sql.Context) sql.RowReplacer { return t.writer(ctx) }
+
+// writer is the table's editor, and its FULLTEXT indexes' (fulltext.go).
+func (t *Table) writer(ctx *sql.Context) sql.TableEditor {
+	if isFulltextTable(t.info.Name) {
+		// go-mysql-server's fulltext editor looks rows of its tables up
+		// by key, its own writes included
+		return &fkEditor{editor: t.editor(ctx), t: t}
+	}
+	if len(t.fulltext) == 0 {
+		return t.editor(ctx)
+	}
+	return t.fulltextEditor(ctx, &ftParentEditor{
+		fkEditor:            &fkEditor{editor: t.editor(ctx), t: t},
+		AutoIncrementSetter: t.AutoIncrementSetter(ctx),
+	})
+}
 
 func (t *Table) editor(*sql.Context) *editor {
 	return &editor{t: t, pending: map[string]int{}}

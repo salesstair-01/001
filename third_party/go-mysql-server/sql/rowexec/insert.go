@@ -368,9 +368,9 @@ func warnOnIgnorableError(ctx *sql.Context, row sql.Row, err error) error {
 			// Add a warning instead
 			if ctx != nil && ctx.Session != nil {
 				ctx.Session.Warn(&sql.Warning{
-					Level:   "Note",
+					Level:   "Warning", // s2z patch: as MySQL
 					Code:    sqlerr.Num,
-					Message: err.Error(),
+					Message: sqlerr.Message, // s2z patch: the error's MySQL text
 				})
 			}
 

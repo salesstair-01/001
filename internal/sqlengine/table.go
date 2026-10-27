@@ -146,13 +146,6 @@ func (t *Table) pkKey(ctx context.Context, row sql.Row) ([]byte, error) {
 	return k, nil
 }
 
-func keyString(row sql.Row, ords []int) string {
-	parts := make([]string, len(ords))
-	for i, ord := range ords {
-		parts[i] = fmt.Sprint(row[ord])
-	}
-	return "[" + strings.Join(parts, ",") + "]"
-}
 
 // encodeRow encodes a row in row format v2, every column included (D3).
 func (t *Table) encodeRow(ctx context.Context, row sql.Row) ([]byte, error) {
@@ -662,7 +655,21 @@ func (e *editor) uniqueOwner(ctx *sql.Context, ix *secIndex, key []byte) (sql.Ro
 }
 
 func (e *editor) uniqueErr(ix *secIndex, row, existing sql.Row) error {
-	return sql.NewUniqueKeyErr(fmt.Sprintf("%s for key '%s.%s'", keyString(row, ix.ords), e.t.info.Name, ix.info.Name), false, existing)
+	return sql.NewUniqueKeyErr(dupEntry(row, ix.ords, e.t.info.Name, ix.info.Name), false, existing)
+}
+
+// dupEntry is MySQL's message for a duplicate key, which go-mysql-server
+// reports as it is (1062): Duplicate entry '1-a' for key 't.PRIMARY'.
+func dupEntry(row sql.Row, ords []int, table, index string) string {
+	parts := make([]string, len(ords))
+	for i, ord := range ords {
+		if row[ord] == nil {
+			parts[i] = "NULL"
+		} else {
+			parts[i] = fmt.Sprint(row[ord])
+		}
+	}
+	return fmt.Sprintf("Duplicate entry '%s' for key '%s.%s'", strings.Join(parts, "-"), table, index)
 }
 
 func entryOp(unique bool) kv.MutationOp {
@@ -684,7 +691,7 @@ func (e *editor) Insert(ctx *sql.Context, row sql.Row) error {
 	} else if old, err := e.existing(ctx, pk); err != nil {
 		return err
 	} else if old != nil {
-		return sql.NewUniqueKeyErr(keyString(row, e.t.pkOrd), true, old)
+		return sql.NewUniqueKeyErr(dupEntry(row, e.t.pkOrd, e.t.info.Name, "PRIMARY"), true, old)
 	}
 	type ent struct {
 		key, value []byte
@@ -730,7 +737,7 @@ func (e *editor) Update(ctx *sql.Context, old, new sql.Row) error {
 		if other, err := e.existing(ctx, newPK); err != nil {
 			return err
 		} else if other != nil {
-			return sql.NewUniqueKeyErr(keyString(new, e.t.pkOrd), true, other)
+			return sql.NewUniqueKeyErr(dupEntry(new, e.t.pkOrd, e.t.info.Name, "PRIMARY"), true, other)
 		}
 	}
 	type change struct {

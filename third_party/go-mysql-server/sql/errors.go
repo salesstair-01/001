@@ -411,7 +411,7 @@ var (
 	ErrPartitionNotFound = errors.NewKind("partition not found %q")
 
 	// ErrInsertIntoNonNullableProvidedNull is called when a null value is inserted into a non-nullable column
-	ErrInsertIntoNonNullableProvidedNull = errors.NewKind("column name '%v' is non-nullable but attempted to set a value of null")
+	ErrInsertIntoNonNullableProvidedNull = errors.NewKind("Column '%v' cannot be null") // s2z patch: MySQL's text
 
 	// ErrForeignKeyChildViolation is called when a rows is added but there is no parent row, and a foreign key constraint fails. Add the parent row first.
 	ErrForeignKeyChildViolation = errors.NewKind("cannot add or update a child row - Foreign key violation on fk: `%s`, table: `%s`, referenced table: `%s`, key: `%s`")
@@ -1012,8 +1012,25 @@ func CastSQLError(err error) *mysql.SQLError {
 		code = mysql.ERUnknownError
 	}
 
+	// s2z patch: integrity constraint errors have MySQL's SQLSTATE
+	if sqlState == "" {
+		switch code {
+		case mysql.ERDupEntry, mysql.ERBadNullError, mysql.ErNoReferencedRow2, mysql.ERRowIsReferenced2:
+			sqlState = "23000"
+		}
+	}
+	msg := err.Error()
+	// s2z patch: a duplicate key error whose key text is MySQL's message
+	// ("Duplicate entry '1' for key 't.PRIMARY'") is reported as just that
+	if code == mysql.ERDupEntry {
+		if e, ok := err.(*errors.Error); ok {
+			if ue, ok := e.Cause().(UniqueKeyError); ok && strings.HasPrefix(ue.keyStr, "Duplicate entry ") {
+				msg = ue.keyStr
+			}
+		}
+	}
 	// This uses the given error as a format string, so we have to escape any percentage signs else they'll show up as "%!(MISSING)"
-	return mysql.NewSQLError(code, sqlState, strings.Replace(err.Error(), `%`, `%%`, -1))
+	return mysql.NewSQLError(code, sqlState, strings.Replace(msg, `%`, `%%`, -1))
 }
 
 // UnwrapError removes any wrapping errors (e.g. WrappedInsertError) around the specified error and

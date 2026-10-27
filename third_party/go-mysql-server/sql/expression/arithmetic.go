@@ -436,7 +436,7 @@ func convertValueToType(ctx *sql.Context, typ sql.Type, val interface{}, isTimeT
 
 	cval, _, err := typ.Convert(ctx, val)
 	if err != nil {
-		arithmeticWarning(ctx, mysql.ERTruncatedWrongValue, fmt.Sprintf("Truncated incorrect %s value: '%v'", typ.String(), val))
+		arithmeticWarning(ctx, mysql.ERTruncatedWrongValue, fmt.Sprintf("Truncated incorrect %s value: '%v'", truncatedTypeName(typ), val)) // s2z patch
 		// the value is interpreted as 0, but we need to match the type of the other valid value
 		// to avoid additional conversion, the nil value is handled in each operation
 	}
@@ -787,4 +787,18 @@ func (e *UnaryMinus) WithChildren(children ...sql.Expression) (sql.Expression, e
 		return nil, sql.ErrInvalidChildrenNumber.New(e, len(children), 1)
 	}
 	return NewUnaryMinus(children[0]), nil
+}
+
+// truncatedTypeName is the type MySQL names in "Truncated incorrect ...
+// value" (s2z patch): DOUBLE, DECIMAL, INTEGER.
+func truncatedTypeName(typ sql.Type) string {
+	switch {
+	case types.IsFloat(typ):
+		return "DOUBLE"
+	case types.IsDecimal(typ):
+		return "DECIMAL"
+	case types.IsInteger(typ):
+		return "INTEGER"
+	}
+	return strings.ToUpper(typ.String())
 }

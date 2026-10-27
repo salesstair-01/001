@@ -43,6 +43,14 @@ func TestLexWarnings(t *testing.T) {
 		{"SELECT CAST('a' AS BINARY), CONVERT('a', BINARY)", ""},
 		{"INSERT INTO u1 VALUES (BINARY 'x')", "1287"},
 		{"SELECT 'utf8', 'binary', `utf8mb4`.a FROM u1 AS utf8mb4", ""},
+		{"SELECT @x := 1, @y := 2", "1287 1287"},
+		{"SET @z := (@w := 5)", "1287"},
+		{"SET @a = 1, @b := 2", ""},
+		{"SELECT SQL_CALC_FOUND_ROWS 1", "1287"},
+		{"SELECT FOUND_ROWS()", "1287"},
+		// duplicate keys skipped by INSERT IGNORE: MySQL's text
+		{"CREATE TABLE dup (a int PRIMARY KEY)", ""},
+		{"INSERT IGNORE INTO dup VALUES (1), (1)", "1062"},
 	} {
 		if got := codes(s.q); got != s.want {
 			t.Errorf("%s: warnings %q, want %q", s.q, got, s.want)

@@ -386,7 +386,7 @@ func (t *tempTable) check(ctx *sql.Context, row sql.Row, skip int) error {
 			return err
 		}
 		if slot, ok := t.pkKeys[k]; ok && slot != skip {
-			return sql.NewUniqueKeyErr(keyString(row, t.pk), true, t.rows[slot])
+			return sql.NewUniqueKeyErr(dupEntry(row, t.pk, t.name, "PRIMARY"), true, t.rows[slot])
 		}
 	}
 	for _, ix := range t.indexes {
@@ -398,7 +398,7 @@ func (t *tempTable) check(ctx *sql.Context, row sql.Row, skip int) error {
 			return err
 		}
 		if slot, ok := ix.keys[k]; ok && !null && slot != skip {
-			return sql.NewUniqueKeyErr(fmt.Sprintf("%s for key '%s.%s'", keyString(row, ix.ords), t.name, ix.def.Name), false, t.rows[slot])
+			return sql.NewUniqueKeyErr(dupEntry(row, ix.ords, t.name, ix.def.Name), false, t.rows[slot])
 		}
 	}
 	return nil

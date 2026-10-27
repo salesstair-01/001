@@ -217,8 +217,8 @@ func (b *BaseBuilder) buildLockTables(ctx *sql.Context, n *plan.LockTables, row 
 	for _, l := range n.Locks {
 		lockable, err := getLockable(l.Table)
 		if err != nil {
-			// If a table is not lockable, just skip it
-			ctx.Warn(0, err.Error())
+			// If a table is not lockable, just skip it (s2z patch: quietly,
+			// as MySQL gives no warning; sqld has no table locks)
 			continue
 		}
 

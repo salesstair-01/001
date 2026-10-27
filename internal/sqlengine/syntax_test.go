@@ -59,6 +59,23 @@ func TestMySQLSyntax(t *testing.T) {
 		{"SELECT a FROM c2 WHERE a = 'ABC'", "[abc]"},
 		{"SELECT a FROM c2 ORDER BY a", "[abc ABD xyz]"},
 		{"CREATE TABLE c4 (s VARCHAR(10) CHARACTER SET utf16, KEY (s))", "[]"},
+		// INSERT IGNORE keeps the statement's other rows (a duplicate
+		// discarded all of them); CREATE TABLE ... IGNORE | REPLACE SELECT,
+		// WITH, PARTITION BY KEY ()
+		{"CREATE TABLE ig (a int PRIMARY KEY, b varchar(5), c int, UNIQUE KEY (c))", "[]"},
+		{"INSERT IGNORE INTO ig VALUES (1,'x',1), (1,'y',2)", "[]"},
+		{"INSERT IGNORE INTO ig VALUES (3,'x',3), (4,'y',1), (5,'z',5)", "[]"},
+		{"INSERT INTO ig VALUES (6,'a',6), (6,'b',7)", "ERR 1062"},
+		{"SELECT * FROM ig ORDER BY a", "[1,x,1 3,x,3 5,z,5]"},
+		{"CREATE TABLE dsrc (a int, b varchar(5))", "[]"},
+		{"INSERT INTO dsrc VALUES (1,'x'), (1,'y'), (2,'z')", "[]"},
+		{"CREATE TABLE dci (a int PRIMARY KEY, b varchar(5)) IGNORE SELECT a, b FROM dsrc", "[]"},
+		{"SELECT * FROM dci ORDER BY a", "[1,x 2,z]"},
+		{"CREATE TABLE dcr (a int PRIMARY KEY, b varchar(5)) REPLACE SELECT a, b FROM dsrc", "[]"},
+		{"SELECT * FROM dcr ORDER BY a", "[1,y 2,z]"},
+		{"CREATE TABLE dcw WITH qn AS (SELECT 10*a AS a FROM dsrc), qn2 AS (SELECT 3*a AS b FROM qn) SELECT * FROM qn2", "[]"},
+		{"SELECT * FROM dcw ORDER BY b", "[30 30 60]"},
+		{"CREATE TABLE dck (id INT PRIMARY KEY, name VARCHAR(40)) PARTITION BY KEY() PARTITIONS 4", "[]"},
 		// columns of NULLs and of user variables take MySQL's types (a NULL
 		// column made the table unreadable)
 		{"SET @a := 1, @b := 'x', @c := 1.5, @d := NULL, @e := 1e3", "[]"},

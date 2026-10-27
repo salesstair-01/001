@@ -76,6 +76,11 @@ type CreateTable struct {
 
 	Collation sql.CollationID
 	TableOpts map[string]interface{}
+
+	// IgnoreDup and ReplaceDup are CREATE TABLE ... IGNORE | REPLACE
+	// SELECT: rows with a duplicate key are skipped or replace the earlier
+	// one (s2z patch).
+	IgnoreDup, ReplaceDup bool
 }
 
 var _ sql.Databaser = (*CreateTable)(nil)

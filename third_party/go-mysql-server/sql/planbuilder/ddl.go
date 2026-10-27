@@ -320,7 +320,9 @@ func (b *Builder) buildCreateTable(inScope *scope, c *ast.DDL) (outScope *scope)
 		tableSpec := &plan.TableSpec{
 			Schema: sql.NewPrimaryKeySchema(sch),
 		}
-		outScope.node = plan.NewCreateTableSelect(database, c.Table.Name.String(), c.IfNotExists, c.Temporary, selectScope.node, tableSpec)
+		ct := plan.NewCreateTableSelect(database, c.Table.Name.String(), c.IfNotExists, c.Temporary, selectScope.node, tableSpec)
+		ct.IgnoreDup, ct.ReplaceDup = c.OptSelect.Duplicates == ast.IgnoreStr, c.OptSelect.Duplicates == ast.ReplaceStr // s2z patch
+		outScope.node = ct
 		return outScope
 	}
 
@@ -358,7 +360,9 @@ func (b *Builder) buildCreateTable(inScope *scope, c *ast.DDL) (outScope *scope)
 	b.qFlags.Set(sql.QFlagSetDatabase)
 	if c.OptSelect != nil {
 		selectScope := b.buildSelectStmt(inScope, c.OptSelect.Select)
-		outScope.node = plan.NewCreateTableSelect(database, c.Table.Name.String(), c.IfNotExists, c.Temporary, selectScope.node, tableSpec)
+		ct := plan.NewCreateTableSelect(database, c.Table.Name.String(), c.IfNotExists, c.Temporary, selectScope.node, tableSpec)
+		ct.IgnoreDup, ct.ReplaceDup = c.OptSelect.Duplicates == ast.IgnoreStr, c.OptSelect.Duplicates == ast.ReplaceStr // s2z patch
+		outScope.node = ct
 	} else {
 		outScope.node = plan.NewCreateTable(
 			database, c.Table.Name.String(), c.IfNotExists, c.Temporary, tableSpec)

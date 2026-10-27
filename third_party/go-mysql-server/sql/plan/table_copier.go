@@ -28,6 +28,12 @@ type CopierProps struct {
 	ignore  bool
 }
 
+// NewCopierProps is a copy that replaces or skips rows with a duplicate key
+// (s2z patch: CREATE TABLE ... REPLACE | IGNORE SELECT).
+func NewCopierProps(replace, ignore bool) CopierProps {
+	return CopierProps{replace: replace, ignore: ignore}
+}
+
 func NewTableCopier(db sql.Database, createTableNode sql.Node, source sql.Node, prop CopierProps) *TableCopier {
 	return &TableCopier{
 		Source:      source,

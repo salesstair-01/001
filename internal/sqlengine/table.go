@@ -536,6 +536,10 @@ type editor struct {
 	t       *Table
 	buf     []kv.Mutation
 	pending map[string]int // key -> index in buf
+	// checkpointed: StatementComplete ran before the statement ended, as
+	// go-mysql-server's checkpointing iterator does after every row of an
+	// INSERT IGNORE; DiscardChanges then drops only the failed row.
+	checkpointed bool
 }
 
 var _ sql.TableEditor = (*editor)(nil)
@@ -556,6 +560,11 @@ func (e *editor) StatementBegin(*sql.Context) {}
 
 func (e *editor) DiscardChanges(ctx *sql.Context, _ error) error {
 	e.buf, e.pending = nil, map[string]int{}
+	if e.checkpointed {
+		// the earlier rows are written and stay (INSERT IGNORE); the
+		// failed row's changes were only buffered
+		return nil
+	}
 	txn, stmt, err := e.txn(ctx)
 	if err != nil {
 		return err
@@ -563,7 +572,10 @@ func (e *editor) DiscardChanges(ctx *sql.Context, _ error) error {
 	return mysqlError(txn.RollbackStatement(ctx, stmt))
 }
 
-func (e *editor) StatementComplete(ctx *sql.Context) error { return e.flush(ctx) }
+func (e *editor) StatementComplete(ctx *sql.Context) error {
+	e.checkpointed = true
+	return e.flush(ctx)
+}
 func (e *editor) Close(ctx *sql.Context) error             { return e.flush(ctx) }
 
 func (e *editor) flush(ctx *sql.Context) error {

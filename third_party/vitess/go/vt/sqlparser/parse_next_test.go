@@ -182,8 +182,10 @@ func TestParseStrictErr(t *testing.T) {
 	sql.WriteString(input)
 	tokens := NewTokenizer(&sql)
 	_, err := ParseNext(tokens)
-	if err == nil || !strings.Contains(err.Error(), "ignore") {
-		t.Fatalf("ParseNext(%q) err = %q, want ignore", input, err)
+	// s2z patch: CREATE TABLE a IGNORE SELECT ... parses, so the error is
+	// at the token after IGNORE
+	if err == nil || !strings.Contains(err.Error(), "near 'me'") {
+		t.Fatalf("ParseNext(%q) err = %q, want near 'me'", input, err)
 	}
 	tree, err := ParseNext(tokens)
 	if err != nil {

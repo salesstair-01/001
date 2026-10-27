@@ -2723,6 +2723,9 @@ func (node *OptLike) walkSubtree(visit Visit) error {
 
 type OptSelect struct {
 	Select SelectStatement
+	// Duplicates is IgnoreStr or ReplaceStr for CREATE TABLE ... IGNORE |
+	// REPLACE SELECT (s2z patch).
+	Duplicates string
 }
 
 // Format formats the node.

@@ -357,7 +357,7 @@ func tryCastStatement(v interface{}) Statement {
 %type <val> describe_statement explain_statement explainable_statement
 %type <val> begin_statement commit_statement rollback_statement start_transaction_statement load_statement
 %type <bytes> work_opt no_opt chain_opt release_opt index_name_opt no_first_last yes_no
-%type <val> comment_opt comment_list delete_comment_opt
+%type <val> comment_opt comment_list delete_comment_opt create_dup_handling create_query_select_cte
 %type <val> distinct_opt union_op intersect_op except_op insert_or_replace
 %type <val> match_option format_opt plan_opt
 %type <val> separator_opt
@@ -1260,6 +1260,11 @@ create_statement:
      $1.(*DDL).OptSelect = &OptSelect{Select: $2.(SelectStatement)}
      $$ = $1.(*DDL)
    }
+| create_table_prefix create_query_select_cte // s2z patch
+  {
+    $1.(*DDL).OptSelect = &OptSelect{Select: $2.(SelectStatement)}
+    $$ = $1.(*DDL)
+  }
 | create_table_prefix LIKE table_name
   {
     $1.(*DDL).OptLike = &OptLike{LikeTables: []TableName{$3.(TableName)}}
@@ -1295,6 +1300,34 @@ create_statement:
     }
     $1.(*DDL).TableSpec = spec
     $1.(*DDL).OptSelect = &OptSelect{Select: $5.(SelectStatement)}
+    $$ = $1.(*DDL)
+  }
+| create_table_prefix table_spec create_dup_handling create_query_select_expression // s2z patch: IGNORE / REPLACE
+  {
+    $1.(*DDL).TableSpec = $2.(*TableSpec)
+    if len($1.(*DDL).TableSpec.Constraints) > 0 {
+      $1.(*DDL).ConstraintAction = AddStr
+    }
+    $1.(*DDL).OptSelect = &OptSelect{Select: $4.(SelectStatement), Duplicates: $3.(string)}
+    $$ = $1.(*DDL)
+  }
+| create_table_prefix table_spec create_dup_handling AS create_query_expression // s2z patch
+  {
+    $1.(*DDL).TableSpec = $2.(*TableSpec)
+    if len($1.(*DDL).TableSpec.Constraints) > 0 {
+      $1.(*DDL).ConstraintAction = AddStr
+    }
+    $1.(*DDL).OptSelect = &OptSelect{Select: $5.(SelectStatement), Duplicates: $3.(string)}
+    $$ = $1.(*DDL)
+  }
+| create_table_prefix create_dup_handling create_query_select_expression // s2z patch
+  {
+    $1.(*DDL).OptSelect = &OptSelect{Select: $3.(SelectStatement), Duplicates: $2.(string)}
+    $$ = $1.(*DDL)
+  }
+| create_table_prefix create_dup_handling AS create_query_expression // s2z patch
+  {
+    $1.(*DDL).OptSelect = &OptSelect{Select: $4.(SelectStatement), Duplicates: $2.(string)}
     $$ = $1.(*DDL)
   }
 | create_table_prefix table_spec AS create_query_expression
@@ -2298,6 +2331,24 @@ create_query_expression:
     $1.(SelectStatement).SetLimit($3.(*Limit))
     $1.(SelectStatement).SetLock($4.(string))
     $$ = $1.(SelectStatement)
+  }
+
+// s2z patch: CREATE TABLE t WITH cte AS (...) SELECT ... (without a column
+// list: after one, WITH can start a table option)
+create_query_select_cte:
+  WITH with_clause base_select_no_cte order_by_opt limit_opt lock_opt // s2z patch: CREATE TABLE t WITH cte AS (...) SELECT ...
+  {
+    if $3.(SelectStatement).GetInto() != nil {
+      yylex.Error(fmt.Errorf("INTO clause is not allowed").Error())
+      return 1
+    }
+    $3.(SelectStatement).SetOrderBy($4.(OrderBy))
+    $3.(SelectStatement).SetLimit($5.(*Limit))
+    $3.(SelectStatement).SetLock($6.(string))
+    with := $2.(*With)
+    handleCTEAuth($3.(SelectStatement), with)
+    $3.(SelectStatement).SetWith(with)
+    $$ = $3.(SelectStatement)
   }
 
 proc_param_list_opt:
@@ -5251,6 +5302,14 @@ linear_partition_opt:
 	ColList: $5.(Columns),
     }
   }
+| linear_opt KEY algorithm_part_opt openb closeb // s2z patch: KEY () partitions by the primary key
+  {
+    $$ = &PartitionOption {
+	IsLinear: $1.(bool),
+	PartitionType: string($2),
+	KeyAlgorithm: $3.(string),
+    }
+  }
 
 linear_opt:
   {
@@ -7823,6 +7882,17 @@ comment_opt:
     // we use $2 here
     $$ = $2
     setAllowComments(yylex, false)
+  }
+
+// s2z patch: CREATE TABLE ... IGNORE | REPLACE SELECT
+create_dup_handling:
+  IGNORE
+  {
+    $$ = IgnoreStr
+  }
+| REPLACE
+  {
+    $$ = ReplaceStr
   }
 
 // s2z patch: DELETE [LOW_PRIORITY] [IGNORE]; the options are accepted and

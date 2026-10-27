@@ -92,6 +92,10 @@ type temporal struct {
 	scale int       // fractional digits the argument's type gives
 	text  bool      // a string: shows 6 digits, or none when they are 0
 	over  bool      // !isDT: beyond ±838:59:59, clamped
+	// digits a string's fraction has; with a TIME or DATETIME argument, a
+	// string gives the result these, not 6
+	digits int
+	typed  bool // a TIME, DATE or DATETIME value
 }
 
 var (
@@ -190,9 +194,14 @@ func typeScale(t sql.Type) int {
 func toTemporal(ctx *sql.Context, arg sql.Expression, v any) (temporal, bool) {
 	switch x := v.(type) {
 	case time.Time:
-		return temporal{isDT: true, dt: x, scale: typeScale(arg.Type())}, true
+		return temporal{isDT: true, dt: x, scale: typeScale(arg.Type()), typed: true}, true
 	case types.Timespan:
 		us := x.AsMicroseconds()
+		if tt, ok := arg.Type().(types.TimespanType_); ok {
+			if p, fixed := tt.Precision(); fixed { // a TIME(n) column
+				return temporal{us: us, scale: p, typed: true}, true
+			}
+		}
 		return temporal{us: us, scale: 6, text: true}, true
 	case string, []byte:
 		s, _ := fnString(ctx, x)
@@ -201,7 +210,15 @@ func toTemporal(ctx *sql.Context, arg sql.Expression, v any) (temporal, bool) {
 				return temporal{isDT: true, dt: t.(time.Time), scale: typeScale(arg.Type())}, true
 			}
 		}
-		return parseTemporal(s)
+		t, ok := parseTemporal(s)
+		if _, f, has := strings.Cut(strings.TrimSpace(s), "."); has {
+			n := 0
+			for n < len(f) && f[n] >= '0' && f[n] <= '9' {
+				n++
+			}
+			t.digits = min(n, 6)
+		}
+		return t, ok
 	case decimal.Decimal:
 		t, ok := parseTemporal(x.String())
 		t.scale, t.text = min(6, int(max(0, -x.Exponent()))), false
@@ -232,15 +249,22 @@ func fnFloat(v any) (float64, bool) {
 
 // resultScale is the fractional digits a result of these arguments shows.
 func resultScale(us int64, args ...temporal) int {
+	typed := false
+	for _, a := range args {
+		typed = typed || a.typed
+	}
 	s := 0
 	for _, a := range args {
-		if a.text {
+		switch {
+		case a.text && typed:
+			s = max(s, a.digits)
+		case a.text:
 			if us%usPerSec != 0 {
 				s = 6
 			}
-			continue
+		default:
+			s = max(s, a.scale)
 		}
-		s = max(s, a.scale)
 	}
 	return s
 }

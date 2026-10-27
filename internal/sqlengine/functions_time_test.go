@@ -95,6 +95,38 @@ func TestTemporalFunctions(t *testing.T) {
 // TestDatetimeFractions checks DATETIME(n) values as sent, without the
 // driver's parsing: n fractional digits, and + INTERVAL at full precision
 // with MySQL's result types (MySQL 8.0.46's output).
+// TestTimePrecision pins TIME(n) columns against MySQL 8.0.46: values
+// round to n digits and show exactly n (TIME is TIME(0)), function results
+// take the column's precision, and a TIME is HHMMSS in arithmetic.
+func TestTimePrecision(t *testing.T) {
+	c := startCluster(t)
+	db, err := gosql.Open("mysql", fmt.Sprintf("root@tcp(%s)/app", c.addr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE tt (a time, b time(2), c time(6), d time(3))", "[]"},
+		{"INSERT INTO tt VALUES ('10:00:00.5', '10:00:00.555', '10:00:00.123456', '-01:02:03.4567')", "[]"},
+		{"INSERT INTO tt VALUES ('838:59:59', '01:02:03', '00:00:00', '23:59:59.9999')", "[]"},
+		{"SELECT * FROM tt", "[10:00:01,10:00:00.56,10:00:00.123456,-01:02:03.457 838:59:59,01:02:03.00,00:00:00.000000,24:00:00.000]"},
+		{"SELECT column_type, datetime_precision FROM information_schema.columns WHERE table_name = 'tt' ORDER BY ordinal_position", "[time,0 time(2),2 time(6),6 time(3),3]"},
+		{"SELECT TIMESTAMP('2001-01-01', d) FROM tt", "[2000-12-31 22:57:56.543 2001-01-02 00:00:00.000]"},
+		{"SELECT ADDTIME(b, '00:00:01'), ADDTIME(b, '00:00:01.5'), ADDTIME(b, '00:00:01.1234567'), ADDTIME(b, 1) FROM tt LIMIT 1", "[10:00:01.56,10:00:02.06,10:00:01.683457,10:00:01.56]"},
+		{"SELECT a + 0, b + 0, a * 1, b - 1 FROM tt LIMIT 1", "[100001,100000.56,100001,99999.56]"},
+		{"SELECT b FROM tt WHERE b = '10:00:00.56'", "[10:00:00.56]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}
+
 func TestDatetimeFractions(t *testing.T) {
 	c := startCluster(t)
 	db, err := gosql.Open("mysql", fmt.Sprintf("root@tcp(%s)/app", c.addr))

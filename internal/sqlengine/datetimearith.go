@@ -164,7 +164,7 @@ func retypeIntervalArith(a *expression.Arithmetic) sql.Expression {
 	case types.IsTime(t):
 		p := typeScale(t)
 		return &intervalArith{arith: a, typ: types.MustCreateDatetimeType(sqltypes.Datetime, max(p, scale))}
-	case t == types.Time:
+	case types.IsTimespan(t):
 		return &intervalArith{arith: a, typ: types.LongText, span: true}
 	case types.IsText(t):
 		date := dateUnits[unit]

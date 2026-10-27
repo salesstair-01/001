@@ -15,7 +15,9 @@
 package types
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"math"
 	"reflect"
 	"strconv"
@@ -66,7 +68,52 @@ type TimeType interface {
 	MicrosecondsToTimespan(v int64) Timespan
 }
 
-type TimespanType_ struct{}
+// s2z patch: a column's TIME(n) has a fixed precision: values are rounded
+// to n fractional digits and shown with exactly n, as in MySQL (TIME is
+// TIME(0)). Time, the type of expressions, keeps microseconds and shows
+// them when there are any, as before.
+type TimespanType_ struct {
+	precision int8
+	fixed     bool
+}
+
+// CreateTimeType is a column's TIME(precision) (s2z patch).
+func CreateTimeType(precision int) TimespanType_ {
+	return TimespanType_{precision: int8(precision), fixed: true}
+}
+
+// Precision is the type's fractional digits, and whether they are fixed
+// (s2z patch).
+func (t TimespanType_) Precision() (int, bool) {
+	if !t.fixed {
+		return 6, false
+	}
+	return int(t.precision), true
+}
+
+// round rounds a value to the type's precision, half away from zero.
+func (t TimespanType_) round(ts Timespan) Timespan {
+	if !t.fixed || t.precision >= 6 {
+		return ts
+	}
+	unit := int64(1)
+	for i := t.precision; i < 6; i++ {
+		unit *= 10
+	}
+	us := int64(ts)
+	neg := us < 0
+	if neg {
+		us = -us
+	}
+	us = (us + unit/2) / unit * unit
+	if us > timespanMaximum {
+		us = timespanMaximum
+	}
+	if neg {
+		us = -us
+	}
+	return Timespan(us)
+}
 
 var _ TimeType = TimespanType_{}
 var _ sql.CollationCoercible = TimespanType_{}
@@ -104,6 +151,9 @@ func (t TimespanType_) Convert(c context.Context, v interface{}) (interface{}, s
 		return nil, sql.InRange, nil
 	}
 	ret, err := t.ConvertToTimespan(v)
+	if err == nil {
+		ret = t.round(ret)
+	}
 	return ret, sql.InRange, err
 }
 
@@ -264,11 +314,29 @@ func (t TimespanType_) SQL(_ *sql.Context, dest []byte, v interface{}) (sqltypes
 	}
 
 	val := ti.Bytes()
+	if t.fixed {
+		ti = t.round(ti)
+		val = ti.Bytes()
+		if i := bytes.IndexByte(val, '.'); i >= 0 {
+			val = val[:i]
+		}
+		if t.precision > 0 {
+			_, _, _, _, us := ti.timespanToUnits()
+			frac := fmt.Sprintf("%06d", us)[:t.precision]
+			val = append(append(val, '.'), frac...)
+		}
+	}
 	return sqltypes.MakeTrusted(sqltypes.Time, val), nil
 }
 
 // String implements Type interface.
 func (t TimespanType_) String() string {
+	if t.fixed {
+		if t.precision == 0 {
+			return "time"
+		}
+		return fmt.Sprintf("time(%d)", t.precision)
+	}
 	return "time(6)"
 }
 

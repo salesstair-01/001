@@ -3868,9 +3868,8 @@ time_type:
   }
 | TIME length_opt
   {
-    // s2z patch: TIME(n) is go-mysql-server's TIME, which keeps
-    // microseconds; it refuses a length below 6 (issue #25).
-    $$ = ColumnType{Type: string($1)}
+    // s2z patch: TIME(n), with the vendored go-mysql-server's precision
+    $$ = ColumnType{Type: string($1), Length: $2.(*SQLVal)}
   }
 | TIMESTAMP length_opt
   {

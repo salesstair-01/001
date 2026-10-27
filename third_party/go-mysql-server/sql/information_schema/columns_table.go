@@ -272,8 +272,9 @@ func getRowFromColumn(ctx *sql.Context, curOrdPos int, col *sql.Column, catName,
 	charName, collName, charMaxLen, charOctetLen := getCharAndCollNamesAndCharMaxAndOctetLens(ctx, col.Type)
 
 	numericPrecision, numericScale := getColumnPrecisionAndScale(col.Type)
-	if types.IsTimespan(col.Type) {
-		// TODO: TIME length not yet supported
+	if tt, ok := col.Type.(types.TimespanType_); ok {
+		datetimePrecision, _ = tt.Precision() // s2z patch: TIME(n)
+	} else if types.IsTimespan(col.Type) {
 		datetimePrecision = 6
 	} else if dtType, ok := col.Type.(sql.DatetimeType); ok {
 		datetimePrecision = dtType.Precision()

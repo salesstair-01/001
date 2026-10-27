@@ -533,7 +533,7 @@ func dateOffsetType(input sql.Expression, interval *expression.Interval) sql.Typ
 
 	// set type flags
 	isInputDate := inputType == types.Date
-	isInputTime := inputType == types.Time
+	isInputTime := types.IsTimespan(inputType) // s2z patch: TIME(n) columns too
 
 	// determine what kind of interval we're dealing with
 	isYmd := isYmdInterval(interval)

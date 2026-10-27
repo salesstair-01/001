@@ -393,7 +393,9 @@ func getFloatOrMaxDecimalType(e sql.Expression, treatIntsAsFloats bool) sql.Type
 // is used for 'div' or 'mod' arithmetic operation, which requires
 // the result value to have precise precision and scale.
 func convertToDecimalValue(ctx *sql.Context, val interface{}, isTimeType bool) interface{} {
-	if isTimeType {
+	if ts, ok := val.(types.Timespan); ok {
+		val = timespanNumber(ts) // s2z patch: HHMMSS[.ffffff]
+	} else if isTimeType {
 		val = convertTimeTypeToString(val)
 	}
 	switch v := val.(type) {

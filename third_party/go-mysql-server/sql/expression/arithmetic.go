@@ -195,6 +195,10 @@ func (a *Arithmetic) Type() sql.Type {
 		}
 	}
 
+	// s2z patch: a TIME is a number too: TIME(0) an integer, TIME(n) a
+	// decimal with n digits (a TIME expression of unfixed precision, 6)
+	lTyp, rTyp = timeAsNumberType(lTyp), timeAsNumberType(rTyp)
+
 	if types.IsUnsigned(lTyp) && types.IsUnsigned(rTyp) {
 		return types.Uint64
 	}
@@ -430,7 +434,10 @@ func isOutermostArithmeticOp(e sql.Expression, opScale int32) bool {
 // E.g: `2022-11-10 12:14:36` is parsed into `20221110121436` and `2022-03-24` is parsed into `20220324`.
 func convertValueToType(ctx *sql.Context, typ sql.Type, val interface{}, isTimeType bool) interface{} {
 	var cval interface{}
-	if isTimeType {
+	if ts, ok := val.(types.Timespan); ok {
+		// s2z patch: a TIME is the number HHMMSS[.ffffff], as in MySQL
+		val = timespanNumber(ts)
+	} else if isTimeType {
 		val = convertTimeTypeToString(val)
 	}
 
@@ -801,4 +808,32 @@ func truncatedTypeName(typ sql.Type) string {
 		return "INTEGER"
 	}
 	return strings.ToUpper(typ.String())
+}
+
+// timespanNumber is a TIME as MySQL uses it in arithmetic: HHMMSS, with
+// its fractional digits (s2z patch).
+func timespanNumber(ts types.Timespan) string {
+	us := ts.AsMicroseconds()
+	sign := ""
+	if us < 0 {
+		sign, us = "-", -us
+	}
+	sec := us / 1000000
+	n := fmt.Sprintf("%s%d%02d%02d", sign, sec/3600, sec/60%60, sec%60)
+	if frac := us % 1000000; frac != 0 {
+		n += "." + strings.TrimRight(fmt.Sprintf("%06d", frac), "0")
+	}
+	return n
+}
+
+func timeAsNumberType(t sql.Type) sql.Type {
+	tt, ok := t.(types.TimespanType_)
+	if !ok {
+		return t
+	}
+	p, _ := tt.Precision()
+	if p == 0 {
+		return types.Int64
+	}
+	return types.MustCreateDecimalType(types.DecimalTypeMaxPrecision, uint8(p))
 }

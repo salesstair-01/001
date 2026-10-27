@@ -233,7 +233,7 @@ Accepted but different:
     `MAKETIME`, `MAKEDATE`, `PERIOD_ADD`, `PERIOD_DIFF`, `UTC_DATE`,
     `UTC_TIME` and `TIMESTAMP(expr, time)` follow MySQL, as do the compound `INTERVAL` units (`YEAR_MONTH`,
     `DAY_SECOND`, `SECOND_MICROSECOND`, ...), but their TIME results are typed as text (with
-    MySQL's digits). A `TIME(n)` column is a TIME that keeps microseconds, so it doesn't round to n digits as MySQL does and `SHOW CREATE TABLE` shows `time`. `CONCAT` of a
+    MySQL's digits). A `TIME(n)` column rounds values to n fractional digits and shows exactly n, as MySQL does (`TIME` is `TIME(0)`); in arithmetic a TIME is the number HHMMSS[.ff]. `CONCAT` of a
     DATE column gives `YYYY-MM-DD 00:00:00`.
   - Output formatting: `DATETIME(n)` prints n fractional digits as in MySQL,
     but `TIMESTAMP(n)` without trailing zeros (`.12`, MySQL `.120`;

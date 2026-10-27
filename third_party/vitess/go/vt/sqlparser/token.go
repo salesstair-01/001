@@ -147,6 +147,9 @@ func (tkn *Tokenizer) Lex(lval *yySymType) int {
 		}
 		typ, val = tkn.Scan()
 	}
+	if typ == WITH && tkn.scanRollup() { // s2z patch
+		typ = WITH_ROLLUP
+	}
 	lval.bytes = val
 	tkn.lastToken = val
 	tkn.lastTyp = typ
@@ -896,4 +899,37 @@ func mustAtoi(yylex yyLexer, s string) int {
 		yylex.Error(fmt.Sprintf("unable to parse integer from string '%s'", s))
 	}
 	return i
+}
+
+// scanRollup consumes " ROLLUP" when it follows WITH, which is then one
+// token (s2z patch): after GROUP BY a list, WITH can also start WITH CHECK
+// OPTION, and the grammar sees one token ahead. It reads only what is in
+// the buffer, and only when ROLLUP is a whole word.
+func (tkn *Tokenizer) scanRollup() bool {
+	if !isSpace(tkn.lastChar) {
+		return false
+	}
+	i := tkn.bufPos
+	for i < tkn.bufSize && isSpace(uint16(tkn.buf[i])) {
+		i++
+	}
+	const word = "rollup"
+	if tkn.bufSize-i < len(word) || !strings.EqualFold(string(tkn.buf[i:i+len(word)]), word) {
+		return false
+	}
+	if j := i + len(word); j < tkn.bufSize && isIdentChar(uint16(tkn.buf[j])) {
+		return false
+	}
+	for n := i + len(word) - tkn.bufPos + 1; n > 0; n-- {
+		tkn.next()
+	}
+	return true
+}
+
+func isSpace(ch uint16) bool {
+	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
+}
+
+func isIdentChar(ch uint16) bool {
+	return isLetter(ch) || isDigit(ch) || ch == '_' || ch == '$'
 }

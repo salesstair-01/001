@@ -57,7 +57,7 @@ Supported and tested: `CREATE/DROP DATABASE`, `CREATE/DROP/RENAME TABLE`,
 engine), `INSERT ... ON DUPLICATE KEY UPDATE`, `REPLACE`, multi-row
 `INSERT`, `UPDATE`/`DELETE` with `LIMIT`, joins, subqueries (also
 `x > ALL (subquery)`, `= ANY`, `SOME`), row constructors, `@v := expr`,
-`DO`,
+`DO`, `GROUP BY ... WITH ROLLUP` with `GROUPING()`,
 `UNION`/`EXCEPT`, CTEs including `WITH RECURSIVE`, window
 functions (also over a grouped query: `RANK() OVER (ORDER BY SUM(x)) ...
 GROUP BY`), JSON columns and functions, generated columns, `ENUM`/`SET`,

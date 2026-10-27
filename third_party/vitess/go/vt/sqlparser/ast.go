@@ -568,6 +568,8 @@ type Select struct {
 	Limit       *Limit
 	Lock        string
 	Into        *Into
+	// Rollup is GROUP BY ... WITH ROLLUP (s2z patch).
+	Rollup bool
 }
 
 // Select.QueryOpts
@@ -638,8 +640,12 @@ func (node *Select) Format(buf *TrackedBuffer) {
 		buf.Myprintf(" from %v", node.From)
 	}
 
-	buf.Myprintf("%v%v%v%v%v%v%s%v",
-		node.Where, node.GroupBy, node.Having, node.Window,
+	rollup := ""
+	if node.Rollup {
+		rollup = " with rollup"
+	}
+	buf.Myprintf("%v%v%s%v%v%v%v%s%v",
+		node.Where, node.GroupBy, rollup, node.Having, node.Window,
 		node.OrderBy, node.Limit, node.Lock, node.Into)
 }
 

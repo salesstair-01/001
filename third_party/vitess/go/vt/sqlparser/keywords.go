@@ -531,6 +531,7 @@ var keywords = map[string]int{
 	"role":                          ROLE,
 	"role_admin":                    ROLE_ADMIN,
 	"rollback":                      ROLLBACK,
+	"rollup":                        ROLLUP, // s2z patch
 	"routine":                       ROUTINE,
 	"row":                           ROW,
 	"row_format":                    ROW_FORMAT,

@@ -125,3 +125,9 @@ func rewriteReturns(s Statement) Statement {
 // its value (internal/sqlengine/uservar.go); upstream has no such
 // expression.
 const UserVarAssignFunction = "s2z_assign_user_var"
+
+// groupByClause is GROUP BY's expressions and whether WITH ROLLUP follows.
+type groupByClause struct {
+	exprs  Exprs
+	rollup bool
+}

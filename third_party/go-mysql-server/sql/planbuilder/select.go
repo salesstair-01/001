@@ -59,6 +59,9 @@ func (b *Builder) buildSelect(inScope *scope, s *ast.Select) (outScope *scope) {
 	// 5) Build top-level scopes, replacing aggregation and aliases with
 	//    projections from (4).
 	// 6) Finish with final target projections.
+	if err := rollup(s); err != nil { // s2z patch: GROUP BY ... WITH ROLLUP (s2z_rollup.go)
+		b.handleErr(err)
+	}
 	groupedWindows(s) // s2z patch: window functions over groups (s2z_groupwindow.go)
 	fromScope := b.buildFrom(inScope, s.From)
 	if cn, ok := fromScope.node.(sql.CommentedNode); ok && len(s.Comments) > 0 {

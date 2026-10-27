@@ -182,6 +182,7 @@ func tryCastStatement(v interface{}) Statement {
 %token <bytes> LOOP LEAVE ITERATE REPEAT UNTIL WHILE DO RETURN
 %token <bytes> RETURNS // s2z patch: CREATE FUNCTION ... RETURNS
 %token <bytes> SOME // s2z patch: x > SOME (subquery)
+%token <bytes> ROLLUP WITH_ROLLUP // s2z patch: GROUP BY ... WITH ROLLUP (one token, token.go)
 
 // Permissions Tokens
 %token <bytes> USER IDENTIFIED ROLE REUSE GRANT GRANTS REVOKE NONE ATTRIBUTE RANDOM PASSWORD INITIAL AUTHENTICATION
@@ -843,7 +844,8 @@ base_select_no_cte:
 	Into: $5.(*Into),
 	From: SetAuthType($6.(TableExprs), AuthType_SELECT, true).(TableExprs),
 	Where: NewWhere(WhereStr, tryCastExpr($7)),
-	GroupBy: GroupBy($8.(Exprs)),
+	GroupBy: GroupBy($8.(groupByClause).exprs),
+	Rollup: $8.(groupByClause).rollup,
 	Having: NewWhere(HavingStr, tryCastExpr($9)),
 	Window: $10.(Window),
     }
@@ -10183,11 +10185,15 @@ num_val:
 
 group_by_opt:
   {
-    $$ = Exprs(nil)
+    $$ = groupByClause{}
   }
 | GROUP BY group_by_list
   {
-    $$ = $3.(Exprs)
+    $$ = groupByClause{exprs: $3.(Exprs)}
+  }
+| GROUP BY group_by_list WITH_ROLLUP // s2z patch
+  {
+    $$ = groupByClause{exprs: $3.(Exprs), rollup: true}
   }
 
 group_by_list:
@@ -11546,6 +11552,7 @@ non_reserved_keyword:
   ACTION
 | ANY %prec LOWER_THAN_PAREN // s2z patch: x = ANY (subquery), not a call of any()
 | SOME %prec LOWER_THAN_PAREN // s2z patch
+| ROLLUP // s2z patch
 | RETURNS // s2z patch
 | ACTIVE
 | ADMIN

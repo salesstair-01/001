@@ -1273,6 +1273,28 @@ create_statement:
     $1.(*DDL).OptSelect = &OptSelect{Select: $3.(SelectStatement)}
     $$ = $1.(*DDL)
   }
+| create_table_prefix table_option table_option_list create_query_select_expression // s2z patch: CREATE TABLE t CHARSET x SELECT ...
+  {
+    spec := &TableSpec{}
+    spec.AddTableOption($2.(*TableOption))
+    for _, opt := range $3.([]*TableOption) {
+      spec.AddTableOption(opt)
+    }
+    $1.(*DDL).TableSpec = spec
+    $1.(*DDL).OptSelect = &OptSelect{Select: $4.(SelectStatement)}
+    $$ = $1.(*DDL)
+  }
+| create_table_prefix table_option table_option_list AS create_query_expression // s2z patch
+  {
+    spec := &TableSpec{}
+    spec.AddTableOption($2.(*TableOption))
+    for _, opt := range $3.([]*TableOption) {
+      spec.AddTableOption(opt)
+    }
+    $1.(*DDL).TableSpec = spec
+    $1.(*DDL).OptSelect = &OptSelect{Select: $5.(SelectStatement)}
+    $$ = $1.(*DDL)
+  }
 | create_table_prefix table_spec AS create_query_expression
   {
     $1.(*DDL).TableSpec = $2.(*TableSpec)
@@ -3340,6 +3362,11 @@ table_column_list:
   {
     $$ = &TableSpec{}
     $$.(*TableSpec).AddConstraint($1.(*ConstraintDefinition))
+  }
+| index_definition // s2z patch: CREATE TABLE t (PRIMARY KEY (a)) SELECT ...
+  {
+    $$ = &TableSpec{}
+    $$.(*TableSpec).AddIndex($1.(*IndexDefinition))
   }
 | table_column_list ',' column_definition_for_create
   {

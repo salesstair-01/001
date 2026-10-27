@@ -32,6 +32,11 @@ func validateCreateTable(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.
 	if !ok {
 		return n, transform.SameTree, nil
 	}
+	if ct.Select() != nil {
+		// s2z patch: validated once resolveCreateSelect has added the
+		// SELECT's columns, which its keys may name
+		return n, transform.SameTree, nil
+	}
 
 	err := validateIdentifiers(ct)
 	if err != nil {

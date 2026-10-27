@@ -2,6 +2,7 @@ package plan
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/mysql_db"
@@ -67,14 +68,65 @@ func (tc *TableCopier) ProcessCreateTable(ctx *sql.Context, b sql.NodeExecBuilde
 		return sql.RowsToRowIter(), fmt.Errorf("error: Newly created table does not exist")
 	}
 
-	if tc.createTableSelectCanBeCopied(table) {
+	// s2z patch: the table's CHECK constraints hold for the SELECT's rows
+	// (they were not evaluated: CREATE TABLE t (b int CHECK (b > 0))
+	// SELECT 0 AS b made the table); a direct copy skips them.
+	checks := ct.Checks()
+	if len(checks) == 0 && tc.createTableSelectCanBeCopied(table) {
 		return tc.CopyTableOver(ctx, tc.Source.Schema()[0].Source, table.Name())
 	}
 
 	// TODO: Improve parsing for CREATE TABLE SELECT to allow for IGNORE/REPLACE and custom specs
-	ii := NewInsertInto(tc.db, NewResolvedTable(table, tc.db, nil), tc.Source, tc.options.replace, nil, nil, tc.options.ignore)
+	var ii sql.Node = NewInsertInto(tc.db, NewResolvedTable(table, tc.db, nil), tc.Source, tc.options.replace, nil, nil, tc.options.ignore)
+	if len(checks) > 0 {
+		ii = ii.(*InsertInto).WithChecks(checks)
+	}
 
-	return b.Build(ctx, ii, row)
+	it, err := b.Build(ctx, ii, row)
+	if err != nil {
+		tc.dropCreated(ctx, ct.Name())
+		return nil, err
+	}
+	return &createSelectIter{RowIter: it, drop: func() { tc.dropCreated(ctx, ct.Name()) }}, nil
+}
+
+// s2z patch: a CREATE TABLE ... SELECT whose rows fail (a CHECK, a
+// duplicate key) leaves no table, as in MySQL.
+func (tc *TableCopier) dropCreated(ctx *sql.Context, name string) {
+	db := tc.db
+	if privDb, ok := db.(mysql_db.PrivilegedDatabase); ok {
+		db = privDb.Unwrap()
+	}
+	if d, ok := db.(sql.TableDropper); ok {
+		_ = d.DropTable(ctx, name)
+	}
+}
+
+type createSelectIter struct {
+	sql.RowIter
+	drop   func()
+	failed bool
+}
+
+var _ sql.MutableRowIter = (*createSelectIter)(nil)
+
+// GetChildIter and WithChildIter let the DML accumulator see the insert
+// iterator under it.
+func (i *createSelectIter) GetChildIter() sql.RowIter { return i.RowIter }
+
+func (i *createSelectIter) WithChildIter(child sql.RowIter) sql.RowIter {
+	ni := *i
+	ni.RowIter = child
+	return &ni
+}
+
+func (i *createSelectIter) Next(ctx *sql.Context) (sql.Row, error) {
+	r, err := i.RowIter.Next(ctx)
+	if err != nil && err != io.EOF && !i.failed {
+		i.failed = true
+		i.drop()
+	}
+	return r, err
 }
 
 // createTableSelectCanBeCopied determines whether the newly created table's data can just be copied from the Source table

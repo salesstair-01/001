@@ -44,9 +44,31 @@ func resolveCreateSelect(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.
 			pkOrdinals = append(pkOrdinals, i)
 		}
 	}
+	// s2z patch: a PRIMARY KEY (a) of the table spec makes a SELECT's
+	// column a key column (CREATE TABLE t (PRIMARY KEY (a)) SELECT ...).
+	for _, idx := range ct.Indexes() {
+		if idx.Constraint != sql.IndexConstraint_Primary || len(pkOrdinals) > 0 {
+			continue
+		}
+		for _, ic := range idx.Columns {
+			if i := newSch.IndexOfColName(ic.Name); i >= 0 {
+				newSch[i].PrimaryKey = true
+				newSch[i].Nullable = false
+				pkOrdinals = append(pkOrdinals, i)
+			}
+		}
+	}
 
+	// s2z patch: the spec's indexes, checks, foreign keys, collation and
+	// options stay (they were dropped: CREATE TABLE t (a int, KEY (a))
+	// SELECT ... had no index, CHARSET x SELECT the default collation).
 	newSpec := &plan.TableSpec{
-		Schema: sql.NewPrimaryKeySchema(newSch, pkOrdinals...),
+		Schema:    sql.NewPrimaryKeySchema(newSch, pkOrdinals...),
+		IdxDefs:   ct.Indexes(),
+		ChDefs:    ct.Checks(),
+		FkDefs:    ct.ForeignKeys(),
+		Collation: ct.Collation,
+		TableOpts: ct.TableOpts,
 	}
 
 	newCreateTable := plan.NewCreateTable(ct.Database(), ct.Name(), ct.IfNotExists(), ct.Temporary(), newSpec)

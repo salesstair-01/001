@@ -24,6 +24,17 @@ func TestMySQLSyntax(t *testing.T) {
 		{"SELECT * FROM s3 ORDER BY a", "[9,1,x 9,2,y 9,3,z]"},
 		{"CREATE TABLE s4 (k int primary key) AS SELECT a AS k FROM s1", "[]"},
 		{"SELECT * FROM s4 ORDER BY k", "[1 2 3]"},
+		// the table spec's keys, checks and options stay; a failed copy
+		// leaves no table
+		{"CREATE TABLE s6 (PRIMARY KEY (a)) SELECT * FROM s1", "[]"},
+		{"SELECT column_name, column_key FROM information_schema.columns WHERE table_name = 's6' ORDER BY ordinal_position", "[a,PRI b,]"},
+		{"INSERT INTO s6 SELECT * FROM s1", "ERR 1062"},
+		{"CREATE TABLE s7 (a int, KEY ka (a)) SELECT * FROM s1", "[]"},
+		{"SELECT index_name, column_name FROM information_schema.statistics WHERE table_name = 's7'", "[ka,a]"},
+		{"CREATE TABLE s8 ENGINE=InnoDB, CHARSET latin1 AS SELECT a FROM s1", "[]"},
+		{"SELECT table_collation FROM information_schema.tables WHERE table_name = 's8'", "[latin1_swedish_ci]"},
+		{"CREATE TABLE s9 (b int CHECK (b > 0)) SELECT 1 AS a, 0 AS b", "ERR 3819"},
+		{"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 's9'", "[0]"},
 		// @v := expr in an expression; ROW(...) constructors
 		{"SET @n := 0", "[]"},
 		{"SELECT a, @n := @n + 1 FROM s1 ORDER BY a", "[1,1 2,2 3,3]"},

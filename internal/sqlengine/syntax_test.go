@@ -76,6 +76,7 @@ func TestMySQLSyntax(t *testing.T) {
 		{"CREATE TABLE dcw WITH qn AS (SELECT 10*a AS a FROM dsrc), qn2 AS (SELECT 3*a AS b FROM qn) SELECT * FROM qn2", "[]"},
 		{"SELECT * FROM dcw ORDER BY b", "[30 30 60]"},
 		{"CREATE TABLE dck (id INT PRIMARY KEY, name VARCHAR(40)) PARTITION BY KEY() PARTITIONS 4", "[]"},
+		{"ANALYZE TABLE dck", "[app.dck,analyze,status,OK]"},
 		// columns of NULLs and of user variables take MySQL's types (a NULL
 		// column made the table unreadable)
 		{"SET @a := 1, @b := 'x', @c := 1.5, @d := NULL, @e := 1e3", "[]"},

@@ -46,7 +46,16 @@ func (itr *analyzeTableIter) Next(ctx *sql.Context) (sql.Row, error) {
 		msgText = err.Error()
 	}
 	itr.idx++
-	return sql.Row{t.Name(), "analyze", msgType, msgText}, nil
+	// s2z patch: MySQL names the table db.table
+	db := itr.db
+	if d, ok := t.(sql.Databaseable); ok && d.Database() != "" {
+		db = d.Database()
+	}
+	name := t.Name()
+	if db != "" {
+		name = db + "." + name
+	}
+	return sql.Row{name, "analyze", msgType, msgText}, nil
 }
 
 func (itr *analyzeTableIter) Close(ctx *sql.Context) error {

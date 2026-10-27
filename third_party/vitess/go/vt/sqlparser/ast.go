@@ -5763,7 +5763,16 @@ type ComparisonExpr struct {
 	Operator    string
 	Left, Right Expr
 	Escape      Expr
+	// Quantifier is QuantifierAny or QuantifierAll for x op ANY / ALL (subquery) (s2z
+	// patch), empty otherwise.
+	Quantifier string
 }
+
+// ComparisonExpr.Quantifier (s2z patch)
+const (
+	QuantifierAny = "any"
+	QuantifierAll = "all"
+)
 
 // ComparisonExpr.Operator
 const (
@@ -5786,6 +5795,10 @@ const (
 
 // Format formats the node.
 func (node *ComparisonExpr) Format(buf *TrackedBuffer) {
+	if node.Quantifier != "" {
+		buf.Myprintf("%v %s %s %v", node.Left, node.Operator, node.Quantifier, node.Right)
+		return
+	}
 	buf.Myprintf("%v %s %v", node.Left, node.Operator, node.Right)
 	if node.Escape != nil {
 		buf.Myprintf(" escape %v", node.Escape)

@@ -55,7 +55,9 @@ Supported and tested: `CREATE/DROP DATABASE`, `CREATE/DROP/RENAME TABLE`,
 `CREATE/DROP INDEX` (online, unique and non-unique, prefix indexes),
 `CREATE/DROP VIEW` (stored in the catalog, visible to every session and query
 engine), `INSERT ... ON DUPLICATE KEY UPDATE`, `REPLACE`, multi-row
-`INSERT`, `UPDATE`/`DELETE` with `LIMIT`, joins, subqueries,
+`INSERT`, `UPDATE`/`DELETE` with `LIMIT`, joins, subqueries (also
+`x > ALL (subquery)`, `= ANY`, `SOME`), row constructors, `@v := expr`,
+`DO`,
 `UNION`/`EXCEPT`, CTEs including `WITH RECURSIVE`, window
 functions (also over a grouped query: `RANK() OVER (ORDER BY SUM(x)) ...
 GROUP BY`), JSON columns and functions, generated columns, `ENUM`/`SET`,

@@ -119,3 +119,9 @@ func rewriteReturns(s Statement) Statement {
 	}
 	return s
 }
+
+// UserVarAssignFunction is what @v := expr in an expression becomes:
+// s2z_assign_user_var('v', expr), which sqld defines to set @v and be
+// its value (internal/sqlengine/uservar.go); upstream has no such
+// expression.
+const UserVarAssignFunction = "s2z_assign_user_var"

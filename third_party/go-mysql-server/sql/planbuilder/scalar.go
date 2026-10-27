@@ -636,6 +636,18 @@ func (b *Builder) buildComparison(inScope *scope, c *ast.ComparisonExpr) sql.Exp
 		escape = b.buildScalar(inScope, c.Escape)
 	}
 
+	if c.Quantifier != "" { // s2z patch: x op ANY / ALL (subquery)
+		b.qFlags.Set(sql.QFlagScalarSubquery)
+		op, all := c.Operator, c.Quantifier == ast.QuantifierAll
+		switch {
+		case op == ast.EqualStr && !all:
+			return plan.NewInSubquery(left, right)
+		case (op == ast.NotEqualStr || op == "!=") && all:
+			b.qFlags.Set(sql.QFlgNotExpr)
+			return expression.NewNot(plan.NewInSubquery(left, right))
+		}
+		return plan.NewQuantifiedSubquery(left, right, op, all)
+	}
 	switch strings.ToLower(c.Operator) {
 	case ast.RegexpStr:
 		regexpLike, err := function.NewRegexpLike(left, right)

@@ -181,6 +181,7 @@ func tryCastStatement(v interface{}) Statement {
 %token <bytes> DECLARE CONDITION CURSOR CONTINUE EXIT UNDO HANDLER FOUND SQLWARNING SQLEXCEPTION FETCH OPEN CLOSE
 %token <bytes> LOOP LEAVE ITERATE REPEAT UNTIL WHILE DO RETURN
 %token <bytes> RETURNS // s2z patch: CREATE FUNCTION ... RETURNS
+%token <bytes> SOME // s2z patch: x > SOME (subquery)
 
 // Permissions Tokens
 %token <bytes> USER IDENTIFIED ROLE REUSE GRANT GRANTS REVOKE NONE ATTRIBUTE RANDOM PASSWORD INITIAL AUTHENTICATION
@@ -355,7 +356,7 @@ func tryCastStatement(v interface{}) Statement {
 %type <val> describe_statement explain_statement explainable_statement
 %type <val> begin_statement commit_statement rollback_statement start_transaction_statement load_statement
 %type <bytes> work_opt no_opt chain_opt release_opt index_name_opt no_first_last yes_no
-%type <val> comment_opt comment_list
+%type <val> comment_opt comment_list delete_comment_opt
 %type <val> distinct_opt union_op intersect_op except_op insert_or_replace
 %type <val> match_option format_opt plan_opt
 %type <val> separator_opt
@@ -568,6 +569,14 @@ command:
   select_statement
   {
     $$ = $1.(SelectStatement)
+  }
+| DO expression_list // s2z patch: DO evaluates expressions; as SET @s2z_do = ...
+  {
+    var exprs SetVarExprs
+    for _, e := range $2.(Exprs) {
+      exprs = append(exprs, &SetVarExpr{Scope: SetScope_User, Name: &ColName{Name: NewColIdent("s2z_do")}, Expr: e})
+    }
+    $$ = &Set{Exprs: exprs}
   }
 | paren_select_statement
   {
@@ -1036,7 +1045,7 @@ update_statement:
   }
 
 delete_statement:
-  with_clause_opt DELETE comment_opt FROM table_name opt_partition_clause where_expression_opt order_by_opt limit_opt
+  with_clause_opt DELETE delete_comment_opt FROM table_name opt_partition_clause where_expression_opt order_by_opt limit_opt
   {
     tableName := $5.(TableName)
     delete := &Delete{
@@ -1059,7 +1068,7 @@ delete_statement:
     delete.With = with
     $$ = delete
   }
-| with_clause_opt DELETE comment_opt FROM table_name_list USING table_references where_expression_opt
+| with_clause_opt DELETE delete_comment_opt FROM table_name_list USING table_references where_expression_opt
   {
     delete := &Delete{
 	Comments: Comments($3.(Comments)),
@@ -1072,7 +1081,7 @@ delete_statement:
     delete.With = with
     $$ = delete
   }
-| with_clause_opt DELETE comment_opt table_name_list from_or_using table_references where_expression_opt
+| with_clause_opt DELETE delete_comment_opt table_name_list from_or_using table_references where_expression_opt
   {
     delete := &Delete{
 	Comments: Comments($3.(Comments)),
@@ -1085,7 +1094,7 @@ delete_statement:
     delete.With = with
     $$ = delete
   }
-| with_clause_opt DELETE comment_opt delete_table_list from_or_using table_references where_expression_opt
+| with_clause_opt DELETE delete_comment_opt delete_table_list from_or_using table_references where_expression_opt
   {
     tableNames := $4.(TableNames)
     authTargetNames := make([]string, len(tableNames)*2)
@@ -7783,6 +7792,26 @@ comment_opt:
     setAllowComments(yylex, false)
   }
 
+// s2z patch: DELETE [LOW_PRIORITY] [IGNORE]; the options are accepted and
+// have no effect.
+delete_comment_opt:
+  comment_opt
+  {
+    $$ = $1
+  }
+| comment_opt LOW_PRIORITY
+  {
+    $$ = $1
+  }
+| comment_opt IGNORE
+  {
+    $$ = $1
+  }
+| comment_opt LOW_PRIORITY IGNORE
+  {
+    $$ = $1
+  }
+
 comment_list:
  {
     $$ = Comments(nil)
@@ -8917,6 +8946,18 @@ condition:
   {
     $$ = &ComparisonExpr{Left: tryCastExpr($1), Operator: $2.(string), Right: tryCastExpr($3)}
   }
+| value_expression compare ANY subquery // s2z patch
+  {
+    $$ = &ComparisonExpr{Left: tryCastExpr($1), Operator: $2.(string), Quantifier: QuantifierAny, Right: $4.(*Subquery)}
+  }
+| value_expression compare SOME subquery // s2z patch
+  {
+    $$ = &ComparisonExpr{Left: tryCastExpr($1), Operator: $2.(string), Quantifier: QuantifierAny, Right: $4.(*Subquery)}
+  }
+| value_expression compare ALL subquery // s2z patch
+  {
+    $$ = &ComparisonExpr{Left: tryCastExpr($1), Operator: $2.(string), Quantifier: QuantifierAll, Right: $4.(*Subquery)}
+  }
 | value_expression IN col_tuple
   {
     $$ = &ComparisonExpr{Left: tryCastExpr($1), Operator: InStr, Right: $3.(ColTuple)}
@@ -9096,6 +9137,15 @@ value_expression:
   value
   {
     $$ = typedLiteral(tryCastExpr($1))
+  }
+| ID ASSIGNMENT_OP value_expression // s2z patch: @v := expr in an expression
+  {
+    name := string($1)
+    if !strings.HasPrefix(name, "@") || strings.HasPrefix(name, "@@") {
+      yylex.Error("syntax error")
+      return 1
+    }
+    $$ = &FuncExpr{Name: NewColIdent(UserVarAssignFunction), Exprs: SelectExprs{&AliasedExpr{Expr: NewStrVal([]byte(name[1:]))}, &AliasedExpr{Expr: tryCastExpr($3)}}}
   }
 | ACCOUNT
   {
@@ -10402,6 +10452,14 @@ tuple_expression:
       $$ = $1.(ValTuple)
     }
   }
+| ROW row_tuple // s2z patch: ROW(a, b), a row constructor
+  {
+    if len($2.(ValTuple)) == 1 {
+      $$ = &ParenExpr{$2.(ValTuple)[0]}
+    } else {
+      $$ = $2.(ValTuple)
+    }
+  }
 
 assignment_list:
   assignment_expression
@@ -11459,6 +11517,8 @@ qualified_column_name_safe_reserved_keyword:
 */
 non_reserved_keyword:
   ACTION
+| ANY %prec LOWER_THAN_PAREN // s2z patch: x = ANY (subquery), not a call of any()
+| SOME %prec LOWER_THAN_PAREN // s2z patch
 | RETURNS // s2z patch
 | ACTIVE
 | ADMIN

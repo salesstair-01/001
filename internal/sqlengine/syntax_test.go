@@ -24,6 +24,22 @@ func TestMySQLSyntax(t *testing.T) {
 		{"SELECT * FROM s3 ORDER BY a", "[9,1,x 9,2,y 9,3,z]"},
 		{"CREATE TABLE s4 (k int primary key) AS SELECT a AS k FROM s1", "[]"},
 		{"SELECT * FROM s4 ORDER BY k", "[1 2 3]"},
+		// @v := expr in an expression; ROW(...) constructors
+		{"SET @n := 0", "[]"},
+		{"SELECT a, @n := @n + 1 FROM s1 ORDER BY a", "[1,1 2,2 3,3]"},
+		{"SELECT @n, @g := GROUP_CONCAT(a ORDER BY a) FROM s1", "[3,1,2,3]"},
+		{"SELECT @g", "[1,2,3]"},
+		{"SELECT ROW(1, 2) = ROW(1, 2), ROW(a, 1) > ROW(1, 1) FROM s1 ORDER BY a", "[1,0 1,1 1,1]"},
+		{"SELECT (SELECT 1, 2, 3) = ROW(1, 2, 3)", "[1]"},
+		// DO; DELETE LOW_PRIORITY / IGNORE
+		{"DO 1 + 1, SLEEP(0)", "[]"},
+		{"DO nosuchfn(1)", "ERR 1305"},
+		{"CREATE TABLE d1 (a int primary key)", "[]"},
+		{"INSERT INTO d1 VALUES (1), (2), (3)", "[]"},
+		{"DELETE IGNORE FROM d1 WHERE a = 1", "[]"},
+		{"DELETE LOW_PRIORITY FROM d1 WHERE a = 2", "[]"},
+		{"DELETE LOW_PRIORITY IGNORE d1 FROM d1 WHERE a = 3", "[]"},
+		{"SELECT COUNT(*) FROM d1", "[0]"},
 		// columns of NULLs and of user variables take MySQL's types (a NULL
 		// column made the table unreadable)
 		{"SET @a := 1, @b := 'x', @c := 1.5, @d := NULL, @e := 1e3", "[]"},

@@ -82,6 +82,7 @@ var keywords = map[string]int{
 	"analyze":                       ANALYZE,
 	"and":                           AND,
 	"application_password_admin":    APPLICATION_PASSWORD_ADMIN,
+	"any":                           ANY, // s2z patch
 	"array":                         ARRAY,
 	"as":                            AS,
 	"asc":                           ASC,
@@ -569,6 +570,7 @@ var keywords = map[string]int{
 	"slow":                          SLOW,
 	"smallint":                      SMALLINT,
 	"snapshot":                      SNAPSHOT,
+	"some":                          SOME, // s2z patch
 	"source":                        SOURCE,
 	"source_auto_position":          SOURCE_AUTO_POSITION,
 	"source_connect_retry":          SOURCE_CONNECT_RETRY,

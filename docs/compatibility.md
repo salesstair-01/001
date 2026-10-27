@@ -198,7 +198,11 @@ Accepted but different:
   `ascii_bin`; each is checked against MySQL by the differential tests.
   Values are stored as UTF-8 whatever the character set, and a character the
   column's character set can't hold is refused (1366), as in strict mode.
-  Others are refused.
+  Other collations go-mysql-server can encode and sort (about 180: utf16,
+  utf32, the other latin1 and utf8mb4 collations, ...) are accepted too, with
+  go-mysql-server's weights, but not checked against MySQL by the
+  differential tests. Character sets go-mysql-server has no encoder for
+  (ucs2, utf16le, cp1250, cp1251, koi8r, gbk, big5, sjis, ...) are refused.
 - `CHAR(n)` drops trailing spaces on store, as MySQL does.
 - Known gaps, found by the differential tests and inherited from
   go-mysql-server's comparisons (keys follow the same rules, so results are

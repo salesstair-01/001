@@ -115,7 +115,8 @@ func (t *TableInfo) clone() *TableInfo {
 	return &out
 }
 
-// The five collations v1 supports; all others are rejected (D2).
+// The collations v1 supports by name; any other with an encoder and sort
+// weights is supported too (collationSupported).
 var supportedCollations = map[sql.CollationID]bool{
 	sql.Collation_utf8mb4_0900_ai_ci: true,
 	sql.Collation_utf8mb4_general_ci: true,
@@ -141,7 +142,9 @@ func collationSupported(c sql.CollationID) bool {
 			return true
 		}
 	}
-	return false
+	// any other collation go-mysql-server can encode and sort: values are
+	// stored as UTF-8, keys by the collation's weights (codec.go)
+	return c.CharacterSet().Encoder() != nil && c.Sorter() != nil
 }
 
 func (s *Store) catalogPrefix() []byte {

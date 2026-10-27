@@ -52,6 +52,13 @@ func TestMySQLSyntax(t *testing.T) {
 		{"DELETE LOW_PRIORITY IGNORE d1 FROM d1 WHERE a = 3", "[]"},
 		{"SELECT COUNT(*) FROM d1", "[0]"},
 		{"CREATE TABLE p1 (a int) PARTITION BY LIST (a) (PARTITION x1 VALUES IN (2,5), PARTITION x2 VALUES IN (3))", "[]"},
+		// collations beyond the default ones
+		{"CREATE TABLE c1 (a int, b VARCHAR(5), PRIMARY KEY (a)) DEFAULT CHARSET=utf32", "[]"},
+		{"CREATE TABLE c2 (a CHAR(5) CHARACTER SET latin1 COLLATE latin1_general_ci, KEY (a))", "[]"},
+		{"INSERT INTO c2 VALUES ('abc'), ('ABD'), ('xyz')", "[]"},
+		{"SELECT a FROM c2 WHERE a = 'ABC'", "[abc]"},
+		{"SELECT a FROM c2 ORDER BY a", "[abc ABD xyz]"},
+		{"CREATE TABLE c4 (s VARCHAR(10) CHARACTER SET utf16, KEY (s))", "[]"},
 		// columns of NULLs and of user variables take MySQL's types (a NULL
 		// column made the table unreadable)
 		{"SET @a := 1, @b := 'x', @c := 1.5, @d := NULL, @e := 1e3", "[]"},

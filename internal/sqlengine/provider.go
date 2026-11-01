@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
 // Provider is the go-mysql-server database provider. Every database a tenant
@@ -175,9 +174,6 @@ func (d *Database) CreateTable(ctx *sql.Context, name string, schema sql.Primary
 		ci, err := columnInfo(col, uint32(i+1))
 		if err != nil {
 			return err
-		}
-		if types.IsGeometry(col.Type) {
-			return fmt.Errorf("column %s: spatial types are not supported in v1", col.Name)
 		}
 		info.Columns = append(info.Columns, ci)
 	}

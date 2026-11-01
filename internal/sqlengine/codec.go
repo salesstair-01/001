@@ -62,6 +62,17 @@ func (c *colCodec) encodeValue(ctx context.Context, v any) ([]byte, error) {
 		}
 		s, err := types.JsonToMySqlString(w)
 		return []byte(s), err
+	case types.IsGeometry(t):
+		// MySQL's internal format: the SRID, then the WKB
+		cv, _, err := t.Convert(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		g, ok := cv.(types.GeometryValue)
+		if !ok {
+			return nil, fmt.Errorf("cannot encode %T as %s", v, t)
+		}
+		return g.Serialize(), nil
 	case types.IsText(t) || types.IsBinaryType(t):
 		b, err := toBytes(v)
 		if err != nil {
@@ -71,8 +82,6 @@ func (c *colCodec) encodeValue(ctx context.Context, v any) ([]byte, error) {
 			return nil, err
 		}
 		return trimChar(t, b), nil
-	case types.IsGeometry(t):
-		return nil, fmt.Errorf("spatial types are not supported in v1")
 	}
 	return nil, fmt.Errorf("column %s: unsupported type %s", c.info.Name, t)
 }
@@ -122,6 +131,8 @@ func (c *colCodec) decodeValue(ctx context.Context, b []byte) (any, error) {
 		return types.Timespan(n), nil
 	case types.IsJSON(t):
 		v = string(b)
+	case types.IsGeometry(t):
+		v = append([]byte(nil), b...)
 	case types.IsBinaryType(t):
 		v = append([]byte(nil), b...)
 	case types.IsText(t):

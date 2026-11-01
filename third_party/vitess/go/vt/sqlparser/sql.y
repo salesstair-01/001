@@ -149,6 +149,8 @@ func tryCastStatement(v interface{}) Statement {
 // column type is its length, never the start of the body.
 %nonassoc LOWER_THAN_PAREN
 %nonassoc '('
+// s2z patch: after SELECT, these are its options, not the start of a column
+%nonassoc SQL_BIG_RESULT SQL_SMALL_RESULT HIGH_PRIORITY DISTINCTROW
 
 // There is no need to define precedence for the JSON
 // operators because the syntax is restricted enough that
@@ -1227,6 +1229,7 @@ lexer_position:
   }
 
 lexer_old_position:
+  %prec LOWER_THAN_PAREN
   {
     $$ = yyOldPosition(yylex)
   }
@@ -3946,11 +3949,11 @@ char_type:
 // characters or bytes, as in MySQL.
 | TEXT '(' INTEGRAL ')'
   {
-    $$ = ColumnType{Type: sizedLobType("text", $3, 4)}
+    $$ = ColumnType{Type: sizedLobType("text", $3, 4), Length: lobTooLong($3)}
   }
 | BLOB '(' INTEGRAL ')'
   {
-    $$ = ColumnType{Type: sizedLobType("blob", $3, 1)}
+    $$ = ColumnType{Type: sizedLobType("blob", $3, 1), Length: lobTooLong($3)}
   }
 | TINYTEXT
   {
@@ -8035,6 +8038,31 @@ query_opts:
     }
     $$ = qo
   }
+// s2z patch: the optimizer hints MySQL accepts, which change nothing here,
+// and DISTINCTROW, DISTINCT
+| query_opts SQL_BIG_RESULT
+  {
+    $$ = $1
+  }
+| query_opts SQL_SMALL_RESULT
+  {
+    $$ = $1
+  }
+| query_opts HIGH_PRIORITY
+  {
+    $$ = $1
+  }
+| query_opts DISTINCTROW
+  {
+    opt := QueryOpts{Distinct: true}
+    qo := $1.(QueryOpts)
+    qop := &qo
+    if err := qop.merge(opt); err != nil {
+    	yylex.Error(err.Error())
+	return 1
+    }
+    $$ = qo
+  }
 
 distinct_opt:
   {
@@ -10204,6 +10232,16 @@ value:
 | DATE STRING
   {
     $$ = &SQLVal{Type: StrVal, Val: $2, Typed: "date"}
+  }
+// s2z patch: ODBC's {d 'date'}, {t 'time'} and {ts 'timestamp'}
+| '{' ID STRING '}'
+  {
+    kind := map[string]string{"d": "date", "t": "time", "ts": "timestamp"}[strings.ToLower(string($2))]
+    if kind == "" {
+      yylex.Error("syntax error")
+      return 1
+    }
+    $$ = &SQLVal{Type: StrVal, Val: $3, Typed: kind}
   }
 | TIME STRING
   {

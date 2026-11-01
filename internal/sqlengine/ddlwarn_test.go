@@ -21,6 +21,7 @@ func TestColumnTypeDeprecationWarnings(t *testing.T) {
 		{"CREATE TABLE dw (a int(11), b tinyint(1), c tinyint(1) unsigned, d tinyint(2), e int(5) zerofill, f int zerofill, " +
 			"g bigint(20) unsigned, h float(7,2), i double(10,3), j decimal(10,2) unsigned, k float unsigned, l float(10), m smallint, o bool, p serial)",
 			"W W W W Z W Z W D D U U"},
+		{"CREATE TABLE dz (b int(2) zerofill, c int zerofill, d float(5,2) zerofill, e decimal(5,2) unsigned zerofill)", "Z W Z Z D Z U"},
 		{"ALTER TABLE dw ADD COLUMN q mediumint(9), MODIFY a int(3)", "W W"},
 		{"/* comment */ create table dw2 (a int)", ""},
 		{"CREATE TABLE IF NOT EXISTS dw3 (a int(10) unsigned NOT NULL)", "W"},

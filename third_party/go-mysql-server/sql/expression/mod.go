@@ -146,6 +146,8 @@ func (m *Mod) convertLeftRight(ctx *sql.Context, left interface{}, right interfa
 	typ := m.Type()
 	lIsTimeType := types.IsTime(m.LeftChild.Type())
 	rIsTimeType := types.IsTime(m.RightChild.Type())
+	left, lIsTimeType = temporalNumber(m.LeftChild.Type(), left, lIsTimeType)    // s2z patch
+	right, rIsTimeType = temporalNumber(m.RightChild.Type(), right, rIsTimeType) // s2z patch
 
 	if types.IsFloat(typ) {
 		left = convertValueToType(ctx, typ, left, lIsTimeType)

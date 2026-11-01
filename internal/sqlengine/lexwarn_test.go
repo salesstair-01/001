@@ -85,6 +85,18 @@ func TestIgnoreWarnings(t *testing.T) {
 		{"SHOW WARNINGS", "[]"},
 		{"UPDATE IGNORE w1 SET b = 'toolong' WHERE e = 1", "[]"},
 		{"SHOW WARNINGS", "[Warning,1265,Data truncated for column 'b' at row 1 Warning,1265,Data truncated for column 'b' at row 2]"},
+		// without strict mode, as with IGNORE: a value a temporal column
+		// can't hold is truncated (a string) or out of range (a number)
+		{"CREATE TABLE w2 (a datetime(6), d date, y year, i int)", "[]"},
+		{"INSERT INTO w2 VALUES ('x', 'x', 'x', 'x')", "ERR 1292"},
+		{"SET SQL_MODE = 'NO_ENGINE_SUBSTITUTION'", "[]"},
+		{"INSERT INTO w2 VALUES ('x', 'x', 'x', 'x')", "[]"},
+		{"SHOW WARNINGS", "[Warning,1265,Data truncated for column 'a' at row 1 Warning,1265,Data truncated for column 'd' at row 1 Warning,1366,Incorrect integer value: 'x' for column 'y' at row 1 Warning,1366,Incorrect integer value: 'x' for column 'i' at row 1]"},
+		{"INSERT INTO w2 VALUES (-1.5, -1, 3000, 99999999999)", "[]"},
+		{"SHOW WARNINGS", "[Warning,1264,Out of range value for column 'a' at row 1 Warning,1264,Out of range value for column 'd' at row 1 Warning,1264,Out of range value for column 'y' at row 1 Warning,1264,Out of range value for column 'i' at row 1]"},
+		{"UPDATE w2 SET d = 'zz'", "[]"},
+		{"SHOW WARNINGS", "[Warning,1265,Data truncated for column 'd' at row 1 Warning,1265,Data truncated for column 'd' at row 2]"},
+		{"SET SQL_MODE = DEFAULT", "[]"},
 	} {
 		if got := connRun(t, conn, s.q); got != s.want {
 			t.Errorf("%s: got %s, want %s", s.q, got, s.want)

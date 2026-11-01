@@ -41,6 +41,9 @@ func ddlWarnings(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan
 	// MySQL warns about column types while parsing, before anything else.
 	if ddlStatement.MatchString(ctx.Query()) {
 		if st, err := sqlparser.Parse(ctx.Query()); err == nil {
+			if err := ddlErrors(ctx, st); err != nil {
+				return nil, transform.SameTree, err
+			}
 			for _, c := range columnDefinitions(st) {
 				if strings.EqualFold(c.Type.Type, "year") && c.Type.Length != nil {
 					// YEAR(4) is deprecated; other widths are refused.
@@ -79,13 +82,16 @@ func columnDefinitions(st sqlparser.Statement) []*sqlparser.ColumnDefinition {
 }
 
 // columnTypeWarnings is what MySQL 8.0 warns about a column type, in its
-// order. A signed TINYINT(1) (BOOL) keeps its display width silently.
+// order: ZEROFILL first, then the type's own. ZEROFILL alone is no display
+// width.
 func columnTypeWarnings(t *sqlparser.ColumnType) []string {
 	var ws []string
-	switch typ := strings.ToLower(t.Type); typ {
+	if bool(t.Zerofill) {
+		ws = append(ws, warnZerofill)
+	}
+	switch strings.ToLower(t.Type) {
 	case "tinyint", "smallint", "mediumint", "int", "integer", "bigint":
-		boolean := typ == "tinyint" && !bool(t.Unsigned) && !bool(t.Zerofill) && t.Length != nil && string(t.Length.Val) == "1"
-		if (t.Length != nil || bool(t.Zerofill)) && !boolean {
+		if t.Length != nil {
 			ws = append(ws, warnDisplayWidth)
 		}
 	case "float", "double", "real", "double precision":
@@ -99,9 +105,6 @@ func columnTypeWarnings(t *sqlparser.ColumnType) []string {
 		if bool(t.Unsigned) {
 			ws = append(ws, warnUnsigned)
 		}
-	}
-	if bool(t.Zerofill) {
-		ws = append(ws, warnZerofill)
 	}
 	return ws
 }

@@ -40,6 +40,7 @@ func (b *Builder) buildInsert(inScope *scope, i *ast.Insert) (outScope *scope) {
 	if i.With != nil {
 		inScope = b.buildWith(inScope, i.With)
 	}
+	b.rewriteInsertIntoView(i) // s2z patch
 
 	destScope, ok := b.buildResolvedTableForTablename(inScope, i.Table, nil)
 	if !ok {
@@ -442,6 +443,7 @@ func (b *Builder) buildDelete(inScope *scope, d *ast.Delete) (outScope *scope) {
 	//   The end result is that the ComDelete counter is incremented during prepare statements, which is incorrect.
 	sql.IncrementStatusVariable(b.ctx, "Com_delete", 1)
 	b.qFlags.Set(sql.QFlagDelete)
+	b.rewriteDeleteFromView(d) // s2z patch
 
 	outScope = b.buildFrom(inScope, d.TableExprs)
 	b.buildWhere(outScope, d.Where)
@@ -497,6 +499,7 @@ func (b *Builder) buildUpdate(inScope *scope, u *ast.Update) (outScope *scope) {
 	//   The end result is that the ComDelete counter is incremented during prepare statements, which is incorrect.
 	sql.IncrementStatusVariable(b.ctx, "Com_update", 1)
 	b.qFlags.Set(sql.QFlagUpdate)
+	b.rewriteUpdateOfView(u) // s2z patch
 
 	outScope = b.buildFrom(inScope, u.TableExprs)
 

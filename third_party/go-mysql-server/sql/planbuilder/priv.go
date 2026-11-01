@@ -404,35 +404,13 @@ func (b *Builder) buildFlush(inScope *scope, f *ast.Flush) (outScope *scope) {
 		b.handleErr(err)
 	}
 	outScope = inScope.push()
-	var writesToBinlog = true
-	switch strings.ToLower(f.Type) {
-	case "no_write_to_binlog", "local":
-		//writesToBinlog = false
-		err := fmt.Errorf("%s not supported", f.Type)
-		b.handleErr(err)
+	// s2z patch: FLUSH of any kind has nothing to do in sqld (no logs, no
+	// status counters, no privilege tables to reload); it succeeds, as in
+	// MySQL, rather than failing as not supported.
+	if strings.HasPrefix(strings.ToLower(f.Option.Name), "relay logs for channel") {
+		b.handleErr(fmt.Errorf("%s not supported", f.Option.Name))
 	}
-
-	// MySQL docs: https://dev.mysql.com/doc/refman/8.0/en/flush.html
-	// Some opts should be no-ops, but we should support others, so have those be errors
-	opt := strings.ToLower(f.Option.Name)
-	if strings.HasPrefix(opt, "relay logs for channel") {
-		err := fmt.Errorf("%s not supported", f.Option.Name)
-		b.handleErr(err)
-	}
-	switch opt {
-	case "privileges":
-		node, _ := plan.NewFlushPrivileges(writesToBinlog).WithDatabase(b.resolveDb("mysql"))
-		outScope.node = node
-	case "binary logs", "engine logs", "table", "tables":
-		node := plan.Nothing{}
-		outScope.node = node
-	case "error logs", "relay logs", "general logs", "slow logs", "status":
-		err := fmt.Errorf("%s not supported", f.Option.Name)
-		b.handleErr(err)
-	default:
-		err := fmt.Errorf("%s not supported", f.Option.Name)
-		b.handleErr(err)
-	}
+	outScope.node = plan.Nothing{}
 	return outScope
 }
 

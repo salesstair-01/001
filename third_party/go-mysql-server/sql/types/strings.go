@@ -431,6 +431,8 @@ func ConvertToBytes(ctx context.Context, v interface{}, t sql.StringType, dest [
 		start = 0
 	case GeometryValue:
 		return s.Serialize(), nil
+	case Timespan: // s2z patch: a TIME as text, hh:mm:ss[.ffffff]
+		val = append(dest, s.Bytes()...)
 	default:
 		return nil, sql.ErrConvertToSQL.New(s, t)
 	}

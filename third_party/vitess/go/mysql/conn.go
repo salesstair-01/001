@@ -1588,10 +1588,14 @@ func (c *Conn) execQuery(ctx context.Context, query string, handler Handler, mul
 		}
 	} else {
 		if err != nil {
-			// We can't send an error in the middle of a stream.
-			// All we can do is abort the send, which will cause a 2013.
-			log.Errorf("Error in the middle of a stream to %s: %v", c, err)
-			return "", err
+			// s2z patch: an error after some rows ends the result set with
+			// an error packet, as MySQL sends one, and the connection goes on
+			// (upstream closed it, a 2013 for the client).
+			if werr := c.writeErrorPacketFromError(err); werr != nil {
+				log.Errorf("Error writing query error to %s: %v", c, werr)
+				return "", werr
+			}
+			return "", nil
 		}
 
 		// Send the end packet only sendFinished is false (results were streamed).

@@ -172,3 +172,26 @@ func TestDatetimeFractions(t *testing.T) {
 		}
 	}
 }
+
+// TestSetTimestamp: SET TIMESTAMP fixes the statement's time, as MySQL's
+// tests rely on; DEFAULT goes back to the clock.
+func TestSetTimestamp(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"SET TIMESTAMP = 1000000000", "[]"},
+		{"SELECT CURDATE(), UNIX_TIMESTAMP(), CURRENT_TIME()", "[2001-09-09,1000000000,01:46:40]"},
+		{"SET TIMESTAMP = 1000000000.5", "[]"},
+		{"SELECT UNIX_TIMESTAMP(NOW(6))", "[1000000000.500000]"},
+		{"SET TIMESTAMP = DEFAULT", "[]"},
+		{"SELECT YEAR(NOW()) > 2001", "[1]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %q, want %q", s.q, got, s.want)
+		}
+	}
+}

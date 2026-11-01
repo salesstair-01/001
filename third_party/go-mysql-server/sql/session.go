@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -443,6 +444,16 @@ func (c *Context) WithQuery(q string) *Context {
 func (c *Context) QueryTime() time.Time {
 	if c == nil {
 		return time.Time{}
+	}
+	// s2z patch: SET TIMESTAMP = n fixes NOW() and the other functions of
+	// the statement's time, as in MySQL; DEFAULT (1000) is the clock.
+	if c.Session != nil {
+		if v, err := c.Session.GetSessionVariable(c, "timestamp"); err == nil {
+			if f, ok := v.(float64); ok && f > 0 && f != 1000 {
+				sec := math.Floor(f)
+				return time.Unix(int64(sec), int64(math.Round((f-sec)*1e6))*1000).In(c.queryTime.Location())
+			}
+		}
 	}
 	return c.queryTime
 }

@@ -180,6 +180,8 @@ func (d *Div) convertLeftRight(ctx *sql.Context, left interface{}, right interfa
 	typ := d.internalType()
 	lIsTimeType := types.IsTime(d.LeftChild.Type())
 	rIsTimeType := types.IsTime(d.RightChild.Type())
+	left, lIsTimeType = temporalNumber(d.LeftChild.Type(), left, lIsTimeType)    // s2z patch
+	right, rIsTimeType = temporalNumber(d.RightChild.Type(), right, rIsTimeType) // s2z patch
 
 	if types.IsFloat(typ) {
 		left = convertValueToType(ctx, typ, left, lIsTimeType)

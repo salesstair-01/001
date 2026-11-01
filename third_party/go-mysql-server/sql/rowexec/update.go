@@ -111,7 +111,7 @@ func applyUpdateExpressionsWithIgnoreRow(ctx *sql.Context, updateExprs []sql.Exp
 		if err != nil {
 			var wtce sql.WrappedTypeConversionError
 			isTypeConversionError := errors.As(err, &wtce)
-			if !isTypeConversionError || !ignore {
+			if !isTypeConversionError || !(ignore || !strictMode(ctx)) { // s2z patch: non-strict mode adjusts values too
 				return nil, err
 			}
 

@@ -114,7 +114,8 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 				// IGNORE is specified:
 				// ERROR 3140 (22032): Invalid JSON text: "Invalid value." at position 0 in value for column
 				// 'table.column'.
-				if i.ignore && col.Type.Type() != query.Type_JSON {
+				// s2z patch: and without strict mode, as MySQL
+				if (i.ignore || !strictMode(ctx)) && col.Type.Type() != query.Type_JSON {
 					if _, ok := col.Type.(sql.NumberType); ok {
 						orig := row[idx]
 						if converted == nil {

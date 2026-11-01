@@ -148,8 +148,7 @@ func (fkEditor *ForeignKeyEditor) OnUpdateRestrict(ctx *sql.Context, refActionDa
 	}
 	defer rowIter.Close(ctx)
 	if _, err = rowIter.Next(ctx); err == nil {
-		return sql.ErrForeignKeyParentViolation.New(refActionData.ForeignKey.Name,
-			refActionData.ForeignKey.Table, refActionData.ForeignKey.ParentTable, refActionData.RowMapper.GetKeyString(old))
+		return sql.ErrForeignKeyParentViolation.New(refActionData.ForeignKey.ViolationText()) // s2z patch
 	}
 	if err != io.EOF {
 		return err
@@ -327,8 +326,7 @@ func (fkEditor *ForeignKeyEditor) OnDeleteRestrict(ctx *sql.Context, refActionDa
 	}
 	defer rowIter.Close(ctx)
 	if _, err = rowIter.Next(ctx); err == nil {
-		return sql.ErrForeignKeyParentViolation.New(refActionData.ForeignKey.Name,
-			refActionData.ForeignKey.Table, refActionData.ForeignKey.ParentTable, refActionData.RowMapper.GetKeyString(row))
+		return sql.ErrForeignKeyParentViolation.New(refActionData.ForeignKey.ViolationText()) // s2z patch
 	}
 	if err != io.EOF {
 		return err
@@ -535,8 +533,7 @@ func (reference *ForeignKeyReferenceHandler) CheckReference(ctx *sql.Context, ro
 		}
 	}
 
-	return sql.ErrForeignKeyChildViolation.New(reference.ForeignKey.Name, reference.ForeignKey.Table,
-		reference.ForeignKey.ParentTable, reference.RowMapper.GetKeyString(row))
+	return sql.ErrForeignKeyChildViolation.New(reference.ForeignKey.ViolationText()) // s2z patch
 }
 
 // CheckTable checks that every row in the table has an index entry in the referenced table.

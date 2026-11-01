@@ -414,10 +414,10 @@ var (
 	ErrInsertIntoNonNullableProvidedNull = errors.NewKind("Column '%v' cannot be null") // s2z patch: MySQL's text
 
 	// ErrForeignKeyChildViolation is called when a rows is added but there is no parent row, and a foreign key constraint fails. Add the parent row first.
-	ErrForeignKeyChildViolation = errors.NewKind("cannot add or update a child row - Foreign key violation on fk: `%s`, table: `%s`, referenced table: `%s`, key: `%s`")
+	ErrForeignKeyChildViolation = errors.NewKind("Cannot add or update a child row: a foreign key constraint fails (%s)") // s2z patch: MySQL's text, see ViolationText
 
 	// ErrForeignKeyParentViolation is called when a parent row that is deleted has children, and a foreign key constraint fails. Delete the children first.
-	ErrForeignKeyParentViolation = errors.NewKind("cannot delete or update a parent row - Foreign key violation on fk: `%s`, table: `%s`, referenced table: `%s`, key: `%s`")
+	ErrForeignKeyParentViolation = errors.NewKind("Cannot delete or update a parent row: a foreign key constraint fails (%s)") // s2z patch: MySQL's text, see ViolationText
 
 	// ErrForeignKeyColumnCountMismatch is called when the declared column and referenced column counts do not match.
 	ErrForeignKeyColumnCountMismatch = errors.NewKind("the foreign key must reference an equivalent number of columns")

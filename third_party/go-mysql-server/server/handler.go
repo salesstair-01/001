@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"runtime/debug"
 	"runtime/trace"
 	"sync"
 	"time"
@@ -799,13 +800,21 @@ func (h *Handler) errorWrappedDoQuery(
 	bindings map[string]*querypb.BindVariable,
 	callback func(*sqltypes.Result, bool) error,
 	qFlags *sql.QueryFlags,
-) (string, error) {
+) (remainder string, err error) {
+	// s2z patch: a statement that panics fails, as an error, rather than
+	// ending the connection (the session goes on, as MySQL's would)
+	defer func() {
+		if x := recover(); x != nil {
+			logrus.Errorf("statement panicked: %v\n%s\n%s", x, query, debug.Stack())
+			remainder, err = "", fmt.Errorf("internal error: %v", x)
+		}
+	}()
 	start := time.Now()
 	if h.sel != nil {
 		h.sel.QueryStarted()
 	}
 
-	remainder, err := h.doQuery(ctx, c, query, parsed, nil, mode, h.executeQuery, bindings, callback, qFlags)
+	remainder, err = h.doQuery(ctx, c, query, parsed, nil, mode, h.executeQuery, bindings, callback, qFlags)
 	if err != nil {
 		err = sql.CastSQLError(err)
 	}

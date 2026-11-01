@@ -273,6 +273,7 @@ func isAggregateFunc(name string) bool {
 // buildAggregateFunc tags aggregate functions in the correct scope
 // and makes the aggregate available for reference by other clauses.
 func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExpr) sql.Expression {
+	checkNestedAggregate(b, e.Exprs) // s2z patch
 	if len(inScope.windowFuncs) > 0 {
 		err := sql.ErrNonAggregatedColumnWithoutGroupBy.New()
 		b.handleErr(err)
@@ -442,6 +443,7 @@ func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExp
 }
 
 func (b *Builder) buildGroupConcat(inScope *scope, e *ast.GroupConcatExpr) sql.Expression {
+	checkNestedAggregate(b, e.Exprs) // s2z patch
 	if inScope.groupBy == nil {
 		inScope.initGroupBy()
 	}
@@ -802,6 +804,10 @@ func (b *Builder) analyzeHaving(fromScope, projScope *scope, having *ast.Where) 
 			} else if isWindowFunc(name) {
 				_ = b.buildWindowFunc(fromScope, name, n, (*ast.WindowDef)(n.Over))
 			}
+		case *ast.GroupConcatExpr:
+			// s2z patch: GROUP_CONCAT is an aggregate here too
+			_ = b.buildGroupConcat(fromScope, n)
+			return false, nil
 		case *ast.ColName:
 			// add to extra cols
 			dbName := strings.ToLower(n.Qualifier.DbQualifier.String())

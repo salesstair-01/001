@@ -19,7 +19,10 @@ func ignoreWarning(col *sql.Column, val interface{}, err error, rowNum int) *sql
 	switch {
 	case sql.ErrValueOutOfRange.Is(err):
 		w.Code, w.Message = 1264, fmt.Sprintf("Out of range value for column '%s' at row %d", col.Name, rowNum)
-	case types.ErrLengthBeyondLimit.Is(err), types.IsEnum(col.Type), types.IsSet(col.Type), types.IsTimespan(col.Type):
+	case (types.IsTime(col.Type) || types.IsYear(col.Type)) && !isString(val):
+		// a number that is no date
+		w.Code, w.Message = 1264, fmt.Sprintf("Out of range value for column '%s' at row %d", col.Name, rowNum)
+	case types.ErrLengthBeyondLimit.Is(err), types.IsEnum(col.Type), types.IsSet(col.Type), types.IsTimespan(col.Type), types.IsTime(col.Type):
 		w.Code, w.Message = 1265, fmt.Sprintf("Data truncated for column '%s' at row %d", col.Name, rowNum)
 	case types.IsNumber(col.Type):
 		typ := "integer"
@@ -34,6 +37,22 @@ func ignoreWarning(col *sql.Column, val interface{}, err error, rowNum int) *sql
 		w.Code, w.Message = sqlerr.Num, sqlerr.Message
 	}
 	return w
+}
+
+func isString(v interface{}) bool {
+	switch v.(type) {
+	case string, []byte:
+		return true
+	}
+	return false
+}
+
+// strictMode is whether the session's sql_mode makes a value a column
+// can't hold an error; without it, INSERT and UPDATE store the closest
+// value it can hold with a warning, as IGNORE does.
+func strictMode(ctx *sql.Context) bool {
+	m := sql.LoadSqlMode(ctx)
+	return m.ModeEnabled("STRICT_TRANS_TABLES") || m.ModeEnabled("STRICT_ALL_TABLES") || m.ModeEnabled("TRADITIONAL")
 }
 
 // noteDecimalRounding notes, as MySQL does (1265), a value that a DECIMAL

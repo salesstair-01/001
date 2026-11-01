@@ -355,6 +355,8 @@ func (a *Arithmetic) convertLeftRight(ctx *sql.Context, left interface{}, right 
 
 	lIsTimeType := types.IsTime(a.LeftChild.Type())
 	rIsTimeType := types.IsTime(a.RightChild.Type())
+	left, lIsTimeType = temporalNumber(a.LeftChild.Type(), left, lIsTimeType)    // s2z patch
+	right, rIsTimeType = temporalNumber(a.RightChild.Type(), right, rIsTimeType) // s2z patch
 
 	if i, ok := left.(*TimeDelta); ok {
 		left = i
@@ -808,6 +810,26 @@ func truncatedTypeName(typ sql.Type) string {
 		return "INTEGER"
 	}
 	return strings.ToUpper(typ.String())
+}
+
+// temporalNumber is a DATE or DATETIME value as MySQL uses it in
+// arithmetic: YYYYMMDD, YYYYMMDDhhmmss[.f] with the type's fractional
+// digits, as a string, and false: it is converted (s2z patch).
+func temporalNumber(t sql.Type, v interface{}, isTimeType bool) (interface{}, bool) {
+	tm, ok := v.(time.Time)
+	dt, isDT := t.(sql.DatetimeType)
+	if !ok || !isDT {
+		return v, isTimeType
+	}
+	tm = tm.In(time.UTC)
+	if types.IsDateType(t) {
+		return tm.Format("20060102"), false
+	}
+	s := tm.Format("20060102150405")
+	if p := dt.Precision(); p > 0 {
+		s += fmt.Sprintf(".%06d", tm.Nanosecond()/1000)[:p+1]
+	}
+	return s, false
 }
 
 // timespanNumber is a TIME as MySQL uses it in arithmetic: HHMMSS, with

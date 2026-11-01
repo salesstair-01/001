@@ -230,6 +230,7 @@ func (b *Builder) buildDropView(inScope *scope, c *ast.DDL) (outScope *scope) {
 func (b *Builder) buildDropTable(inScope *scope, c *ast.DDL) (outScope *scope) {
 	outScope = inScope.push()
 	var dropTables []sql.Node
+	var missing []string
 	dbName := c.FromTables[0].DbQualifier.String()
 	if dbName == "" {
 		dbName = b.currentDb().Name()
@@ -247,7 +248,7 @@ func (b *Builder) buildDropTable(inScope *scope, c *ast.DDL) (outScope *scope) {
 				b.ctx.Session.Warn(&sql.Warning{
 					Level:   "Note",
 					Code:    mysql.ERBadTable,
-					Message: fmt.Sprintf("Unknown table '%s'", tableName),
+					Message: fmt.Sprintf("Unknown table '%s.%s'", dbName, t.Name.String()), // s2z patch: MySQL's text
 				})
 				continue
 			} else if err != nil {
@@ -266,9 +267,12 @@ func (b *Builder) buildDropTable(inScope *scope, c *ast.DDL) (outScope *scope) {
 			}
 			dropTables = append(dropTables, tableScope.node)
 		} else if !c.IfExists {
-			err := sql.ErrTableNotFound.New(tableName)
-			b.handleErr(err)
+			missing = append(missing, dbName+"."+t.Name.String())
 		}
+	}
+	if len(missing) > 0 {
+		// s2z patch: MySQL drops nothing and names every missing table
+		b.handleErr(mysql.NewSQLError(mysql.ERBadTable, "42S02", "Unknown table '%s'", strings.Join(missing, ",")))
 	}
 
 	outScope.node = plan.NewDropTable(dropTables, c.IfExists)

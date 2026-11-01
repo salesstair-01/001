@@ -26,6 +26,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/types"
+	"github.com/dolthub/vitess/go/sqltypes"
 )
 
 // ErrTimeUnexpectedlyNil is thrown when a function encounters and unexpectedly nil time
@@ -953,9 +954,16 @@ func (n *Now) Description() string {
 
 // Type implements the sql.Expression interface.
 func (n *Now) Type() sql.Type {
-	// TODO: precision
 	if n.prec == nil {
 		return types.Datetime
+	}
+	// s2z patch: NOW(n) is a DATETIME(n)
+	if lit, ok := n.prec.(*expression.Literal); ok {
+		if p, _, err := types.Int64.Convert(context.Background(), lit.Value()); err == nil {
+			if pi := p.(int64); pi >= 0 && pi <= 6 {
+				return types.MustCreateDatetimeType(sqltypes.Datetime, int(pi))
+			}
+		}
 	}
 	return types.DatetimeMaxPrecision
 }

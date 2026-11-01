@@ -758,7 +758,7 @@ func (b *BaseBuilder) buildDropDB(ctx *sql.Context, n *plan.DropDB, row sql.Row)
 			ctx.Session.Warn(&sql.Warning{
 				Level:   "Note",
 				Code:    mysql.ERDbDropExists,
-				Message: fmt.Sprintf("Can't drop database %s; database doesn't exist ", n.DbName),
+				Message: fmt.Sprintf("Can't drop database '%s'; database doesn't exist", n.DbName), // s2z patch: MySQL's text
 			})
 
 			rows := []sql.Row{{types.OkResult{RowsAffected: 0}}}

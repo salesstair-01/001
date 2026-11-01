@@ -7941,9 +7941,6 @@ var (
 		input:  "use db/",
 		output: "syntax error at position 8 near 'db'",
 	}, {
-		input:  "select $ from t",
-		output: "syntax error at position 9 near '$'",
-	}, {
 		input:  "select : from t",
 		output: "syntax error at position 9 near ':'",
 	}, {
@@ -9198,6 +9195,11 @@ func TestReservedKeywordsParseWhenQualified(t *testing.T) {
 		"straight_join":       true,
 		"when":                true,
 		"dual":                true,
+		// s2z patch: SELECT options, as in MySQL
+		"distinctrow":      true,
+		"high_priority":    true,
+		"sql_big_result":   true,
+		"sql_small_result": true,
 	}
 
 	for _, kw := range correctlyDontParse {

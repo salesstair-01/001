@@ -21,6 +21,16 @@ func sizedLobType(base string, n []byte, bytesPerChar uint64) string {
 	return "long" + base
 }
 
+// lobTooLong is BLOB(n) or TEXT(n)'s length when it is above MySQL's
+// limit, which sqld refuses (1439); nil otherwise, the type alone saying
+// the size.
+func lobTooLong(n []byte) *SQLVal {
+	if v, err := strconv.ParseUint(string(n), 10, 64); err == nil && v <= 4294967295 {
+		return nil
+	}
+	return NewIntVal(n)
+}
+
 // parenSelect is (inner) ORDER BY ... LIMIT ... (s2z patch): the outer
 // clauses go on the inner query when it has none of its own, and otherwise
 // apply to its result, as a derived table.

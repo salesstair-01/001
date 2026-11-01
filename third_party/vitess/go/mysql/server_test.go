@@ -772,16 +772,16 @@ func TestServer(t *testing.T) {
 	}
 	th.SetWarnings(0)
 
-	// If there's an error after streaming has started,
-	// we should get a 2013
+	// If there's an error after streaming has started, the client gets
+	// it (s2z patch: upstream closed the connection, a 2013)
 	th.SetErr(NewSQLError(ERUnknownComError, SSUnknownComError, "forced error after send"))
 	output, ok = runMysql(t, params, "error after send")
 	if ok {
 		t.Fatalf("mysql should have failed: %v", output)
 	}
-	if !strings.Contains(output, "ERROR 2013 (HY000)") ||
-		!strings.Contains(output, "Lost connection to MySQL server during query") {
-		t.Errorf("Unexpected output for 'panic'")
+	if !strings.Contains(output, "ERROR 1047 (08S01)") ||
+		!strings.Contains(output, "forced error after send") {
+		t.Errorf("Unexpected output for 'error after send': %v", output)
 	}
 
 	// Run an 'insert' command, no rows, but rows affected.

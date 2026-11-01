@@ -300,7 +300,7 @@ func (tkn *Tokenizer) Scan() (int, []byte) {
 	default:
 		tkn.next()
 		switch ch {
-		case '=', ',', '(', ')', '+', '*', '%', '^', '~':
+		case '=', ',', '(', ')', '+', '*', '%', '^', '~', '{', '}': // s2z patch: { } for ODBC literals
 			return int(ch), nil
 		case '&':
 			if tkn.lastChar == '&' {
@@ -868,7 +868,9 @@ func (tkn *Tokenizer) reset() {
 }
 
 func isLetter(ch uint16) bool {
-	return 'a' <= ch && ch <= 'z' || 'A' <= ch && ch <= 'Z' || ch == '_'
+	// s2z patch: and, as MySQL, '$' and the bytes of a non-ASCII character
+	// (the tokenizer reads bytes; eofChar is not one)
+	return 'a' <= ch && ch <= 'z' || 'A' <= ch && ch <= 'Z' || ch == '_' || ch == '$' || (ch >= 0x80 && ch <= 0xff)
 }
 
 func isCarat(ch uint16) bool {

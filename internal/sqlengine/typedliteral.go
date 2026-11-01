@@ -57,12 +57,23 @@ func (l *typedLiteral) text() string {
 	return s
 }
 
+// fracDigits is the digits after the point a literal is written with.
+func (l *typedLiteral) fracDigits() int {
+	_, frac, _ := strings.Cut(strings.TrimSpace(l.text()), ".")
+	n := 0
+	for n < len(frac) && frac[n] >= '0' && frac[n] <= '9' {
+		n++
+	}
+	return min(6, n)
+}
+
 func (l *typedLiteral) Type() sql.Type {
 	switch l.kind {
 	case "date":
 		return types.Date
 	case "time":
-		return types.Time
+		// TIME'...' has the fractional digits it is written with
+		return types.CreateTimeType(l.fracDigits())
 	}
 	_, frac, _ := strings.Cut(l.text(), ".")
 	return types.MustCreateDatetimeType(sqltypes.Datetime, min(6, len(frac)))
@@ -77,7 +88,7 @@ func (l *typedLiteral) Eval(ctx *sql.Context, row sql.Row) (any, error) {
 		if !ok || t.isDT || t.over {
 			return nil, bad
 		}
-		return formatTime(t.us, resultScale(t.us, t)), nil // a string: go-mysql-server casts and compares Timespans badly
+		return types.CreateTimeType(l.fracDigits()).MicrosecondsToTimespan(t.us), nil
 	case "date":
 		t, ok := parseDateLiteral(s)
 		if !ok {

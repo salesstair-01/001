@@ -27,6 +27,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/transform"
 	"github.com/dolthub/go-mysql-server/sql/types"
+	"github.com/dolthub/vitess/go/sqltypes"
 )
 
 // DatetimeConversion is a shorthand function for CONVERT(expr, DATETIME)
@@ -289,7 +290,7 @@ func (ut *UnixTimestamp) Eval(ctx *sql.Context, row sql.Row) (interface{}, error
 	if err != nil {
 		// If we aren't able to convert the value to a date, return 0 and set
 		// a warning to match MySQL's behavior
-		ctx.Warn(1292, "Incorrect datetime value: %s", ut.Date.String())
+		ctx.Warn(1292, "Incorrect datetime value: '%v'", date) // s2z patch: the value, quoted, as MySQL
 		return int64(0), nil
 	}
 
@@ -391,19 +392,21 @@ func (r *FromUnixtime) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) 
 		vals[i] = val
 	}
 
-	// TODO support decimal value in timestamp
-	n, _, err := types.Int64.Convert(ctx, vals[0])
+	// s2z patch: with the fractional seconds of a decimal or float
+	if vals[0] == nil {
+		return nil, nil
+	}
+	n, _, err := types.InternalDecimalType.Convert(ctx, vals[0])
 	if err != nil {
 		return nil, err
 	}
-	if n == nil {
+	d, ok := n.(decimal.Decimal)
+	if !ok || d.IsNegative() || d.GreaterThan(decimal.NewFromInt(MaxUnixTimeSecs)) {
 		return nil, nil
 	}
-	sec := n.(int64)
-	if sec > MaxUnixTimeSecs || sec < 0 {
-		return nil, nil
-	}
-	t := time.Unix(sec, 0).In(time.UTC)
+	sec := d.IntPart()
+	us := d.Sub(decimal.NewFromInt(sec)).Shift(6).Truncate(0).IntPart()
+	t := time.Unix(sec, us*1000).In(time.UTC)
 	tz, err := SessionTimeZone(ctx)
 	if err != nil {
 		return nil, err
@@ -444,6 +447,14 @@ func (r *FromUnixtime) String() string {
 func (r *FromUnixtime) Type() sql.Type {
 	switch len(r.ChildExpressions) {
 	case 1:
+		// s2z patch: the digits of its argument, as MySQL
+		t := r.ChildExpressions[0].Type()
+		if types.IsInteger(t) {
+			return types.Datetime
+		}
+		if dt, ok := t.(sql.DecimalType); ok {
+			return types.MustCreateDatetimeType(sqltypes.Datetime, int(min(dt.Scale(), 6)))
+		}
 		return types.DatetimeMaxPrecision
 	case 2:
 		return types.Text

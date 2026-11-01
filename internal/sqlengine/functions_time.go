@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/expression/function"
 	"github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/mysql"
@@ -22,17 +23,23 @@ import (
 
 func init() {
 	for name, f := range map[string]sql.Function{
-		"addtime":     fnN("addtime", 2, 2, fixedType(types.LongText), false, func(ctx *sql.Context, a []sql.Expression, v []any) (any, error) { return addTime(ctx, a, v, 1) }),
-		"subtime":     fnN("subtime", 2, 2, fixedType(types.LongText), false, func(ctx *sql.Context, a []sql.Expression, v []any) (any, error) { return addTime(ctx, a, v, -1) }),
-		"timediff":    fnN("timediff", 2, 2, fixedType(types.LongText), false, evalTimeDiff),
-		"time_to_sec": fnN("time_to_sec", 1, 1, fixedType(types.Int64), false, evalTimeToSec),
-		"sec_to_time": fnN("sec_to_time", 1, 1, fixedType(types.LongText), false, evalSecToTime),
-		"maketime":    fnN("maketime", 3, 3, fixedType(types.LongText), false, evalMakeTime),
-		"makedate":    fnN("makedate", 2, 2, fixedType(types.Date), false, evalMakeDate),
-		"period_add":  fnN("period_add", 2, 2, fixedType(types.Int64), false, evalPeriodAdd),
-		"period_diff": fnN("period_diff", 2, 2, fixedType(types.Int64), false, evalPeriodDiff),
-		"utc_date":    fnN("utc_date", 0, 0, fixedType(types.Date), false, evalUTCDate),
-		"utc_time":    fnN("utc_time", 0, 1, fixedType(types.LongText), false, evalUTCTime),
+		"addtime":      fnN("addtime", 2, 2, fixedType(types.LongText), false, func(ctx *sql.Context, a []sql.Expression, v []any) (any, error) { return addTime(ctx, a, v, 1) }),
+		"subtime":      fnN("subtime", 2, 2, fixedType(types.LongText), false, func(ctx *sql.Context, a []sql.Expression, v []any) (any, error) { return addTime(ctx, a, v, -1) }),
+		"timediff":     fnN("timediff", 2, 2, fixedType(types.LongText), false, evalTimeDiff),
+		"time_to_sec":  fnN("time_to_sec", 1, 1, fixedType(types.Int64), false, evalTimeToSec),
+		"sec_to_time":  fnN("sec_to_time", 1, 1, fixedType(types.LongText), false, evalSecToTime),
+		"maketime":     fnN("maketime", 3, 3, fixedType(types.LongText), false, evalMakeTime),
+		"makedate":     fnN("makedate", 2, 2, fixedType(types.Date), false, evalMakeDate),
+		"period_add":   fnN("period_add", 2, 2, fixedType(types.Int64), false, evalPeriodAdd),
+		"period_diff":  fnN("period_diff", 2, 2, fixedType(types.Int64), false, evalPeriodDiff),
+		"utc_date":     fnN("utc_date", 0, 0, fixedType(types.Date), false, evalUTCDate),
+		"utc_time":     fnN("utc_time", 0, 1, fixedType(types.LongText), false, evalUTCTime),
+		"current_time": fnN("current_time", 0, 1, fixedType(types.LongText), false, evalCurrentTime),
+		"curtime":      fnN("curtime", 0, 1, fixedType(types.LongText), false, evalCurrentTime),
+		"hour":         fnN("hour", 1, 1, fixedType(types.Int32), false, timePart(func(t temporal) int64 { return t.us / usPerSec / 3600 })),
+		"minute":       fnN("minute", 1, 1, fixedType(types.Int32), false, timePart(func(t temporal) int64 { return t.us / usPerSec / 60 % 60 })),
+		"second":       fnN("second", 1, 1, fixedType(types.Int32), false, timePart(func(t temporal) int64 { return t.us / usPerSec % 60 })),
+		"microsecond":  fnN("microsecond", 1, 1, fixedType(types.Int32), false, timePart(func(t temporal) int64 { return t.us % usPerSec })),
 	} {
 		overrides[name] = f
 	}
@@ -519,6 +526,54 @@ func utcNow(ctx *sql.Context) time.Time {
 func evalUTCDate(ctx *sql.Context, _ []sql.Expression, _ []any) (any, error) {
 	y, m, d := utcNow(ctx).Date()
 	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC).Format("2006-01-02"), nil
+}
+
+// evalCurrentTime is CURRENT_TIME([fsp]): the time of NOW(fsp), with its
+// fractional digits (go-mysql-server drops them).
+func evalCurrentTime(ctx *sql.Context, _ []sql.Expression, v []any) (any, error) {
+	var args []sql.Expression
+	if len(v) == 1 {
+		args = append(args, expression.NewLiteral(v[0], types.Int64))
+	}
+	now, err := function.NewNow(args...)
+	if err != nil {
+		return nil, err
+	}
+	nv, err := now.Eval(ctx, nil)
+	t, ok := nv.(time.Time)
+	if err != nil || !ok {
+		return nil, err
+	}
+	fsp := 0
+	if len(v) == 1 {
+		f, _ := fnInt64(ctx, v[0])
+		fsp = int(f)
+	}
+	h, m, sec := t.Clock()
+	return formatTime(int64(h*3600+m*60+sec)*usPerSec+int64(t.Nanosecond())/1000, fsp), nil
+}
+
+// timePart is HOUR, MINUTE, SECOND or MICROSECOND, which MySQL takes of a
+// TIME as well as a DATETIME: HOUR of a TIME can exceed 23. The parts of a
+// negative time are positive.
+func timePart(part func(temporal) int64) func(*sql.Context, []sql.Expression, []any) (any, error) {
+	return func(ctx *sql.Context, args []sql.Expression, v []any) (any, error) {
+		if v[0] == nil {
+			return nil, nil
+		}
+		t, ok := toTemporal(ctx, args[0], v[0])
+		if !ok {
+			return nil, nil
+		}
+		if t.isDT {
+			h, m, sec := t.dt.Clock()
+			t = temporal{us: int64(h*3600+m*60+sec)*usPerSec + int64(t.dt.Nanosecond())/1000}
+		}
+		if t.us < 0 {
+			t.us = -t.us
+		}
+		return int32(part(t)), nil
+	}
 }
 
 func evalUTCTime(ctx *sql.Context, _ []sql.Expression, v []any) (any, error) {

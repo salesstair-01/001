@@ -38,6 +38,7 @@ var errCodes = []struct {
 	{regexp.MustCompile(`^Updating of (old|new) row is not allowed`), 1362, "HY000"},
 	{regexp.MustCompile(`^stored procedure ".*" does not exist`), 1305, "42000"},
 	{regexp.MustCompile(`^Result consisted of more than one row`), 1172, "42000"},
+	{regexp.MustCompile(`^invalid GIS data provided`), 3037, "22023"},
 	{regexp.MustCompile(`^Can't update table \S+ in stored function/trigger`), 1442, "HY000"},
 }
 

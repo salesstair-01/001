@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/expression"
+	"github.com/dolthub/go-mysql-server/sql/expression/function"
 	"github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/mysql"
 	"github.com/shopspring/decimal"
@@ -128,14 +130,19 @@ func toUint64Bits(ctx *sql.Context, v any) (uint64, error) {
 }
 
 var extraFunctions = map[string]sql.Function{
-	"truncate":    fnN("truncate", 2, 2, truncateType, false, evalTruncate),
-	"insert":      fnN("insert", 4, 4, fixedType(types.LongText), false, evalInsert),
-	"export_set":  fnN("export_set", 3, 5, fixedType(types.LongText), false, evalExportSet),
-	"make_set":    fnN("make_set", 2, -1, fixedType(types.LongText), true, evalMakeSet),
-	"aes_encrypt": fnN("aes_encrypt", 2, 3, fixedType(types.LongBlob), false, func(ctx *sql.Context, _ []sql.Expression, v []any) (any, error) { return aesCrypt(ctx, v, true) }),
-	"aes_decrypt": fnN("aes_decrypt", 2, 3, fixedType(types.LongBlob), false, func(ctx *sql.Context, _ []sql.Expression, v []any) (any, error) { return aesCrypt(ctx, v, false) }),
-	"uuid_short":  fnN("uuid_short", 0, 0, fixedType(types.Uint64), false, evalUUIDShort),
-	"benchmark":   fnN("benchmark", 2, 2, fixedType(types.Int64), true, evalBenchmark),
+	"oct": sql.Function1{Name: "oct", Fn: func(e sql.Expression) sql.Expression {
+		return function.NewConv(e, expression.NewLiteral(int64(10), types.Int64), expression.NewLiteral(int64(8), types.Int64))
+	}},
+	"session_user": sql.NewFunction0("session_user", function.NewUser),
+	"system_user":  sql.NewFunction0("system_user", function.NewUser),
+	"truncate":     fnN("truncate", 2, 2, truncateType, false, evalTruncate),
+	"insert":       fnN("insert", 4, 4, fixedType(types.LongText), false, evalInsert),
+	"export_set":   fnN("export_set", 3, 5, fixedType(types.LongText), false, evalExportSet),
+	"make_set":     fnN("make_set", 2, -1, fixedType(types.LongText), true, evalMakeSet),
+	"aes_encrypt":  fnN("aes_encrypt", 2, 3, fixedType(types.LongBlob), false, func(ctx *sql.Context, _ []sql.Expression, v []any) (any, error) { return aesCrypt(ctx, v, true) }),
+	"aes_decrypt":  fnN("aes_decrypt", 2, 3, fixedType(types.LongBlob), false, func(ctx *sql.Context, _ []sql.Expression, v []any) (any, error) { return aesCrypt(ctx, v, false) }),
+	"uuid_short":   fnN("uuid_short", 0, 0, fixedType(types.Uint64), false, evalUUIDShort),
+	"benchmark":    fnN("benchmark", 2, 2, fixedType(types.Int64), true, evalBenchmark),
 }
 
 func init() {

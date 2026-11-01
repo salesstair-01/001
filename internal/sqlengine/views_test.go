@@ -1,6 +1,7 @@
 package sqlengine
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -48,5 +49,42 @@ func TestTruncate(t *testing.T) {
 	mustExec(t, db, "INSERT INTO k VALUES (2)")
 	if got := strings.Join(queryStrings(t, db, "SELECT v FROM k"), ";"); got != "2" {
 		t.Fatalf("keyless table after TRUNCATE: %q", got)
+	}
+}
+
+// TestWriteThroughViews: INSERT, UPDATE and DELETE of a view whose
+// definition selects columns of one table write that table, as MySQL 8.0.46
+// does, and a view MySQL can't write is refused with its error.
+func TestWriteThroughViews(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE t1 (a int PRIMARY KEY, b int, c int)", "[]"},
+		{"CREATE VIEW v1 AS SELECT a, b AS bb, c+1 AS cc FROM t1 WHERE a > 0", "[]"},
+		{"CREATE VIEW v2 AS SELECT * FROM t1", "[]"},
+		{"CREATE VIEW v3 AS SELECT a, bb FROM v1 WHERE bb < 100", "[]"},
+		{"CREATE VIEW v4 AS SELECT count(*) n FROM t1", "[]"},
+		{"INSERT INTO v1 (a, bb) VALUES (1, 10)", "ERR 1471"},
+		{"INSERT INTO v1 VALUES (3, 30, 5)", "ERR 1348"},
+		{"INSERT INTO v4 VALUES (1)", "ERR 1471"},
+		{"UPDATE v4 SET n = 1", "ERR 1288"},
+		{"INSERT INTO v2 VALUES (5, 50, 500)", "[]"},
+		{"INSERT INTO v3 VALUES (6, 60)", "[]"},
+		{"SELECT * FROM t1", "[5,50,500 6,60,NULL]"},
+		{"UPDATE v2 SET c = 9 WHERE b > 40", "[]"},
+		{"INSERT INTO t1 VALUES (-1, 1, 1)", "[]"},
+		{"UPDATE v1 SET bb = 99", "[]"},
+		{"SELECT * FROM t1", "[-1,1,1 5,99,9 6,99,9]"},
+		{"DELETE FROM v3 WHERE a = 5", "[]"},
+		{"DELETE FROM v1 WHERE bb = 99", "[]"},
+		{"SELECT * FROM t1", "[-1,1,1]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %q, want %q", s.q, got, s.want)
+		}
 	}
 }

@@ -92,8 +92,12 @@ func (s *Substring) Eval(
 		text = []rune(string(str))
 	case nil:
 		return nil, nil
-	default:
-		return nil, sql.ErrInvalidType.New(reflect.TypeOf(str).String())
+	default: // s2z patch: a temporal or numeric value, as MySQL shows it
+		t, err := valueText(ctx, s.Str.Type(), str)
+		if err != nil {
+			return nil, err
+		}
+		text = t
 	}
 
 	start, err := s.Start.Eval(ctx, row)
@@ -168,7 +172,13 @@ func (s *Substring) Resolved() bool {
 }
 
 // Type implements the Expression interface.
-func (s *Substring) Type() sql.Type { return s.Str.Type() }
+func (s *Substring) Type() sql.Type {
+	// s2z patch: the substring of a number or a date is text
+	if t := s.Str.Type(); types.IsText(t) || types.IsBinaryType(t) {
+		return t
+	}
+	return types.LongText
+}
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
 func (s *Substring) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
@@ -353,8 +363,12 @@ func (l Left) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		text = []rune(string(str))
 	case nil:
 		return nil, nil
-	default:
-		return nil, sql.ErrInvalidType.New(reflect.TypeOf(str).String())
+	default: // s2z patch: a temporal or numeric value, as MySQL shows it
+		t, err := valueText(ctx, l.str.Type(), str)
+		if err != nil {
+			return nil, err
+		}
+		text = t
 	}
 
 	var length int64
@@ -471,8 +485,12 @@ func (r Right) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		text = []rune(string(b))
 	case nil:
 		return nil, nil
-	default:
-		return nil, sql.ErrInvalidType.New(reflect.TypeOf(str).String())
+	default: // s2z patch: a temporal or numeric value, as MySQL shows it
+		t, err := valueText(ctx, r.str.Type(), str)
+		if err != nil {
+			return nil, err
+		}
+		text = t
 	}
 
 	var length int64
@@ -587,8 +605,12 @@ func (i Instr) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		text = []rune(string(str))
 	case nil:
 		return nil, nil
-	default:
-		return nil, sql.ErrInvalidType.New(reflect.TypeOf(str).String())
+	default: // s2z patch: a temporal or numeric value, as MySQL shows it
+		t, err := valueText(ctx, i.str.Type(), str)
+		if err != nil {
+			return nil, err
+		}
+		text = t
 	}
 
 	substr, err := i.substr.Eval(ctx, row)
@@ -601,11 +623,15 @@ func (i Instr) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	case string:
 		subtext = []rune(substr)
 	case []byte:
-		subtext = []rune(string(subtext))
+		subtext = []rune(string(substr)) // s2z patch: was subtext
 	case nil:
 		return nil, nil
-	default:
-		return nil, sql.ErrInvalidType.New(reflect.TypeOf(str).String())
+	default: // s2z patch: a temporal or numeric value, as MySQL shows it
+		t, err := valueText(ctx, i.substr.Type(), substr)
+		if err != nil {
+			return nil, err
+		}
+		subtext = t
 	}
 
 	return findSubsequence(text, subtext) + 1, nil

@@ -363,9 +363,14 @@ func convertOrTruncate(ctx *sql.Context, i interface{}, t sql.Type) (interface{}
 
 	// For numeric and string types, if the value can't be cleanly converted, truncate to the zero value for
 	// the type and log a warning in the session.
+	// s2z patch: MySQL compares a number with a string as DOUBLEs
+	typeName := t.String()
+	if types.IsNumber(t) {
+		typeName = "DOUBLE"
+	}
 	warning := sql.Warning{
 		Level:   "Warning",
-		Message: fmt.Sprintf("Truncated incorrect %s value: %v", t.String(), i),
+		Message: fmt.Sprintf("Truncated incorrect %s value: '%v'", typeName, i),
 		Code:    1292,
 	}
 

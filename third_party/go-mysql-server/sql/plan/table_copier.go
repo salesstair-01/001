@@ -3,6 +3,7 @@ package plan
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/mysql_db"
@@ -60,6 +61,26 @@ func (tc *TableCopier) Database() sql.Database {
 func (tc *TableCopier) ProcessCreateTable(ctx *sql.Context, b sql.NodeExecBuilder, row sql.Row) (sql.RowIter, error) {
 	ct := tc.Destination.(*CreateTable)
 
+	// s2z patch: CREATE TABLE IF NOT EXISTS ... SELECT of an existing table
+	// inserts nothing, as in MySQL 8 (the CREATE notes 1050); it inserted
+	// the SELECT's rows into whatever columns the table has.
+	existed := false
+	if ct.IfNotExists() {
+		if ct.Temporary() {
+			if tdb, ok := tc.db.(sql.TemporaryTableDatabase); ok {
+				temps, err := tdb.GetAllTemporaryTables(ctx)
+				for _, t := range temps {
+					existed = existed || (err == nil && strings.EqualFold(t.Name(), ct.Name()))
+				}
+			}
+		} else if _, ok, err := tc.db.GetTableInsensitive(ctx, ct.Name()); err == nil && ok {
+			existed = true
+		}
+	}
+
+	if existed {
+		return sql.RowsToRowIter(sql.NewRow(types.NewOkResult(0))), nil
+	}
 	_, err := b.Build(ctx, ct, row)
 	if err != nil {
 		return sql.RowsToRowIter(), err

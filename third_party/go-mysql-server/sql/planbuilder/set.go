@@ -114,13 +114,16 @@ func (b *Builder) setExprsToExpressions(inScope *scope, e ast.SetVarExprs) []sql
 				varToSet := expression.NewSystemVar("transaction_isolation", sql.GetMysqlScope(s), string(s))
 				res[i] = expression.NewSetField(varToSet, expression.NewLiteral("SERIALIZABLE", types.LongText))
 				continue
-			case "'read write'":
+			case "'read write'", "'read only'":
+				readOnly := strings.ToLower(expr.String()) == "'read only'"
+				if string(setExpr.Scope) == "" {
+					// s2z patch: SET TRANSACTION without SESSION or GLOBAL is
+					// for the next transaction only
+					res[i] = expression.NewSetField(expression.NewUserVar(sql.NextTransactionVar), expression.NewLiteral(readOnly, types.Boolean))
+					continue
+				}
 				varToSet := expression.NewSystemVar("transaction_read_only", sql.GetMysqlScope(s), string(s))
-				res[i] = expression.NewSetField(varToSet, expression.NewLiteral(false, types.Boolean))
-				continue
-			case "'read only'":
-				varToSet := expression.NewSystemVar("transaction_read_only", sql.GetMysqlScope(s), string(s))
-				res[i] = expression.NewSetField(varToSet, expression.NewLiteral(true, types.Boolean))
+				res[i] = expression.NewSetField(varToSet, expression.NewLiteral(readOnly, types.Boolean))
 				continue
 			}
 		}

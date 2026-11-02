@@ -52,7 +52,9 @@ func lexWarnings(ctx *sql.Context) {
 		toks = append(toks, lexToken{typ, strings.ToLower(string(val))})
 	}
 	ddl := len(toks) > 0 && (toks[0].typ == sqlparser.CREATE || toks[0].typ == sqlparser.ALTER)
-	set := len(toks) > 0 && toks[0].typ == sqlparser.SET
+	// inSet: in a SET statement, the statement's own or one of a routine
+	// body's, at depth setDepth
+	inSet, setDepth := false, 0
 	depth := 0
 	for i, t := range toks {
 		switch t.typ {
@@ -60,6 +62,13 @@ func lexWarnings(ctx *sql.Context) {
 			depth++
 		case ')':
 			depth--
+		case sqlparser.SET:
+			if i == 0 || toks[i-1].typ == ';' || toks[i-1].typ == sqlparser.BEGIN || toks[i-1].typ == sqlparser.THEN ||
+				toks[i-1].typ == sqlparser.ELSE || toks[i-1].typ == sqlparser.DO || toks[i-1].typ == sqlparser.ROW {
+				inSet, setDepth = true, depth
+			}
+		case ';':
+			inSet = false
 		}
 		prev := func(k int) lexToken {
 			if i-k >= 0 {
@@ -84,16 +93,23 @@ func lexWarnings(ctx *sql.Context) {
 			ctx.Warn(3778, "'%s' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.", name)
 		case t.typ == sqlparser.ASSIGNMENT_OP:
 			// SET @v := e assigns; @v := e anywhere else is an expression
-			if !(set && depth == 0 && (prev(2).typ == sqlparser.SET || prev(2).typ == ',')) {
+			if !(inSet && depth == setDepth && (prev(2).typ == sqlparser.SET || prev(2).typ == ',')) {
 				ctx.Warn(1287, "%s", warnAssignExpr)
 			}
 		case t.typ == sqlparser.SQL_CALC_FOUND_ROWS:
 			ctx.Warn(1287, "%s", warnCalcFound)
 		case t.val == "found_rows" && next.typ == '(':
 			ctx.Warn(1287, "%s", warnFoundRows)
-		case t.typ == sqlparser.BINARY && !ddl && prev(1).typ != sqlparser.AS &&
+		case t.typ == sqlparser.BINARY && !ddl && prev(1).typ != sqlparser.AS && !charsetName(prev(1), prev(2)) &&
 			next.typ != '(' && next.typ != ')' && next.typ != ',':
 			ctx.Warn(1287, "%s", warnBinaryExpr)
 		}
 	}
+}
+
+// charsetName is whether the tokens before a BINARY make it a character
+// set's name: SET NAMES binary, CHARACTER SET [=] binary, CHARSET binary.
+func charsetName(p1, p2 lexToken) bool {
+	isCS := func(t lexToken) bool { return t.val == "names" || t.val == "charset" || t.typ == sqlparser.SET }
+	return isCS(p1) || (p1.typ == '=' && isCS(p2))
 }

@@ -1817,7 +1817,27 @@ func (b *BaseBuilder) executeCreateCheck(ctx *sql.Context, c *plan.CreateCheck) 
 
 	// check existing rows in table
 	var res interface{}
-	rowIter, err := b.buildNodeExec(ctx, c.Table, nil)
+	// s2z patch: the rows of the table as it is now (an earlier clause of
+	// the ALTER may have added a column the CHECK uses), the CHECK's columns
+	// found in it by name
+	var scan sql.Node = c.Table
+	checkExpr := c.Check.Expr
+	if rt := c.Table; rt != nil {
+		scan = plan.NewResolvedTable(table, rt.SqlDatabase, nil)
+		sch := table.Schema()
+		checkExpr, _, err = transform.Expr(checkExpr, func(e sql.Expression) (sql.Expression, transform.TreeIdentity, error) {
+			if gf, ok := e.(*expression.GetField); ok {
+				if i := sch.IndexOfColName(gf.Name()); i >= 0 {
+					return gf.WithIndex(i), transform.NewTree, nil
+				}
+			}
+			return e, transform.SameTree, nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	rowIter, err := b.buildNodeExec(ctx, scan, nil)
 	if err != nil {
 		return err
 	}
@@ -1832,7 +1852,7 @@ func (b *BaseBuilder) executeCreateCheck(ctx *sql.Context, c *plan.CreateCheck) 
 			return err
 		}
 
-		res, err = sql.EvaluateCondition(ctx, c.Check.Expr, row)
+		res, err = sql.EvaluateCondition(ctx, checkExpr, row)
 		if err != nil {
 			return err
 		}

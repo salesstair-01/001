@@ -17,11 +17,13 @@ package expression
 import (
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dolthub/vitess/go/sqltypes"
+	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/src-d/go-errors.v1"
 
@@ -267,6 +269,11 @@ func (c *Convert) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 
 	// Should always return nil, and a warning instead
 	casted, err := convertValue(ctx, val, c.castToType, c.Child.Type(), c.typeLength, c.typeScale)
+	if err == nil {
+		if clamped, ok := c.warnTruncation(ctx, val); ok { // s2z patch
+			casted = clamped
+		}
+	}
 	if err != nil {
 		if c.castToType == ConvertToJSON {
 			return nil, ErrConvertExpression.Wrap(err, c.String(), c.castToType)
@@ -490,4 +497,54 @@ func convertHexBlobToDecimalForNumericContext(val interface{}, originType sql.Ty
 		val = decimalNum
 	}
 	return val, nil
+}
+
+// warnTruncation warns, as MySQL does (1292), when the cast cuts val: a
+// DECIMAL or a numeric string beyond BIGINT's range for SIGNED and
+// UNSIGNED, a value longer than CHAR(n) or BINARY(n) (s2z patch).
+func (c *Convert) warnTruncation(ctx *sql.Context, val interface{}) (interface{}, bool) {
+	switch c.castToType {
+	case ConvertToSigned, ConvertToUnsigned:
+		var d decimal.Decimal
+		kind := "DECIMAL"
+		switch v := val.(type) {
+		case decimal.Decimal:
+			d = v
+		case string:
+			parsed, err := decimal.NewFromString(strings.TrimSpace(v))
+			if err != nil {
+				return nil, false
+			}
+			d, kind = parsed, "INTEGER"
+		default:
+			return nil, false
+		}
+		lo, hi := decimal.NewFromInt(math.MinInt64), decimal.NewFromInt(math.MaxInt64)
+		if c.castToType == ConvertToUnsigned {
+			lo, hi = decimal.NewFromInt(math.MinInt64), decimal.NewFromUint64(math.MaxUint64)
+		}
+		if d.LessThan(lo) || d.GreaterThan(hi) {
+			ctx.Warn(1292, "Truncated incorrect %s value: '%v'", kind, val)
+			if c.castToType == ConvertToUnsigned && kind == "DECIMAL" && d.IsPositive() {
+				return uint64(math.MaxUint64), true
+			}
+		}
+	case ConvertToChar, ConvertToNChar, ConvertToBinary:
+		if c.typeLength <= 0 {
+			return nil, false
+		}
+		sv, _, err := types.LongText.Convert(ctx, val)
+		str, ok := sv.(string)
+		if err != nil || !ok {
+			return nil, false
+		}
+		n := len([]rune(str))
+		if c.castToType == ConvertToBinary {
+			n = len(str)
+		}
+		if n > c.typeLength {
+			ctx.Warn(1292, "Truncated incorrect %s(%d) value: '%s'", strings.ToUpper(c.castToType), c.typeLength, str)
+		}
+	}
+	return nil, false
 }

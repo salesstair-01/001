@@ -63,6 +63,9 @@ func (b *Builder) buildSelect(inScope *scope, s *ast.Select) (outScope *scope) {
 		b.handleErr(err)
 	}
 	groupedWindows(s) // s2z patch: window functions over groups (s2z_groupwindow.go)
+	b.checkOrderBy(s) // s2z patch: MySQL's ORDER BY errors (s2z_orderbycheck.go)
+	anyValueOfAggregates(s) // s2z patch: ANY_VALUE of an aggregate (s2z_anyvalue.go)
+	orderByAliases(s) // s2z patch: aliases in ORDER BY expressions (s2z_orderalias.go)
 	fromScope := b.buildFrom(inScope, s.From)
 	if cn, ok := fromScope.node.(sql.CommentedNode); ok && len(s.Comments) > 0 {
 		fromScope.node = cn.WithComment(string(s.Comments[0]))

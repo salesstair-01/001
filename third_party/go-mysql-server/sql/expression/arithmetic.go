@@ -859,3 +859,13 @@ func timeAsNumberType(t sql.Type) sql.Type {
 	}
 	return types.MustCreateDecimalType(types.DecimalTypeMaxPrecision, uint8(p))
 }
+
+// NullOnlyOfNull is whether the operation is NULL only when an operand is:
+// +, - and *, not a division (s2z patch).
+func (a *Arithmetic) NullOnlyOfNull() bool {
+	switch a.Op {
+	case sqlparser.PlusStr, sqlparser.MinusStr, sqlparser.MultStr:
+		return true
+	}
+	return false
+}

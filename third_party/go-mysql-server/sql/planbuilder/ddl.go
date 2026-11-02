@@ -92,8 +92,10 @@ func (b *Builder) resolveDbForTable(table ast.TableName) (sql.Database, bool) {
 // particular order in that case.
 func (b *Builder) buildAlterTable(inScope *scope, query string, c *ast.AlterTable) (outScope *scope) {
 	b.multiDDL = true
+	b.alterAddedCols = nil
 	defer func() {
 		b.multiDDL = false
+		b.alterAddedCols = nil
 	}()
 
 	if err := b.cat.AuthorizationHandler().HandleAuth(b.ctx, b.authQueryState, c.Auth); err != nil && b.authEnabled {
@@ -689,6 +691,7 @@ func (b *Builder) buildAlterTableColumnAction(inScope *scope, ddl *ast.DDL, tabl
 	case ast.AddStr:
 		sch, _, _ := b.tableSpecToSchema(inScope, outScope, table.Database(), ddl.Table.Name.String(), ddl.TableSpec, true)
 		outScope.node = plan.NewAddColumnResolved(table, *sch.Schema[0], columnOrderToColumnOrder(ddl.ColumnOrder))
+		b.alterAddedCols = append(b.alterAddedCols, sch.Schema[0]) // s2z patch: for a later CHECK of the ALTER
 	case ast.DropStr:
 		drop := plan.NewDropColumnResolved(table, ddl.Column.String())
 		checks := b.loadChecksFromTable(outScope, table.Table)
@@ -713,6 +716,13 @@ func (b *Builder) buildAlterTableColumnAction(inScope *scope, ddl *ast.DDL, tabl
 }
 
 func (b *Builder) buildAlterConstraint(inScope *scope, ddl *ast.DDL, table *plan.ResolvedTable) (outScope *scope) {
+	// s2z patch: a CHECK may use a column an earlier clause of the ALTER
+	// adds (ADD COLUMN c INT, ADD CHECK (c > 10))
+	for _, col := range b.alterAddedCols {
+		if _, found := inScope.resolveColumn("", strings.ToLower(table.Name()), strings.ToLower(col.Name), true, false); !found {
+			inScope.newColumn(scopeColumn{db: table.Database().Name(), table: strings.ToLower(table.Name()), col: strings.ToLower(col.Name), originalCol: col.Name, typ: col.Type, nullable: col.Nullable})
+		}
+	}
 	outScope = inScope
 	parsedConstraint := b.convertConstraintDefinition(inScope, ddl.TableSpec.Constraints[0])
 	switch strings.ToLower(ddl.ConstraintAction) {

@@ -30,6 +30,9 @@ type Engine struct {
 
 var registerVarsOnce sync.Once
 
+// mysqlOptimizerSwitch is MySQL 8.0.46's default optimizer_switch.
+const mysqlOptimizerSwitch = "index_merge=on,index_merge_union=on,index_merge_sort_union=on,index_merge_intersection=on,engine_condition_pushdown=on,index_condition_pushdown=on,mrr=on,mrr_cost_based=on,block_nested_loop=on,batched_key_access=off,materialization=on,semijoin=on,loosescan=on,firstmatch=on,duplicateweedout=on,subquery_materialization_cost_based=on,use_index_extensions=on,condition_fanout_filter=on,derived_merge=on,use_invisible_indexes=off,skip_scan=on,hash_join=on,subquery_to_derived=off,prefer_ordering_index=on,hypergraph_optimizer=off,derived_condition_pushdown=on"
+
 // registerVars replaces go-mysql-server's placeholder definition of
 // innodb_lock_wait_timeout (global-only, fixed at 1) with MySQL's: session
 // and global, 1 to 1073741824 seconds, default 50 (D5).
@@ -44,6 +47,19 @@ func registerVars() {
 				Default: int64(50),
 			},
 		})
+		// Variables MySQL's tests set that tune MySQL's optimizer or InnoDB,
+		// which sqld has none of: they are accepted and kept.
+		for _, v := range []*sql.MysqlSystemVariable{
+			{Name: "optimizer_switch", Scope: sql.GetMysqlScope(sql.SystemVariableScope_Both), Dynamic: true, Type: types.NewSystemStringType("optimizer_switch"), Default: mysqlOptimizerSwitch},
+			{Name: "innodb_stats_transient_sample_pages", Scope: sql.GetMysqlScope(sql.SystemVariableScope_Global), Dynamic: true, Type: types.NewSystemIntType("innodb_stats_transient_sample_pages", 1, 1<<62, false), Default: int64(8)},
+			{Name: "innodb_stats_persistent_sample_pages", Scope: sql.GetMysqlScope(sql.SystemVariableScope_Global), Dynamic: true, Type: types.NewSystemIntType("innodb_stats_persistent_sample_pages", 1, 1<<62, false), Default: int64(20)},
+			{Name: "innodb_default_row_format", Scope: sql.GetMysqlScope(sql.SystemVariableScope_Global), Dynamic: true, Type: types.NewSystemEnumType("innodb_default_row_format", "redundant", "compact", "dynamic"), Default: "dynamic"},
+			{Name: "log_bin_trust_function_creators", Scope: sql.GetMysqlScope(sql.SystemVariableScope_Global), Dynamic: true, Type: types.NewSystemBoolType("log_bin_trust_function_creators"), Default: int8(1)},
+		} {
+			if _, _, ok := sql.SystemVariables.GetGlobal(v.Name); !ok {
+				sql.SystemVariables.AddSystemVariables([]sql.SystemVariable{v})
+			}
+		}
 		// MySQL 8's default collation; go-mysql-server's is utf8mb4_0900_bin,
 		// which would make unqualified columns case- and accent-sensitive.
 		for _, name := range []string{"collation_server", "collation_database", "collation_connection", "default_collation_for_utf8mb4"} {

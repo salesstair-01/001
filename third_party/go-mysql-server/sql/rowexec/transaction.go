@@ -101,7 +101,7 @@ func (b *BaseBuilder) buildStartTransaction(ctx *sql.Context, n *plan.StartTrans
 		}
 	}
 
-	transaction, err := ts.StartTransaction(ctx, n.TransChar)
+	transaction, err := ts.StartTransaction(ctx, sql.StartCharacteristic(ctx, n.TransChar)) // s2z patch
 	if err != nil {
 		return nil, err
 	}

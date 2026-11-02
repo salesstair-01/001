@@ -581,8 +581,8 @@ func euclideanDistance(row1, row2 sql.Row, prefixLen int) (float64, error) {
 		if err != nil {
 			return 0, err
 		}
-		f1 := v1.(float64)
-		f2 := v2.(float64)
+		f1, _ := v1.(float64) // s2z patch: a NULL bound is 0 (it panicked)
+		f2, _ := v2.(float64)
 		distSq += f1*f1 - 2*f1*f2 + f2*f2
 	}
 	return math.Sqrt(distSq), nil

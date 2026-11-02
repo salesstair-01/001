@@ -138,7 +138,12 @@ func (iv *InterpreterVariable) ToAST() ast.Expr {
 		}
 	}
 	if types.IsFloat(iv.Type) {
-		return ast.NewFloatVal([]byte(strconv.FormatFloat(iv.Value.(float64), 'f', -1, 64)))
+		switch f := iv.Value.(type) { // s2z patch: a FLOAT is a float32
+		case float32:
+			return ast.NewFloatVal([]byte(strconv.FormatFloat(float64(f), 'f', -1, 32)))
+		case float64:
+			return ast.NewFloatVal([]byte(strconv.FormatFloat(f, 'f', -1, 64)))
+		}
 	}
 	return ast.NewStrVal([]byte(fmt.Sprintf("%s", iv.Value)))
 }

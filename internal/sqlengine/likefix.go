@@ -20,6 +20,9 @@ import (
 const explicitLikeEscapeID analyzer.RuleId = 10001
 
 func explicitLikeEscape(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan.Scope, sel analyzer.RuleSelector, qf *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error) {
+	if n == nil { // EXECUTE of a statement whose PREPARE failed
+		return n, transform.SameTree, nil
+	}
 	return transform.NodeExprsWithOpaque(n, func(e sql.Expression) (sql.Expression, transform.TreeIdentity, error) {
 		switch e := e.(type) {
 		case *expression.Like:

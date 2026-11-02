@@ -1,9 +1,12 @@
 package sqlengine
 
 import (
+	"time"
+
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/expression/function"
 	"github.com/dolthub/go-mysql-server/sql/types"
+	"github.com/dolthub/vitess/go/sqltypes"
 	"github.com/shopspring/decimal"
 )
 
@@ -25,16 +28,26 @@ func init() {
 				return fnN(name, 1, -1, timeExtremeType, false, extremeTime(greatest)).NewInstance(args)
 			case "decimal":
 				return fnN(name, 1, -1, decimalExtremeType, false, extremeDecimal(greatest)).NewInstance(args)
+			case "datetime":
+				return fnN(name, 1, -1, datetimeExtremeType, false, extremeDatetime(greatest)).NewInstance(args)
+			case "string":
+				return fnN(name, 1, -1, fixedType(types.LongText), false, extremeString(greatest)).NewInstance(args)
+			case "double":
+				return fnN(name, 1, -1, fixedType(types.Float64), false, extremeDouble(greatest)).NewInstance(args)
 			}
 			return upstream(args...)
 		}}
 	}
 }
 
-// extremeKind is "time" when every argument is a TIME, "decimal" when they
-// are DECIMALs and integers with at least one DECIMAL, else "".
+// extremeKind is "time" when every argument is a TIME, "datetime" when
+// they are temporal and not all TIMEs (a TIME is a DATETIME of today, as in
+// MySQL), "decimal" when they are DECIMALs and integers with at least one
+// DECIMAL, "double" when they are numbers with a DECIMAL and a FLOAT or
+// DOUBLE (go-mysql-server took neither), else "".
 func extremeKind(args []sql.Expression) string {
-	allTime, allExact, anyDecimal := true, true, false
+	allTime, allTemporal, allExact, allNumber, anyDecimal, anyFloat := true, true, true, true, false, false
+	anyTemporal, anyText, temporalOrText := false, false, true
 	for _, a := range args {
 		if !a.Resolved() {
 			return ""
@@ -44,16 +57,120 @@ func extremeKind(args []sql.Expression) string {
 			continue // the result is NULL, of the others' type
 		}
 		allTime = allTime && types.IsTimespan(t)
+		allTemporal = allTemporal && (types.IsTimespan(t) || types.IsTime(t))
 		allExact = allExact && (types.IsDecimal(t) || types.IsInteger(t))
+		allNumber = allNumber && types.IsNumber(t)
 		anyDecimal = anyDecimal || types.IsDecimal(t)
+		anyFloat = anyFloat || types.IsFloat(t)
+		isTemporal := types.IsTimespan(t) || types.IsTime(t)
+		anyTemporal, anyText = anyTemporal || isTemporal, anyText || types.IsText(t)
+		temporalOrText = temporalOrText && (isTemporal || types.IsText(t))
+	}
+	if anyTemporal && anyText && temporalOrText {
+		return "string" // MySQL compares a temporal value and a string as strings
 	}
 	switch {
 	case allTime:
 		return "time"
+	case allTemporal:
+		for _, a := range args {
+			if types.IsTimespan(a.Type()) {
+				return "datetime"
+			}
+		}
+		return "" // DATEs and DATETIMEs: go-mysql-server's
 	case allExact && anyDecimal:
 		return "decimal"
+	case allNumber && anyDecimal && anyFloat:
+		return "double"
 	}
 	return ""
+}
+
+func datetimeExtremeType(args []sql.Expression) sql.Type {
+	p := 0
+	for _, a := range args {
+		if dt, ok := a.Type().(sql.DatetimeType); ok {
+			p = max(p, dt.Precision())
+		} else {
+			p = max(p, timePrecision(a.Type()))
+		}
+	}
+	return types.MustCreateDatetimeType(sqltypes.Datetime, p)
+}
+
+func extremeDatetime(greatest bool) func(*sql.Context, []sql.Expression, []any) (any, error) {
+	return func(ctx *sql.Context, args []sql.Expression, v []any) (any, error) {
+		var best time.Time
+		for i, x := range v {
+			if x == nil {
+				return nil, nil
+			}
+			var t time.Time
+			if ts, ok := x.(types.Timespan); ok {
+				y, m, d := ctx.QueryTime().Date()
+				t = time.Date(y, m, d, 0, 0, 0, 0, time.UTC).Add(time.Duration(ts.AsMicroseconds()) * time.Microsecond)
+			} else {
+				c, _, err := types.DatetimeMaxPrecision.Convert(ctx, x)
+				if err != nil {
+					return nil, nil
+				}
+				t = c.(time.Time)
+			}
+			if i == 0 || (greatest && t.After(best)) || (!greatest && t.Before(best)) {
+				best = t
+			}
+		}
+		return best, nil
+	}
+}
+
+func extremeString(greatest bool) func(*sql.Context, []sql.Expression, []any) (any, error) {
+	return func(ctx *sql.Context, args []sql.Expression, v []any) (any, error) {
+		var best string
+		for i, x := range v {
+			if x == nil {
+				return nil, nil
+			}
+			sv, err := args[i].Type().SQL(ctx, nil, x)
+			if err != nil {
+				return nil, err
+			}
+			str := sv.ToString()
+			if i == 0 {
+				best = str
+				continue
+			}
+			c, err := types.LongText.Compare(ctx, str, best)
+			if err != nil {
+				return nil, err
+			}
+			if (greatest && c > 0) || (!greatest && c < 0) {
+				best = str
+			}
+		}
+		return best, nil
+	}
+}
+
+func extremeDouble(greatest bool) func(*sql.Context, []sql.Expression, []any) (any, error) {
+	return func(ctx *sql.Context, args []sql.Expression, v []any) (any, error) {
+		var best float64
+		for i, x := range v {
+			if x == nil {
+				return nil, nil
+			}
+			c, _, err := types.Float64.Convert(ctx, x)
+			if err != nil {
+				return nil, err
+			}
+			f := c.(float64)
+			if i == 0 || (greatest && f > best) || (!greatest && f < best) {
+				best = f
+			}
+		}
+		return best, nil
+	}
 }
 
 // timePrecision is a TIME type's fractional digits, -1 when the type has

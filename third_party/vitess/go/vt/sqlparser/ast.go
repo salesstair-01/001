@@ -179,6 +179,9 @@ func parseTokenizer(sql string, tokenizer *Tokenizer) (Statement, error) {
 func captureSelectExpressions(sql string, tokenizer *Tokenizer) {
 	if s, isSelect := tokenizer.ParseTree.(SelectStatement); isSelect {
 		walkSelectExpressions(s, sql)
+	} else if ddl, isDDL := tokenizer.ParseTree.(*DDL); isDDL && ddl.OptSelect != nil && ddl.OptSelect.Select != nil {
+		// s2z patch: CREATE TABLE ... SELECT names its columns by their text
+		walkSelectExpressions(ddl.OptSelect.Select, sql)
 	} else if w, ok := tokenizer.ParseTree.(WalkableSQLNode); ok {
 		w.walkSubtree(func(node SQLNode) (bool, error) {
 			if s, isSelect = node.(SelectStatement); isSelect {
@@ -200,7 +203,16 @@ func walkSelectExpressions(s SelectStatement, sql string) {
 				// column names don't need any special handling to capture the input expression
 				return false, nil
 			} else {
-				node.InputExpression = trimQuotes(strings.Trim(sql[node.StartParsePos:node.EndParsePos], " \n\t"))
+				text := strings.Trim(sql[node.StartParsePos:node.EndParsePos], " \n\t")
+				// s2z patch: as MySQL names them, NULL in capitals and a
+				// literal without its unary plus
+				switch node.Expr.(type) {
+				case *NullVal:
+					text = "NULL"
+				case *SQLVal:
+					text = strings.TrimLeft(text, "+ \n\t")
+				}
+				node.InputExpression = trimQuotes(text)
 			}
 		}
 		return true, nil

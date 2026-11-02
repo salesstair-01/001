@@ -508,7 +508,7 @@ func (a *First) Type() sql.Type {
 }
 
 func (a *First) IsNullable() bool {
-	return false
+	return true // s2z patch: NULL over no rows
 }
 
 func (a *First) String() string {
@@ -666,7 +666,7 @@ func (a *Last) Type() sql.Type {
 }
 
 func (a *Last) IsNullable() bool {
-	return false
+	return true // s2z patch: NULL over no rows
 }
 
 func (a *Last) String() string {
@@ -745,7 +745,7 @@ func (a *Max) Type() sql.Type {
 }
 
 func (a *Max) IsNullable() bool {
-	return false
+	return true // s2z patch: NULL over no rows
 }
 
 func (a *Max) String() string {
@@ -824,7 +824,7 @@ func (a *Min) Type() sql.Type {
 }
 
 func (a *Min) IsNullable() bool {
-	return false
+	return true // s2z patch: NULL over no rows
 }
 
 func (a *Min) String() string {
@@ -903,7 +903,7 @@ func (a *Sum) Type() sql.Type {
 }
 
 func (a *Sum) IsNullable() bool {
-	return false
+	return true // s2z patch: NULL over no rows
 }
 
 func (a *Sum) String() string {

@@ -137,6 +137,17 @@ func (b *Builder) buildInsert(inScope *scope, i *ast.Insert) (outScope *scope) {
 				combinedScope.newColumn(srcScope.cols[i])
 			}
 		}
+		if len(srcScope.cols) > 0 {
+			// s2z patch: in INSERT ... SELECT, an unqualified name is the
+			// target table's column, as in MySQL (it was ambiguous with the
+			// SELECT's of the same name)
+			if combinedScope.redirectCol == nil {
+				combinedScope.redirectCol = map[string]scopeColumn{}
+			}
+			for _, c := range destScope.cols {
+				combinedScope.redirectCol[strings.ToLower(c.col)] = c
+			}
+		}
 		onDupExprs = b.buildOnDupUpdateExprs(combinedScope, destScope, ast.AssignmentExprs(i.OnDup))
 	}
 

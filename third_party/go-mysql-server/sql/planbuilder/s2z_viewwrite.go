@@ -162,6 +162,11 @@ func hasAggregate(e ast.Expr) bool {
 		case *ast.Subquery:
 			return false, nil
 		case *ast.FuncExpr:
+			// ANY_VALUE is no aggregate in MySQL: it only marks a value
+			// (whatever it has)
+			if n.Name.Lowered() == "any_value" {
+				return false, nil
+			}
 			if n.Over == nil && isAggregateFunc(n.Name.Lowered()) {
 				found = true
 			}

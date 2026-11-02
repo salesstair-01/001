@@ -3,7 +3,10 @@
 package rowexec
 
 import (
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/types"
@@ -19,8 +22,10 @@ func ignoreWarning(col *sql.Column, val interface{}, err error, rowNum int) *sql
 	switch {
 	case sql.ErrValueOutOfRange.Is(err):
 		w.Code, w.Message = 1264, fmt.Sprintf("Out of range value for column '%s' at row %d", col.Name, rowNum)
-	case (types.IsTime(col.Type) || types.IsYear(col.Type)) && !isString(val):
-		// a number that is no date
+	case (types.IsTime(col.Type) || types.IsYear(col.Type)) && !isString(val),
+		types.IsTimespan(col.Type) && isNumeric(val),
+		types.IsNumber(col.Type) && !types.IsYear(col.Type) && isNumeric(val):
+		// a number that is no date or time, or too big for the column
 		w.Code, w.Message = 1264, fmt.Sprintf("Out of range value for column '%s' at row %d", col.Name, rowNum)
 	case types.ErrLengthBeyondLimit.Is(err), types.IsEnum(col.Type), types.IsSet(col.Type), types.IsTimespan(col.Type), types.IsTime(col.Type):
 		w.Code, w.Message = 1265, fmt.Sprintf("Data truncated for column '%s' at row %d", col.Name, rowNum)
@@ -37,6 +42,20 @@ func ignoreWarning(col *sql.Column, val interface{}, err error, rowNum int) *sql
 		w.Code, w.Message = sqlerr.Num, sqlerr.Message
 	}
 	return w
+}
+
+// isNumeric is whether v is a number, or a string that is one.
+func isNumeric(v interface{}) bool {
+	switch x := v.(type) {
+	case string:
+		_, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		return err == nil || errors.Is(err, strconv.ErrRange)
+	case []byte:
+		return isNumeric(string(x))
+	case nil:
+		return false
+	}
+	return !isString(v)
 }
 
 func isString(v interface{}) bool {

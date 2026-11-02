@@ -744,7 +744,13 @@ func (e *Engine) beginTransaction(ctx *sql.Context) error {
 	ctx.GetLogger().Tracef("beginning new transaction")
 	ts, ok := ctx.Session.(sql.TransactionSession)
 	if ok {
-		tx, err := ts.StartTransaction(ctx, sql.ReadWrite)
+		// s2z patch: READ ONLY sessions and SET TRANSACTION READ ONLY, which
+		// a START TRANSACTION's own implicit transaction leaves to it
+		char := sql.ReadWrite
+		if q := strings.ToLower(strings.TrimSpace(ctx.Query())); !strings.HasPrefix(q, "start transaction") && !strings.HasPrefix(q, "begin") {
+			char = sql.StartCharacteristic(ctx, sql.ReadWrite)
+		}
+		tx, err := ts.StartTransaction(ctx, char)
 		if err != nil {
 			return err
 		}

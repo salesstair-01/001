@@ -353,7 +353,13 @@ func convertDataAndWarnRow(ctx *sql.Context, tableSchema sql.Schema, row sql.Row
 	orig := row[columnIdx]
 	if types.ErrLengthBeyondLimit.Is(err) {
 		maxLength := tableSchema[columnIdx].Type.(sql.StringType).MaxCharacterLength()
-		row[columnIdx] = row[columnIdx].(string)[:maxLength] // truncate string
+		// s2z patch: a number is cut as its text, and by characters
+		str, _, cerr := types.LongText.Convert(ctx, row[columnIdx])
+		text, _ := str.(string)
+		if cerr == nil && int64(len([]rune(text))) > maxLength {
+			text = string([]rune(text)[:maxLength])
+		}
+		row[columnIdx] = text // truncate string
 	} else {
 		row[columnIdx] = tableSchema[columnIdx].Type.Zero()
 	}

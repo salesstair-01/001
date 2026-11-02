@@ -58,6 +58,13 @@ func ddlWarnings(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan
 			}
 		}
 	}
+	if routineStatement.MatchString(ctx.Query()) {
+		if st, err := sqlparser.Parse(ctx.Query()); err == nil {
+			if err := routineBodyErrors(st); err != nil {
+				return nil, transform.SameTree, err
+			}
+		}
+	}
 	lexWarnings(ctx)
 	tableNotes(ctx, n)
 	return n, transform.SameTree, nil
@@ -119,7 +126,13 @@ func tableNotes(ctx *sql.Context, n sql.Node) {
 	case *plan.CreateTable:
 		if db := n.Database(); n.IfNotExists() && db != nil {
 			if _, ok, err := db.GetTableInsensitive(ctx, n.Name()); err == nil && ok {
-				ctx.Session.Warn(&sql.Warning{Level: "Note", Code: 1050, Message: fmt.Sprintf("Table '%s' already exists", n.Name())})
+				msg := fmt.Sprintf("Table '%s' already exists", n.Name())
+				for _, w := range ctx.Session.Warnings() {
+					if w.Code == 1050 && w.Message == msg {
+						return // the rule runs again for CREATE TABLE ... SELECT
+					}
+				}
+				ctx.Session.Warn(&sql.Warning{Level: "Note", Code: 1050, Message: msg})
 				return
 			}
 		}

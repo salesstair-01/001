@@ -620,6 +620,13 @@ func (tkn *Tokenizer) scanNumber(seenDecimalPoint bool) (int, []byte) {
 			tkn.scanMantissa(16, buffer)
 			goto exit
 		}
+		// s2z patch: 0b1010, a bit literal as b'1010'
+		if tkn.lastChar == 'b' && tkn.bufPos < tkn.bufSize && (tkn.buf[tkn.bufPos] == '0' || tkn.buf[tkn.bufPos] == '1') {
+			tkn.next()
+			bits := &bytes2.Buffer{}
+			tkn.scanMantissa(2, bits)
+			return BIT_LITERAL, bits.Bytes()
+		}
 	}
 
 	tkn.scanMantissa(10, buffer)

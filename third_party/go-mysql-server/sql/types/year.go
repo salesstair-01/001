@@ -165,7 +165,11 @@ func (t YearType_) SQL(ctx *sql.Context, dest []byte, v interface{}) (sqltypes.V
 	}
 
 	stop := len(dest)
-	dest = strconv.AppendInt(dest, int64(v.(int16)), 10)
+	if v.(int16) == 0 {
+		dest = append(dest, "0000"...) // s2z patch: the zero year shows as MySQL shows it
+	} else {
+		dest = strconv.AppendInt(dest, int64(v.(int16)), 10)
+	}
 	val := dest[stop:]
 
 	return sqltypes.MakeTrusted(sqltypes.Year, val), nil

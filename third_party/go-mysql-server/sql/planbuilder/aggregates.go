@@ -273,7 +273,9 @@ func isAggregateFunc(name string) bool {
 // buildAggregateFunc tags aggregate functions in the correct scope
 // and makes the aggregate available for reference by other clauses.
 func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExpr) sql.Expression {
-	checkNestedAggregate(b, e.Exprs) // s2z patch
+	if name != "any_value" {
+		checkNestedAggregate(b, e.Exprs) // s2z patch
+	}
 	if len(inScope.windowFuncs) > 0 {
 		err := sql.ErrNonAggregatedColumnWithoutGroupBy.New()
 		b.handleErr(err)

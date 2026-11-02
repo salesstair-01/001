@@ -39,6 +39,15 @@ var errCodes = []struct {
 	{regexp.MustCompile(`^stored procedure ".*" does not exist`), 1305, "42000"},
 	{regexp.MustCompile(`^Result consisted of more than one row`), 1172, "42000"},
 	{regexp.MustCompile(`^invalid GIS data provided`), 3037, "22023"},
+	{regexp.MustCompile(`^Unknown prepared statement handler`), 1243, "HY000"},
+	{regexp.MustCompile(`^INTO clause is not allowed`), 3954, "HY000"},
+	{regexp.MustCompile(`(?i)cannot execute statement in a READ ONLY transaction`), 1792, "25006"},
+	{regexp.MustCompile(`^incorrect arguments to: NAME_CONST`), 1210, "HY000"},
+	{regexp.MustCompile(`^duplicate column name`), 1060, "42S21"},
+	{regexp.MustCompile(`^Every derived table must have its own alias`), 1248, "42000"},
+	{regexp.MustCompile(`^length is \d+ but max allowed is \d+`), 1074, "42000"},
+	{regexp.MustCompile(`out of range for random_bytes`), 1690, "22003"},
+	{regexp.MustCompile(`^Invalid constraint expression, function not supported`), 3814, "HY000"},
 	{regexp.MustCompile(`^Can't update table \S+ in stored function/trigger`), 1442, "HY000"},
 }
 

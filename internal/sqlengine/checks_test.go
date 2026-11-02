@@ -48,3 +48,26 @@ func TestCheckConstraints(t *testing.T) {
 		}
 	}
 }
+
+// TestAlterAddColumnAndCheck: a CHECK added by the ALTER TABLE that adds
+// its column, on a table with rows.
+func TestAlterAddColumnAndCheck(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE ac (a int)", "[]"},
+		{"INSERT INTO ac VALUES (1)", "[]"},
+		{"ALTER TABLE ac ADD COLUMN c INT, ADD CONSTRAINT ck CHECK (c > 10 OR c IS NULL)", "[]"},
+		{"INSERT INTO ac VALUES (2, 5)", "ERR 3819"},
+		{"INSERT INTO ac VALUES (2, 50)", "[]"},
+		{"SELECT * FROM ac ORDER BY a", "[1,NULL 2,50]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %q, want %q", s.q, got, s.want)
+		}
+	}
+}

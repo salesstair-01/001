@@ -41,6 +41,7 @@ type Builder struct {
 	colId           columnId
 	tabId           sql.TableId
 	multiDDL        bool
+	alterAddedCols  []*sql.Column // s2z patch: columns an ALTER TABLE adds, for its CHECKs
 	viewCtx         *ViewContext
 	procCtx         *ProcContext
 	triggerCtx      *TriggerContext

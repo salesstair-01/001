@@ -494,6 +494,9 @@ func getJoinStats(ctx *sql.Context, leftIdx, rightIdx, leftChild, rightChild sql
 	if stats.Empty(rightIdx) || stats.Empty(leftIdx) {
 		return nil, nil
 	}
+	if leftIdx.DistinctCount() == 0 || rightIdx.DistinctCount() == 0 {
+		return nil, nil // s2z patch: no distinct counts (it divided by zero)
+	}
 	if leftIdx.Qualifier() == rightIdx.Qualifier() {
 		expandRatio := leftIdx.RowCount() / leftIdx.DistinctCount()
 		if expandRatio == 1 {

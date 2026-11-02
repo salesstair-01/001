@@ -50,9 +50,9 @@ func getDate(ctx *sql.Context,
 		return nil, nil
 	}
 
-	date, err := types.DatetimeMaxPrecision.ConvertWithoutRangeCheck(ctx, val)
+	date, err := types.DatetimeMaxPrecision.ConvertWithoutRangeCheck(ctx, numericDate(val)) // s2z patch: 20090224
 	if err != nil {
-		ctx.Warn(1292, "Incorrect datetime value: '%s'", val)
+		ctx.Warn(1292, "Incorrect datetime value: '%v'", val)
 		return nil, nil
 		//date = types.DatetimeMaxPrecision.Zero().(time.Time)
 	}
@@ -713,8 +713,8 @@ func (*Week) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID,
 // Eval implements the Expression interface.
 func (d *Week) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	date, err := getDate(ctx, expression.UnaryExpression{Child: d.date}, row)
-	if err != nil {
-		return nil, err
+	if err != nil || date == nil {
+		return nil, err // s2z patch: NULL for no date, as MySQL
 	}
 
 	yyyy, ok := year(date).(int32)

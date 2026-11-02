@@ -1,6 +1,8 @@
 package analyzer
 
 import (
+	"strings"
+
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/plan"
 	"github.com/dolthub/go-mysql-server/sql/transform"
@@ -25,6 +27,31 @@ func resolveCreateSelect(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.
 	// statement. When the underlying select node is a table, we must remove all such info from its schema. The only
 	// exception is NOT NULL constraints, which we leave alone.
 	selectSchema := stripSchema(analyzedSelect.Schema())
+	selectColumnsNullable(analyzedSelect, selectSchema) // s2z patch
+	// s2z patch: without a table spec, the planner made one of the SELECT's
+	// schema, which wins the merge below: it takes the nullability found
+	// here
+	if spec := ct.PkSchema().Schema; len(spec) == len(selectSchema) {
+		same := true
+		for i := range spec {
+			same = same && strings.EqualFold(spec[i].Name, selectSchema[i].Name)
+		}
+		for i := range spec {
+			if same && selectSchema[i].Nullable {
+				spec[i].Nullable = true
+			}
+		}
+	}
+	// s2z patch: a column is named as the SELECT names it, by the text it is
+	// written with (the analyzed plan has its expressions' own text,
+	// `(max(t1.t0) + 1)` for MAX(t0) + 1)
+	if pre := ct.Select().Schema(); len(pre) == len(selectSchema) {
+		for i := range selectSchema {
+			if pre[i].Name != "" {
+				selectSchema[i].Name = pre[i].Name
+			}
+		}
+	}
 	mergedSchema := mergeSchemas(ct.PkSchema().Schema, selectSchema)
 	newSch := make(sql.Schema, len(mergedSchema))
 

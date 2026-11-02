@@ -44,3 +44,25 @@ func TestExtraFunctions(t *testing.T) {
 		}
 	}
 }
+
+// TestGreatestLeast: GREATEST and LEAST of TIME, temporal, DECIMAL and
+// mixed arguments, as MySQL 8.0.46 gives them.
+func TestGreatestLeast(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE tg (a datetime, t time(2), u time, d date, f double, n decimal(5,2), i int)", "[]"},
+		{"INSERT INTO tg VALUES ('2001-01-01 10:00:00', '10:00:00.25', '-01:00:00', '2001-01-02', 1.5, 2.25, 3)", "[]"},
+		{"SELECT GREATEST(t, u), LEAST(t, u), GREATEST(n, i), LEAST(n, i, 2.5), GREATEST(f, n), LEAST(f, n) FROM tg", "[10:00:00.25,-01:00:00.00,3.00,2.25,2.25,1.5]"},
+		{"SELECT GREATEST(a, d), LEAST(a, d), GREATEST(t, NULL) FROM tg", "[2001-01-02T00:00:00Z,2001-01-01T10:00:00Z,NULL]"},
+		{"SELECT GREATEST(TIME'10:00:00', TIME'11:00:00.5'), LEAST(CAST('00:00:00.1' AS TIME(6)), '00:00:01.1'), GREATEST(TIME'10:00:00', '9:00')", "[11:00:00.5,00:00:00.100000,9:00]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %q, want %q", s.q, got, s.want)
+		}
+	}
+}

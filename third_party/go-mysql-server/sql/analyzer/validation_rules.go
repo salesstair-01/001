@@ -728,12 +728,13 @@ func validateReadOnlyDatabase(ctx *sql.Context, a *Analyzer, n sql.Node, scope *
 func validateReadOnlyTransaction(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.Scope, sel RuleSelector, qFlags *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error) {
 	t := ctx.GetTransaction()
 
-	if t == nil {
+	sessionRO := sql.SessionReadOnly(ctx) // s2z patch
+	if t == nil && !sessionRO {
 		return n, transform.SameTree, nil
 	}
 
 	// If this is a normal read write transaction don't enforce read-only. Otherwise we must prevent an invalid query.
-	if !t.IsReadOnly() && !scope.EnforcesReadOnly() {
+	if (t == nil || !t.IsReadOnly()) && !scope.EnforcesReadOnly() && !sessionRO {
 		return n, transform.SameTree, nil
 	}
 
@@ -742,7 +743,7 @@ func validateReadOnlyTransaction(ctx *sql.Context, a *Analyzer, n sql.Node, scop
 	isTempTable := func(table sql.Table) bool {
 		tt, isTempTable := table.(sql.TemporaryTable)
 		if !isTempTable {
-			valid = false
+			return false // s2z patch: it dereferenced the nil table
 		}
 
 		return tt.IsTemporary()
@@ -770,7 +771,7 @@ func validateReadOnlyTransaction(ctx *sql.Context, a *Analyzer, n sql.Node, scop
 			return false
 		case *plan.CreateTable:
 			// MySQL explicitly blocks the creation of temporary tables in a read only transaction.
-			if n.Temporary() {
+			if n.Temporary() || sessionRO { // s2z patch: a READ ONLY session's CREATE TABLE fails
 				valid = false
 			}
 
@@ -778,7 +779,8 @@ func validateReadOnlyTransaction(ctx *sql.Context, a *Analyzer, n sql.Node, scop
 		default:
 			// DDL statements have an implicit commits which makes them valid to be executed in READ ONLY transactions.
 			if plan.IsDDLNode(n) {
-				valid = true
+				// s2z patch: but a READ ONLY session's DDL fails, as in MySQL
+				valid = !sessionRO
 				return false
 			}
 

@@ -3,6 +3,7 @@ package sqlengine
 import (
 	"fmt"
 	"math/big"
+	"regexp"
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
@@ -178,4 +179,80 @@ func zeroDateLiteral(e sqlparser.Expr) bool {
 		return strings.Trim(s, "0-: .") == "" && s != ""
 	}
 	return false
+}
+
+// routineStatement matches the start of a CREATE FUNCTION or TRIGGER.
+var routineStatement = regexp.MustCompile(`(?is)^(\s+|/\*.*?\*/|(#|-- )[^\n]*\n)*create\s+(definer\s*=\s*\S+\s+)?(function|trigger)\s`)
+
+// routineBodyErrors refuses a stored function's or trigger's body with a
+// statement MySQL does not allow in one: DDL or a transaction statement,
+// which commits (1422), FLUSH (1336) and LOCK TABLES (1314). A
+// procedure may have them.
+func routineBodyErrors(st sqlparser.Statement) error {
+	d, ok := st.(*sqlparser.DDL)
+	if !ok || d.Action != sqlparser.CreateStr {
+		return nil
+	}
+	var body sqlparser.Statement
+	switch {
+	case d.TriggerSpec != nil:
+		body = d.TriggerSpec.Body
+	case d.ProcedureSpec != nil && strings.HasPrefix(d.ProcedureSpec.ProcName.Name.String(), sqlparser.FunctionProcedurePrefix):
+		body = d.ProcedureSpec.Body
+	default:
+		return nil
+	}
+	return bodyStatementError(body)
+}
+
+func bodyStatementError(s sqlparser.Statement) error {
+	each := func(ss sqlparser.Statements) error {
+		for _, st := range ss {
+			if err := bodyStatementError(st); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	commit := mysql.NewSQLError(1422, "HY000", "Explicit or implicit commit is not allowed in stored function or trigger.")
+	switch n := s.(type) {
+	case *sqlparser.DDL:
+		if n.Temporary || n.TriggerSpec != nil || n.ProcedureSpec != nil {
+			return nil // temporary tables don't commit; nested routines fail on their own
+		}
+		return commit
+	case *sqlparser.AlterTable, *sqlparser.Begin, *sqlparser.Commit, *sqlparser.Rollback:
+		return commit
+	case *sqlparser.Flush:
+		return mysql.NewSQLError(1336, "0A000", "FLUSH is not allowed in stored function or trigger")
+	case *sqlparser.LockTables:
+		return mysql.NewSQLError(1314, "0A000", "LOCK is not allowed in stored procedures")
+	case *sqlparser.BeginEndBlock:
+		return each(n.Statements)
+	case *sqlparser.IfStatement:
+		for _, c := range n.Conditions {
+			if err := each(c.Statements); err != nil {
+				return err
+			}
+		}
+		return each(n.Else)
+	case *sqlparser.CaseStatement:
+		for _, c := range n.Cases {
+			if err := each(c.Statements); err != nil {
+				return err
+			}
+		}
+		return each(n.Else)
+	case *sqlparser.Loop:
+		return each(n.Statements)
+	case *sqlparser.While:
+		return each(n.Statements)
+	case *sqlparser.Repeat:
+		return each(n.Statements)
+	case *sqlparser.Declare:
+		if n.Handler != nil {
+			return bodyStatementError(n.Handler.Statement)
+		}
+	}
+	return nil
 }

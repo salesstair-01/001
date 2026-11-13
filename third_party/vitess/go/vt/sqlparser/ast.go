@@ -6504,6 +6504,13 @@ type FuncExpr struct {
 
 // Format formats the node.
 func (node *FuncExpr) Format(buf *TrackedBuffer) {
+	// s2z patch: the parser's ~x is written as ~x
+	if node.Name.EqualString("s2z_bitnot") && len(node.Exprs) == 1 {
+		if ae, ok := node.Exprs[0].(*AliasedExpr); ok {
+			buf.Myprintf("~%v", ae.Expr)
+			return
+		}
+	}
 	var distinct string
 	if node.Distinct {
 		distinct = "distinct "

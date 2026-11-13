@@ -924,7 +924,7 @@ var (
 			input: "select /* u- */ 1 from t where a = -b",
 		}, {
 			input:  "select /* u~ */ 1 from t where a = ~b",
-			output: "select /* u~ */ 1 from t where a = b ^ 18446744073709551615", // s2z patch: ~x is x ^ 0xFFFFFFFFFFFFFFFF
+			output: "select /* u~ */ 1 from t where a = ~b", // s2z patch: ~x is s2z_bitnot(x), written ~x
 		}, {
 			input: "select /* -> */ a.b -> 'ab' from t",
 		}, {
@@ -1169,10 +1169,10 @@ var (
 			input: "select /* binary binary */ binary  binary b from t",
 		}, {
 			input:  "select /* binary ~ */ binary  ~b from t",
-			output: "select /* binary ~ */ binary b ^ 18446744073709551615 from t", // s2z patch: ~x is x ^ 0xFFFFFFFFFFFFFFFF
+			output: "select /* binary ~ */ binary ~b from t", // s2z patch: ~x is s2z_bitnot(x), written ~x
 		}, {
 			input:  "select /* ~ binary */ ~ binary b from t",
-			output: "select /* ~ binary */ binary b ^ 18446744073709551615 from t", // s2z patch: ~x is x ^ 0xFFFFFFFFFFFFFFFF
+			output: "select /* ~ binary */ ~binary b from t", // s2z patch: ~x is s2z_bitnot(x), written ~x
 		}, {
 			input: "select /* interval */ adddate('2008-01-02', interval 31 day) from t",
 		}, {

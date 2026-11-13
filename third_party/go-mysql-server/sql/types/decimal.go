@@ -169,6 +169,10 @@ func (t DecimalType_) ConvertToNullDecimal(v interface{}) (decimal.NullDecimal, 
 
 	var res decimal.Decimal
 
+	if ts, ok := v.(Timespan); ok { // s2z patch
+		v = TimespanDecimal(ts)
+	}
+
 	switch value := v.(type) {
 	case bool:
 		if value {

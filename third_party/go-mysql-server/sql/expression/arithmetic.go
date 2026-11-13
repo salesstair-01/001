@@ -149,6 +149,10 @@ func (a *Arithmetic) Type() sql.Type {
 		return types.Float64
 	}
 
+	if t := s2zTimeArithmeticType(a.Op, lTyp, rTyp); t != nil {
+		return t
+	}
+
 	if types.IsFloat(lTyp) || types.IsFloat(rTyp) {
 		if t := s2zFloatDecimalsType(a.Op, lTyp, rTyp); t != nil {
 			return t
@@ -912,4 +916,45 @@ func s2zFloatDecimalsType(op string, l, r sql.Type) sql.Type {
 		return nil
 	}
 	return types.CreateFloatType(sqltypes.Float64, 22, d, false)
+}
+
+// s2zTimeArithmeticType is the type of a TIME and an integer or DECIMAL in
+// + - *: MySQL takes the TIME as its number hhmmss.ffffff, a DECIMAL with
+// the TIME's fractional digits (TIME(6)+0 is 101059.500000, created as
+// decimal(14,6): 8 digits before the point). nil otherwise. (s2z patch)
+func s2zTimeArithmeticType(op string, l, r sql.Type) sql.Type {
+	if !types.IsTimespan(l) && !types.IsTimespan(r) {
+		return nil
+	}
+	scale := func(t sql.Type) (int, bool) {
+		switch {
+		case types.IsTimespan(t):
+			if tt, ok := t.(types.TimespanType_); ok {
+				if p, fixed := tt.Precision(); fixed {
+					return p, true
+				}
+			}
+			return 0, true
+		case types.IsInteger(t):
+			return 0, true
+		case types.IsDecimal(t):
+			return int(t.(sql.DecimalType).Scale()), true
+		}
+		return 0, false
+	}
+	sl, okL := scale(l)
+	sr, okR := scale(r)
+	if !okL || !okR {
+		return nil
+	}
+	var sc int
+	switch op {
+	case sqlparser.PlusStr, sqlparser.MinusStr:
+		sc = max(sl, sr)
+	case sqlparser.MultStr:
+		sc = sl + sr
+	default:
+		return nil
+	}
+	return types.MustCreateDecimalType(uint8(min(8+sc, 65)), uint8(min(sc, 30)))
 }

@@ -143,3 +143,31 @@ func TestDecimalConstants(t *testing.T) {
 		}
 	}
 }
+
+// TestTimeAsNumber pins a TIME used as a number against MySQL 8.0.46: stored
+// in INT (rounded to a second, hhmmss), DECIMAL and DOUBLE (hhmmss.ffffff),
+// in arithmetic (a DECIMAL with the TIME's digits) and ROUND (a DOUBLE,
+// half to even); and ROUND(x, n) of a DECIMAL keeping n decimals.
+func TestTimeAsNumber(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE tn (t time(6), i int, d decimal(20,6))", "[]"},
+		{"INSERT INTO tn (t) VALUES ('10:10:59.5'),('10:10:10.5'),('10:10:10.499999'),('-10:10:59.5'),('-10:10:10.5'),('838:59:59'),('0:0:0.000001')", "[]"},
+		{"UPDATE tn SET i=t, d=t", "[]"},
+		{"SELECT i, CONCAT(d) FROM tn", "[101100,101059.500000 101011,101010.500000 101010,101010.499999 -101100,-101059.500000 -101011,-101010.500000 8385959,8385959.000000 0,0.000001]"},
+		{"SELECT ROUND(t), ROUND(t,2), ROUND(t,-2), CONCAT(t+0), CONCAT(t*1), CAST(t AS SIGNED) FROM tn LIMIT 2", "[101060,101059.5,101100,101059.500000,101059.500000,101100 101010,101010.5,101000,101010.500000,101010.500000,101011]"},
+		{"CREATE TABLE rr AS SELECT ROUND(t) a, ROUND(t,2) b, t+0 c, t*1 d FROM tn", "[]"},
+		{"SHOW CREATE TABLE rr", "[rr,CREATE TABLE `rr` (\n  `a` double DEFAULT NULL,\n  `b` double DEFAULT NULL,\n  `c` decimal(14,6) DEFAULT NULL,\n  `d` decimal(14,6) DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci]"},
+		{"SELECT CONCAT(1.50), CONCAT(CAST(1 AS DECIMAL(5,2))), CONCAT(1/3), CONCAT(1.5*2.25), CONCAT(10.30 + 1), CAST(2.500 AS CHAR), CONCAT(7/2)", "[1.50,1.00,0.3333,3.375,11.30,2.500,3.5000]"},
+		{"SELECT CONCAT(ROUND(2.567, 1)), CONCAT(ROUND(2.5, 3)), CONCAT(ROUND(9.96, 1)), CONCAT(ROUND(2.567)), CONCAT(ROUND(-2.567, 2))", "[2.6,2.5,10.0,3,-2.57]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}

@@ -15,6 +15,7 @@
 package function
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -249,6 +250,9 @@ func (r *Round) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
+	if ts, ok := val.(types.Timespan); ok { // s2z patch: a TIME is its number
+		val = types.TimespanDecimal(ts)
+	}
 	decType := types.MustCreateDecimalType(types.DecimalTypeMaxPrecision, types.DecimalTypeMaxScale)
 	val, _, err = decType.Convert(ctx, val)
 	if err != nil {
@@ -296,6 +300,11 @@ func (r *Round) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		res, _, err = types.Float64.Convert(ctx, tmp)
 	} else if types.IsDecimal(r.LeftChild.Type()) {
 		res = tmp
+	} else if types.IsTimespan(r.LeftChild.Type()) {
+		// s2z patch: a TIME rounds as the DOUBLE it is, half to even
+		f, _ := val.(decimal.Decimal).Float64()
+		p := math.Pow10(int(prec))
+		res = math.RoundToEven(f*p) / p
 	} else if types.IsTextBlob(r.LeftChild.Type()) {
 		res, _, err = types.Float64.Convert(ctx, tmp)
 	}
@@ -324,8 +333,34 @@ func (r *Round) Resolved() bool {
 // Type implements the Expression interface.
 func (r *Round) Type() sql.Type {
 	leftChildType := r.LeftChild.Type()
+	if dt, ok := leftChildType.(sql.DecimalType); ok {
+		// s2z patch: ROUND(x, n) of a DECIMAL keeps at most n decimals
+		// (ROUND(2.567, 1) is 2.6, not 2.600)
+		n := 0
+		if r.RightChild != nil {
+			lit, isLit := r.RightChild.(*expression.Literal)
+			if !isLit {
+				return leftChildType
+			}
+			v, _, err := types.Int64.Convert(context.Background(), lit.Value())
+			if err != nil || v == nil {
+				return leftChildType
+			}
+			n = int(max(v.(int64), 0))
+		}
+		if scale := int(dt.Scale()); n < scale {
+			intDigits := int(dt.Precision()) - scale + 1 // rounding may carry
+			if t, err := types.CreateDecimalType(uint8(min(intDigits+n, 65)), uint8(n)); err == nil {
+				return t
+			}
+		}
+		return leftChildType
+	}
 	if types.IsNumber(leftChildType) {
 		return leftChildType
+	}
+	if types.IsTimespan(leftChildType) {
+		return types.Float64 // s2z patch: MySQL's ROUND of a TIME is a DOUBLE
 	}
 	return types.Int32
 }

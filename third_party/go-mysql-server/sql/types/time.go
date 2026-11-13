@@ -627,3 +627,31 @@ func (t Timespan) Subtract(other Timespan) Timespan {
 	}
 	return Timespan(v)
 }
+
+// TimespanDecimal is a TIME as MySQL's number: hhmmss.ffffff (10:10:59.5 is
+// 101059.5). go-mysql-server could not convert a TIME to a number.
+// (s2z patch)
+func TimespanDecimal(t Timespan) decimal.Decimal {
+	neg, h, m, sec, us := t.timespanToUnits()
+	d := decimal.New((int64(h)*10000+int64(m)*100+int64(sec))*1000000+int64(us), -6)
+	if neg {
+		d = d.Neg()
+	}
+	return d
+}
+
+// TimespanInt is a TIME as MySQL's integer: rounded to a second, then
+// hhmmss (10:10:59.5 is 101100). (s2z patch)
+func TimespanInt(t Timespan) int64 {
+	us := t.AsMicroseconds()
+	neg := us < 0
+	if neg {
+		us = -us
+	}
+	secs := (us + 500000) / 1000000
+	n := secs/3600*10000 + secs/60%60*100 + secs%60
+	if neg {
+		n = -n
+	}
+	return n
+}

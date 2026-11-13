@@ -972,6 +972,10 @@ func (t NumberTypeImpl_) DisplayWidth() int {
 }
 
 func convertToInt64(t NumberTypeImpl_, v interface{}) (int64, sql.ConvertInRange, error) {
+	if ts, ok := v.(Timespan); ok { // s2z patch
+		v = TimespanInt(ts)
+	}
+
 	switch v := v.(type) {
 	case time.Time:
 		return v.UTC().Unix(), sql.InRange, nil
@@ -1144,6 +1148,10 @@ func convertValueToUint64(t NumberTypeImpl_, v sql.Value) (uint64, error) {
 }
 
 func convertToUint64(t NumberTypeImpl_, v interface{}) (uint64, sql.ConvertInRange, error) {
+	if ts, ok := v.(Timespan); ok { // s2z patch
+		v = TimespanInt(ts)
+	}
+
 	switch v := v.(type) {
 	case time.Time:
 		return uint64(v.UTC().Unix()), sql.InRange, nil
@@ -1500,6 +1508,10 @@ func convertToUint8(t NumberTypeImpl_, v interface{}) (uint8, sql.ConvertInRange
 }
 
 func convertToFloat64(t NumberTypeImpl_, v interface{}) (float64, error) {
+	if ts, ok := v.(Timespan); ok { // s2z patch
+		v = TimespanDecimal(ts)
+	}
+
 	switch v := v.(type) {
 	case time.Time:
 		return float64(v.UTC().Unix()), nil
@@ -1839,12 +1851,18 @@ func MySQLFloatString(v float64, single bool) string {
 }
 
 // TypedString is v, a value of type t, as MySQL writes it as text where
-// the type matters: a YEAR with 4 digits (0000), a FLOAT(M,D) with D
+// the type matters: a DECIMAL with its scale's digits, a YEAR with 4 digits (0000), a FLOAT(M,D) with D
 // decimals, a FLOAT or DOUBLE as MySQL writes floats. ok is false for other
 // types. (s2z patch: CONCAT, CAST AS CHAR and GROUP_CONCAT converted the
 // bare Go value, giving 0, 3.3 and 3.299999952316284.)
 func TypedString(t sql.Type, v interface{}) (string, bool) {
 	if v == nil || t == nil {
+		return "", false
+	}
+	if dt, ok := t.(sql.DecimalType); ok {
+		if d, ok := v.(decimal.Decimal); ok {
+			return d.StringFixed(int32(dt.Scale())), true // its scale's digits: 1.50
+		}
 		return "", false
 	}
 	if IsYear(t) {

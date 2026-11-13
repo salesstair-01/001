@@ -63,3 +63,48 @@ func TestGroupedWindows(t *testing.T) {
 		}
 	}
 }
+
+// TestWindowedJSONAndBitAggregates: JSON_OBJECTAGG, JSON_ARRAYAGG and
+// BIT_AND/OR/XOR as window functions, with MySQL's default frames (the
+// partition without ORDER BY, the rows up to the current row's peers with
+// it), as MySQL 8.0.46 gives them.
+func TestWindowedJSONAndBitAggregates(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE tw (i int, j int)", "[]"},
+		{"INSERT INTO tw VALUES (1, 10), (2, 20), (3, 7)", "[]"},
+		{"SELECT i, JSON_ARRAYAGG(j) OVER (ORDER BY i), JSON_OBJECTAGG(i, j) OVER (ORDER BY i) FROM tw ORDER BY i",
+			`[1,[10],{"1": 10} 2,[10, 20],{"1": 10, "2": 20} 3,[10, 20, 7],{"1": 10, "2": 20, "3": 7}]`},
+		{"SELECT i, JSON_ARRAYAGG(j) OVER (), JSON_OBJECTAGG(i, j) OVER () FROM tw ORDER BY i",
+			`[1,[10, 20, 7],{"1": 10, "2": 20, "3": 7} 2,[10, 20, 7],{"1": 10, "2": 20, "3": 7} 3,[10, 20, 7],{"1": 10, "2": 20, "3": 7}]`},
+		{"SELECT i, JSON_OBJECTAGG(i, j) OVER (ORDER BY j) FROM tw ORDER BY i", `[1,{"1": 10, "3": 7} 2,{"1": 10, "2": 20, "3": 7} 3,{"3": 7}]`},
+		{"SELECT i, JSON_OBJECTAGG(i, j) OVER (PARTITION BY i > 1) FROM tw ORDER BY i", `[1,{"1": 10} 2,{"2": 20, "3": 7} 3,{"2": 20, "3": 7}]`},
+		{"SELECT i, BIT_AND(j) OVER (), BIT_OR(j) OVER (ORDER BY i), BIT_XOR(j) OVER (PARTITION BY i) FROM tw ORDER BY i", "[1,0,10,10 2,0,30,20 3,0,31,7]"},
+		// named windows, and FIRST/LAST/NTH_VALUE with the same default frames
+		{"SELECT i, JSON_ARRAYAGG(j) OVER w, SUM(j) OVER w, ROW_NUMBER() OVER w FROM tw WINDOW w AS (ORDER BY i) ORDER BY i", "[1,[10],10,1 2,[10, 20],30,2 3,[10, 20, 7],37,3]"},
+		{"SELECT i, SUM(j) OVER (w ORDER BY j) FROM tw WINDOW w AS (PARTITION BY i > 1) ORDER BY i", "[1,10 2,27 3,7]"},
+		{"SELECT i, SUM(j) OVER w, LAST_VALUE(j) OVER w, FIRST_VALUE(j) OVER w, NTH_VALUE(j, 2) OVER w FROM tw WINDOW w AS () ORDER BY i", "[1,37,7,10,20 2,37,7,10,20 3,37,7,10,20]"},
+		{"SELECT i, LAST_VALUE(j) OVER (), LAST_VALUE(j) OVER (ORDER BY i), NTH_VALUE(j, 2) OVER (ORDER BY i) FROM tw ORDER BY i", "[1,7,10,NULL 2,7,20,20 3,7,7,20]"},
+		{"SELECT i, LAST_VALUE(j) OVER w FROM tw WINDOW w AS (ORDER BY j) ORDER BY i", "[1,10 2,20 3,7]"},
+		// frames over NULLs (peers of each other) and descending order;
+		// the SUM of only NULLs is NULL
+		{"CREATE TABLE tn (i int, p int)", "[]"},
+		{"INSERT INTO tn VALUES (0, 1), (1, 1), (2, 2), (NULL, 2), (1, 1), (NULL, 3)", "[]"},
+		{"SELECT i, SUM(i) OVER (ORDER BY i) FROM tn GROUP BY i ORDER BY i", "[NULL,NULL 0,0 1,1 2,3]"},
+		{"SELECT i, VARIANCE(i) OVER (ORDER BY i) FROM tn GROUP BY i ORDER BY i", "[NULL,NULL 0,0 1,0.25 2,0.6666666666666666]"},
+		{"SELECT p, i, SUM(i) OVER (PARTITION BY p ORDER BY i), SUM(i) OVER (PARTITION BY p) FROM tn ORDER BY p, i",
+			"[1,0,0,2 1,1,2,2 1,1,2,2 2,NULL,NULL,2 2,2,2,2 3,NULL,NULL,NULL]"},
+		{"SELECT i, COUNT(*) OVER (ORDER BY i DESC) FROM tn ORDER BY i DESC", "[2,1 1,3 1,3 0,4 NULL,6 NULL,6]"},
+		// without ORDER BY, the rows come in the window's order, as MySQL's
+		{"SELECT i, SUM(i) OVER (ORDER BY i DESC) FROM tn", "[2,2 1,4 1,4 0,4 NULL,4 NULL,4]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %q, want %q", s.q, got, s.want)
+		}
+	}
+}

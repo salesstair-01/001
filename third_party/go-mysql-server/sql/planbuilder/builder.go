@@ -42,6 +42,7 @@ type Builder struct {
 	tabId           sql.TableId
 	multiDDL        bool
 	alterAddedCols  []*sql.Column // s2z patch: columns an ALTER TABLE adds, for its CHECKs
+	setOpDepth      int           // s2z patch: building a UNION's (INTERSECT's, EXCEPT's) branch
 	viewCtx         *ViewContext
 	procCtx         *ProcContext
 	triggerCtx      *TriggerContext

@@ -58,7 +58,28 @@ func windowToIter(w *plan.Window) ([]*aggregation.WindowPartitionIter, [][]int, 
 		if err != nil {
 			return nil, nil, err
 		}
-		agg = aggregation.NewAggregation(fn, fn.DefaultFramer())
+		framer := fn.DefaultFramer()
+		usesFrame := false
+		switch e := expr.(type) {
+		case sql.Aggregation:
+			usesFrame = true
+		case sql.FunctionExpression:
+			switch e.FunctionName() {
+			case "FIRST_VALUE", "LAST_VALUE", "NTH_VALUE", "first_value", "last_value", "nth_value":
+				usesFrame = true
+			}
+		}
+		if usesFrame && window != nil && window.Frame == nil {
+			// s2z patch: an aggregate's frame without a frame clause is
+			// MySQL's: the partition, or with ORDER BY the rows up to the
+			// current row's peers (each function had its own default)
+			if len(window.OrderBy) == 0 {
+				framer = aggregation.NewPartitionFramer()
+			} else {
+				framer = aggregation.NewPeersFramer(window.OrderBy.ToExpressions())
+			}
+		}
+		agg = aggregation.NewAggregation(fn, framer)
 
 		id, err := window.PartitionId()
 		if err != nil {

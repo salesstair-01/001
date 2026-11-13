@@ -99,6 +99,7 @@ type SumAgg struct {
 
 	// use prefix sums to quickly calculate arbitrary frame sum within partition
 	prefixSum []float64
+	nullCnt   []int // s2z patch: NULLs up to each row, for an all-NULL frame
 }
 
 func NewSumAgg(e sql.Expression) *SumAgg {
@@ -137,7 +138,7 @@ func (a *SumAgg) StartPartition(ctx *sql.Context, interval sql.WindowInterval, b
 	a.partitionStart, a.partitionEnd = interval.Start, interval.End
 	a.Dispose()
 	var err error
-	a.prefixSum, _, err = floatPrefixSum(ctx, interval, buf, a.expr)
+	a.prefixSum, a.nullCnt, err = floatPrefixSum(ctx, interval, buf, a.expr)
 	return err
 }
 
@@ -148,6 +149,16 @@ func (a *SumAgg) NewSlidingFrameInterval(added, dropped sql.WindowInterval) {
 func (a *SumAgg) Compute(ctx *sql.Context, interval sql.WindowInterval, buf sql.WindowBuffer) interface{} {
 	if interval.End-interval.Start < 1 {
 		return nil
+	}
+	// s2z patch: the SUM of only NULLs is NULL, as in MySQL (it was 0)
+	if a.nullCnt != nil {
+		nulls := a.nullCnt[interval.End-a.partitionStart-1]
+		if interval.Start > a.partitionStart {
+			nulls -= a.nullCnt[interval.Start-a.partitionStart-1]
+		}
+		if nulls == interval.End-interval.Start {
+			return nil
+		}
 	}
 	return computePrefixSum(interval, a.partitionStart, a.prefixSum)
 }
@@ -1019,8 +1030,12 @@ func (a *WindowedJSONArrayAgg) Dispose() {
 	expression.Dispose(a.expr)
 }
 
-// DefaultFramer returns a NewUnboundedPrecedingToCurrentRowFramer
+// DefaultFramer returns the window's frame (s2z patch: it was ignored),
+// else a NewUnboundedPrecedingToCurrentRowFramer
 func (a *WindowedJSONArrayAgg) DefaultFramer() sql.WindowFramer {
+	if a.framer != nil {
+		return a.framer
+	}
 	return NewUnboundedPrecedingToCurrentRowFramer()
 }
 
@@ -1112,10 +1127,13 @@ func (a *WindowedJSONObjectAgg) NewSlidingFrameInterval(added, dropped sql.Windo
 }
 
 func (a *WindowedJSONObjectAgg) Compute(ctx *sql.Context, interval sql.WindowInterval, buf sql.WindowBuffer) interface{} {
-	if len(a.vals) == 0 {
+	// s2z patch: the row's frame (the whole partition was used for every
+	// row); StartPartition has refused a NULL key
+	vals, err := a.aggregateVals(ctx, interval, buf)
+	if err != nil || len(vals) == 0 {
 		return nil
 	}
-	return types.JSONDocument{Val: a.vals}
+	return types.JSONDocument{Val: vals}
 }
 
 func (a *WindowedJSONObjectAgg) aggregateVals(ctx *sql.Context, interval sql.WindowInterval, buf sql.WindowBuffer) (map[string]interface{}, error) {

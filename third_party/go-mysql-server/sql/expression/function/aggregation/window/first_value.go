@@ -123,8 +123,8 @@ func (f *FirstValue) Children() []sql.Expression {
 
 // WithChildren implements sql.Expression
 func (f *FirstValue) WithChildren(children ...sql.Expression) (sql.Expression, error) {
-	if len(children) < 2 {
-		return nil, sql.ErrInvalidChildrenNumber.New(f, len(children), 2)
+	if len(children) < 1 { // s2z patch: OVER () has no window expressions
+		return nil, sql.ErrInvalidChildrenNumber.New(f, len(children), 1)
 	}
 
 	nf := *f

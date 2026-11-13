@@ -95,16 +95,31 @@ func (j *JSONObjectAgg) IsNullable() bool {
 
 // Children implements the Expression interface.
 func (j *JSONObjectAgg) Children() []sql.Expression {
-	return []sql.Expression{j.key, j.value}
+	children := []sql.Expression{j.key, j.value}
+	if j.window != nil { // s2z patch: as the other window aggregates, so they are indexed
+		children = append(children, j.window.ToExpressions()...)
+	}
+	return children
 }
 
 // WithChildren implements the Expression interface.
 func (j *JSONObjectAgg) WithChildren(children ...sql.Expression) (sql.Expression, error) {
-	if len(children) != 2 {
+	if len(children) < 2 {
 		return nil, sql.ErrInvalidChildrenNumber.New(j, len(children), 2)
 	}
 
-	return NewJSONObjectAgg(children[0], children[1]), nil
+	// s2z patch: keeping its window, with its expressions, and id (they
+	// were dropped)
+	nj := *j
+	nj.key, nj.value = children[0], children[1]
+	if len(children) > 2 && j.window != nil {
+		w, err := j.window.FromExpressions(children[2:])
+		if err != nil {
+			return nil, err
+		}
+		nj.window = w
+	}
+	return &nj, nil
 }
 
 // WithWindow implements sql.Aggregation
@@ -127,7 +142,11 @@ func (j *JSONObjectAgg) NewBuffer() (sql.AggregationBuffer, error) {
 
 // NewWindowFunctionAggregation implements sql.WindowAdaptableExpression
 func (j *JSONObjectAgg) NewWindowFunction() (sql.WindowFunction, error) {
-	return NewWindowedJSONObjectAgg(j), nil
+	w := NewWindowedJSONObjectAgg(j)
+	if j.window != nil { // s2z patch: with the window's frame
+		return w.WithWindow(j.window)
+	}
+	return w, nil
 }
 
 // Eval implements the Expression interface.

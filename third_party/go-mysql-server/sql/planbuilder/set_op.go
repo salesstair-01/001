@@ -39,8 +39,10 @@ func hasRecursiveCte(node sql.Node) bool {
 }
 
 func (b *Builder) buildSetOp(inScope *scope, u *ast.SetOp) (outScope *scope) {
+	b.setOpDepth++ // s2z patch: a branch keeps its rows' order (windowOutputOrder)
 	leftScope := b.buildSelectStmt(inScope, u.Left)
 	rightScope := b.buildSelectStmt(inScope, u.Right)
+	b.setOpDepth--
 
 	var setOpType int
 	switch u.Type {

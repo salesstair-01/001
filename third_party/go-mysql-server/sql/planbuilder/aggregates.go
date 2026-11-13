@@ -510,7 +510,7 @@ func isWindowFunc(name string) bool {
 		"first_value", "last_value",
 		"rank", "dense_rank",
 		"ntile",
-		"cume_dist", "nth_value", // s2z patch
+		"cume_dist", "nth_value", "json_objectagg", "bit_and", "bit_or", "bit_xor", // s2z patch
 		"std", "stddev", "stddev_pop", "stddev_samp",
 		"variance", "var_pop", "var_samp":
 		return true
@@ -705,7 +705,11 @@ func (b *Builder) buildWindowDef(fromScope *scope, def *ast.WindowDef) *sql.Wind
 
 	// According to MySQL documentation at https://dev.mysql.com/doc/refman/8.0/en/window-functions-usage.html
 	// "If OVER() is empty, the window consists of all query rows and the window function computes a result using all rows."
-	if def.OrderBy == nil && frame == nil {
+	// s2z patch: not for OVER w, whose window w may have an ORDER BY, nor
+	// for WINDOW w AS (...), which an OVER (w ORDER BY ...) may add one to
+	// (the window functions take MySQL's default frame without a frame
+	// clause)
+	if def.OrderBy == nil && frame == nil && def.NameRef.IsEmpty() && def.Name.IsEmpty() {
 		frame = plan.NewRowsUnboundedPrecedingToUnboundedFollowingFrame()
 	}
 

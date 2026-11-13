@@ -150,6 +150,9 @@ func (t TimespanType_) Convert(c context.Context, v interface{}) (interface{}, s
 	if v == nil {
 		return nil, sql.InRange, nil
 	}
+	if d, ok := s2zNumberDecimal(v); ok {
+		return t.s2zNumberTimespan(d)
+	}
 	ret, err := t.ConvertToTimespan(v)
 	if err == nil {
 		ret = t.round(ret)
@@ -654,4 +657,88 @@ func TimespanInt(t Timespan) int64 {
 		n = -n
 	}
 	return n
+}
+
+// s2zNumberDecimal is a number's exact value (a float's shortest decimal).
+func s2zNumberDecimal(v interface{}) (decimal.Decimal, bool) {
+	switch x := v.(type) {
+	case int:
+		return decimal.NewFromInt(int64(x)), true
+	case int8:
+		return decimal.NewFromInt(int64(x)), true
+	case int16:
+		return decimal.NewFromInt(int64(x)), true
+	case int32:
+		return decimal.NewFromInt(int64(x)), true
+	case int64:
+		return decimal.NewFromInt(x), true
+	case uint8:
+		return decimal.NewFromInt(int64(x)), true
+	case uint16:
+		return decimal.NewFromInt(int64(x)), true
+	case uint32:
+		return decimal.NewFromInt(int64(x)), true
+	case uint64:
+		return decimal.NewFromUint64(x), true
+	case float32:
+		return decimal.NewFromFloat32(x), !math.IsNaN(float64(x)) && !math.IsInf(float64(x), 0)
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return decimal.Decimal{}, false
+		}
+		return decimal.NewFromFloat(x), true
+	case decimal.Decimal:
+		return x, true
+	case decimal.NullDecimal:
+		return x.Decimal, x.Valid
+	}
+	return decimal.Decimal{}, false
+}
+
+// s2zNumberTimespan is a number as a TIME, as MySQL reads it: [-]hhmmss.ffffff,
+// rounded half away from zero to the type's digits. A number past
+// 838:59:59 is that bound, and one with minutes or seconds over 59 is
+// 00:00:00, both out of range. go-mysql-server dropped the fraction of a
+// DECIMAL, ignored the type's digits, and stored 0 for any number out of
+// range. (s2z patch)
+func (t TimespanType_) s2zNumberTimespan(d decimal.Decimal) (interface{}, sql.ConvertInRange, error) {
+	neg := d.Sign() < 0
+	a := d.Abs()
+	digits := 6
+	if t.fixed {
+		digits = int(t.precision)
+	}
+	whole := a.Truncate(0)
+	frac := a.Sub(whole)
+	maxUS := int64(timespanMaximum)
+	if whole.GreaterThan(decimal.NewFromInt(8385959)) {
+		return t.sign(maxUS, neg), sql.OutOfRange, nil
+	}
+	n := whole.IntPart()
+	h, m, sec := n/10000, n/100%100, n%100
+	if m > 59 || sec > 59 {
+		return Timespan(0), sql.OutOfRange, nil
+	}
+	// the fraction, rounded half away from zero to the type's digits
+	unit := int64(1)
+	for i := digits; i < 6; i++ {
+		unit *= 10
+	}
+	base := (h*3600 + m*60 + sec) * 1000000
+	if base+frac.Shift(6).Ceil().IntPart() > maxUS {
+		// out of range before rounding: 838:59:59.4 is not a TIME(0)
+		return t.sign(maxUS, neg), sql.OutOfRange, nil
+	}
+	us := base + frac.Shift(int32(digits)).Round(0).IntPart()*unit
+	if us > maxUS {
+		return t.sign(maxUS, neg), sql.OutOfRange, nil
+	}
+	return t.sign(us, neg), sql.InRange, nil
+}
+
+func (t TimespanType_) sign(us int64, neg bool) Timespan {
+	if neg {
+		us = -us
+	}
+	return Timespan(us)
 }

@@ -171,3 +171,35 @@ func TestTimeAsNumber(t *testing.T) {
 		}
 	}
 }
+
+// TestNumberAsTime pins numbers stored in and cast to TIME against MySQL
+// 8.0.46: hhmmss.ffffff rounded to the type's digits, the bound past
+// 838:59:59, 00:00:00 for minutes over 59 (warnings outside strict mode,
+// 1292 in it), and NULL from CAST.
+func TestNumberAsTime(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE t3 (a time)", "[]"},
+		{"INSERT INTO t3 VALUES (106060)", "ERR 1292"},
+		{"INSERT INTO t3 VALUES (8385960)", "ERR 1292"},
+		{"INSERT INTO t3 VALUES (106060.5)", "ERR 1292"},
+		{"INSERT INTO t3 VALUES (-8385960e0)", "ERR 1292"},
+		{"INSERT INTO t3 VALUES (8385959.4)", "ERR 1292"},
+		{"INSERT INTO t3 VALUES ('8385960')", "ERR 1292"},
+		{"SET sql_mode = ''", "[]"},
+		{"CREATE TABLE tt (a time(6), b time)", "[]"},
+		{"INSERT INTO tt VALUES (105959.123457, 105959.5),(0.111111,0.5),(0.1111115,1.5),(-105959.12,-0.5),(8385960, 9999999),(-8385960,-1e10),(1e20, 106060),(59.9999995, 595959.9999999),(120,'120'),(1234,1234.5)", "[]"},
+		{"SHOW WARNINGS", "[Warning,1264,Out of range value for column 'a' at row 5 Warning,1264,Out of range value for column 'b' at row 5 Warning,1264,Out of range value for column 'a' at row 6 Warning,1264,Out of range value for column 'b' at row 6 Warning,1264,Out of range value for column 'a' at row 7 Warning,1264,Out of range value for column 'b' at row 7]"},
+		{"SELECT * FROM tt", "[10:59:59.123457,11:00:00 00:00:00.111111,00:00:01 00:00:00.111112,00:00:02 -10:59:59.120000,-00:00:01 838:59:59.000000,838:59:59 -838:59:59.000000,-838:59:59 838:59:59.000000,00:00:00 00:01:00.000000,60:00:00 00:01:20.000000,00:01:20 00:12:34.000000,00:12:35]"},
+		{"SELECT CAST(105959.123457 AS TIME(6)), CAST(0.1111115 AS TIME(6)), CAST(1234.5e0 AS TIME(1)), CAST(-0.5 AS TIME), CAST(8385960 AS TIME)", "[10:59:59.123457,00:00:00.111112,00:12:34.5,-00:00:01,NULL]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}

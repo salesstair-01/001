@@ -16,7 +16,9 @@ package rowexec
 
 import (
 	"fmt"
+
 	"github.com/dolthub/vitess/go/mysql"
+	"github.com/shopspring/decimal"
 	"io"
 
 	"github.com/dolthub/vitess/go/vt/proto/query"
@@ -117,6 +119,14 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 				// 'table.column'.
 				// s2z patch: and without strict mode, as MySQL
 				if (i.ignore || !strictMode(ctx)) && col.Type.Type() != query.Type_JSON {
+					if types.IsTimespan(col.Type) && converted != nil && sql.ErrValueOutOfRange.Is(cErr) {
+						// s2z patch: a TIME out of range is its bound (or
+						// 00:00:00), with MySQL's warning
+						orig := row[idx]
+						row[idx] = converted
+						ctx.Session.Warn(ignoreWarning(col, orig, cErr, i.rowNum))
+						continue
+					}
 					if _, ok := col.Type.(sql.NumberType); ok {
 						orig := row[idx]
 						if converted == nil {
@@ -135,6 +145,9 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 						cErr = types.ErrLengthBeyondLimit.New(row[idx], col.Name)
 					} else if sql.ErrNotMatchingSRID.Is(cErr) {
 						cErr = sql.ErrNotMatchingSRIDWithColName.New(col.Name, cErr)
+					} else if types.IsTimespan(col.Type) && (sql.ErrValueOutOfRange.Is(cErr) || types.ErrConvertingToTimeType.Is(cErr)) {
+						// s2z patch: MySQL's error for a number that is no TIME
+						cErr = mysql.NewSQLError(1292, "22007", "Incorrect time value: '%s' for column '%s' at row %d", s2zNumberText(row[idx]), col.Name, i.rowNum)
 					} else if _, ok := col.Type.(sql.NumberType); ok && sql.ErrValueOutOfRange.Is(cErr) {
 						// s2z patch: in strict mode, the warning MySQL gives
 						// outside it is the error (1264)
@@ -472,4 +485,18 @@ func toInt64(x interface{}) int64 {
 	default:
 		panic(fmt.Sprintf("Expected a numeric auto increment value, but got %T", x))
 	}
+}
+
+// s2zNumberText is a number as MySQL quotes it in an error: a float as
+// MySQL writes floats. (s2z patch)
+func s2zNumberText(v interface{}) string {
+	switch x := v.(type) {
+	case float64:
+		return types.MySQLFloatString(x, false)
+	case float32:
+		return types.MySQLFloatString(float64(x), true)
+	case decimal.Decimal:
+		return x.String()
+	}
+	return fmt.Sprint(v)
 }

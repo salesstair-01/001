@@ -173,7 +173,7 @@ func (c *Convert) Type() sql.Type {
 	case ConvertToSigned:
 		return types.Int64
 	case ConvertToTime:
-		return types.Time
+		return types.CreateTimeType(c.typeLength) // s2z patch: TIME(n)
 	case ConvertToUnsigned:
 		return types.Uint64
 	case ConvertToYear:
@@ -403,8 +403,9 @@ func convertValue(ctx *sql.Context, val interface{}, castTo string, originType s
 
 		return num, nil
 	case ConvertToTime:
-		t, _, err := types.Time.Convert(ctx, val)
-		if err != nil {
+		// s2z patch: rounded to TIME(n); a number that is no TIME is NULL
+		t, inRange, err := types.CreateTimeType(typeLength).Convert(ctx, val)
+		if err != nil || inRange == sql.OutOfRange {
 			return nil, nil
 		}
 		return t, nil

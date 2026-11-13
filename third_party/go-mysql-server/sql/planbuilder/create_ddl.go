@@ -288,11 +288,11 @@ func (b *Builder) validateStatement(inScope *scope, stmt ast.Statement) {
 					err := fmt.Errorf("invalid value '%s' for MySQL error code", string(dc.MysqlErrorCode.Val))
 					b.handleErr(err)
 				}
-				//TODO: implement MySQL error code support
-				err = sql.ErrUnsupportedSyntax.New(ast.String(s))
-				b.handleErr(err)
+				// s2z patch: a condition for a MySQL error number
+				inScope.proc.AddCondition(plan.NewDeclareCondition(strings.ToLower(dc.Name), int64(number), ""))
+				break
 			}
-			inScope.proc.AddCondition(plan.NewDeclareCondition(dc.Name, 0, ""))
+			inScope.proc.AddCondition(plan.NewDeclareCondition(strings.ToLower(dc.Name), 0, dc.SqlStateValue))
 		} else if s.Variables != nil {
 			typ, err := types.ColumnTypeToType(&s.Variables.VarType)
 			if err != nil {
@@ -307,12 +307,8 @@ func (b *Builder) validateStatement(inScope *scope, stmt ast.Statement) {
 		} else if s.Cursor != nil {
 			inScope.proc.AddCursor(s.Cursor.Name)
 		} else if s.Handler != nil {
-			switch s.Handler.ConditionValues[0].ValueType {
-			case ast.DeclareHandlerCondition_NotFound:
-			case ast.DeclareHandlerCondition_SqlException:
-			default:
-				err := sql.ErrUnsupportedSyntax.New(ast.String(s))
-				b.handleErr(err)
+			for _, cv := range s.Handler.ConditionValues { // s2z patch: every condition
+				b.handlerCondition(inScope, s, cv)
 			}
 			inScope.proc.AddHandler(nil)
 		}

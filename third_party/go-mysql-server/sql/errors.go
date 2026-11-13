@@ -1017,6 +1017,18 @@ func CastSQLError(err error) *mysql.SQLError {
 		switch code {
 		case mysql.ERDupEntry, mysql.ERBadNullError, mysql.ErNoReferencedRow2, mysql.ERRowIsReferenced2:
 			sqlState = "23000"
+		case mysql.ERNoSuchTable:
+			sqlState = "42S02"
+		case mysql.ERBadDb:
+			sqlState = "42000"
+		case mysql.ERSubqueryNo1Row, mysql.EROperandColumns:
+			sqlState = "21000"
+		case mysql.ERBadFieldError:
+			sqlState = "42S22"
+		case mysql.ERMixOfGroupFuncAndFields, mysql.ERMultiplePriKey, mysql.ERWrongAutoKey, mysql.ERKeyColumnDoesNotExist, mysql.ERCantDropFieldOrKey, mysql.ERFieldSpecifiedTwice:
+			sqlState = "42000"
+		case mysql.ERDbCreateExists:
+			sqlState = "HY000"
 		}
 	}
 	msg := err.Error()

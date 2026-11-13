@@ -349,56 +349,54 @@ func query(ctx *sql.Context, runner sql.StatementRunner, stmt ast.Statement) (sq
 
 // handleError handles errors that occur during the execution of a procedure according to the defined handlers.
 func handleError(ctx *sql.Context, runner sql.StatementRunner, stack *InterpreterStack, statements []*InterpreterOperation, counter int, err error) (int, error) {
+	c, _, _, e := handleErrorRows(ctx, runner, stack, statements, counter, err)
+	return c, e
+}
+
+// handleErrorRows is handleError, which also returns the rows of the
+// handler's last query (EXIT HANDLER FOR ... SELECT 'x' returns them).
+// (s2z patch)
+func handleErrorRows(ctx *sql.Context, runner sql.StatementRunner, stack *InterpreterStack, statements []*InterpreterOperation, counter int, err error) (int, sql.Schema, []sql.Row, error) {
 	if err == nil {
-		return counter, nil
+		return counter, nil, nil, nil
 	}
 
-	var matchingHandler *InterpreterHandler
-	for _, handler := range stack.ListHandlers() {
-		if errors.Is(err, expression.FetchEOF) {
-			if handler.Condition == ast.DeclareHandlerCondition_NotFound {
-				matchingHandler = handler
-			}
-			break
-		}
-		switch handler.Condition {
-		case ast.DeclareHandlerCondition_MysqlErrorCode:
-		case ast.DeclareHandlerCondition_SqlState:
-		case ast.DeclareHandlerCondition_ConditionName:
-		case ast.DeclareHandlerCondition_SqlWarning:
-		case ast.DeclareHandlerCondition_NotFound:
-		case ast.DeclareHandlerCondition_SqlException:
-			matchingHandler = handler
-			break
-		}
+	// s2z patch: handlers match by the error's MySQL number and SQLSTATE
+	code, state := uint16(1329), "02000" // a cursor's end: No data
+	if !errors.Is(err, expression.FetchEOF) {
+		se := sql.CastSQLError(expression.SQLErrorMapper(err))
+		code, state = uint16(se.Num), se.State
 	}
+	matchingHandler := stack.matchingHandler(code, state)
 
 	if matchingHandler == nil {
-		return -1, err
+		return -1, nil, nil, err
 	}
 
 	handlerOps := make([]*InterpreterOperation, 0, 1)
 	err = ConvertStmt(&handlerOps, stack, matchingHandler.Statement)
 	if err != nil {
-		return -1, err
+		return -1, nil, nil, err
 	}
+	var hSch sql.Schema
+	var hRows []sql.Row
 
 	// s2z patch: run every operation of the handler's statement (a BEGIN ...
 	// END body is several), each one's rows to their end. Upstream ran only
 	// the first, and returned its rows' io.EOF, which Call took for a jump
 	// to -1: the procedure started over, forever.
 	for hc := 0; hc < len(handlerOps); hc++ {
-		nc, _, _, rowIter, err := execOp(ctx, runner, stack, handlerOps[hc], handlerOps, nil, hc)
+		nc, sch, _, rowIter, err := execOp(ctx, runner, stack, handlerOps[hc], handlerOps, nil, hc)
 		if err != nil {
-			return -1, err
+			return -1, nil, nil, err
 		}
 		if rowIter != nil {
-			for {
-				if _, err = rowIter.Next(ctx); err == io.EOF {
-					break
-				} else if err != nil {
-					return -1, err
-				}
+			rows, err := sql.RowIterToRows(ctx, rowIter)
+			if err != nil {
+				return -1, nil, nil, err
+			}
+			if sch != nil && !types.IsOkResultSchema(sch) {
+				hSch, hRows = sch, rows
 			}
 		}
 		hc = nc
@@ -406,7 +404,7 @@ func handleError(ctx *sql.Context, runner sql.StatementRunner, stack *Interprete
 
 	switch matchingHandler.Action {
 	case ast.DeclareHandlerAction_Continue:
-		return counter, nil
+		return counter, hSch, hRows, nil
 	case ast.DeclareHandlerAction_Exit:
 		remainingEndScopes := 1
 		var newCounter int
@@ -428,13 +426,13 @@ func handleError(ctx *sql.Context, runner sql.StatementRunner, stack *Interprete
 			// the block's handlers. Upstream resumed after it: the handler
 			// stayed in force for the rest of the procedure and, catching a
 			// later error, jumped back to the same place, forever.
-			return newCounter - 2, io.EOF
+			return newCounter - 2, hSch, hRows, io.EOF
 		}
-		return newCounter - 1, io.EOF
+		return newCounter - 1, hSch, hRows, io.EOF
 	case ast.DeclareHandlerAction_Undo:
-		return -1, fmt.Errorf("DECLARE UNDO HANDLER is not supported")
+		return -1, nil, nil, fmt.Errorf("DECLARE UNDO HANDLER is not supported")
 	}
-	return counter, nil
+	return counter, hSch, hRows, nil
 }
 
 func execOp(ctx *sql.Context, runner sql.StatementRunner, stack *InterpreterStack, operation *InterpreterOperation, statements []*InterpreterOperation, asOf *ast.AsOf, counter int) (int, sql.Schema, sql.RowIter, sql.RowIter, error) {
@@ -545,17 +543,20 @@ func execOp(ctx *sql.Context, runner sql.StatementRunner, stack *InterpreterStac
 		}
 
 		if handler := declareStmt.Handler; handler != nil {
-			if len(handler.ConditionValues) != 1 {
-				return 0, nil, nil, nil, sql.ErrUnsupportedSyntax.New(ast.String(declareStmt))
+			// s2z patch: every condition MySQL has, and lists of them
+			var conds []expression.HandlerCondition
+			for _, cv := range handler.ConditionValues {
+				c, err := interpreterHandlerCondition(stack, cv)
+				if err != nil {
+					return 0, nil, nil, nil, err
+				}
+				conds = append(conds, c)
 			}
-
+			hc := expression.HandlerCondition{Or: conds}
+			if len(conds) == 1 {
+				hc = conds[0]
+			}
 			hCond := handler.ConditionValues[0]
-			switch hCond.ValueType {
-			case ast.DeclareHandlerCondition_NotFound:
-			case ast.DeclareHandlerCondition_SqlException:
-			default:
-				return 0, nil, nil, nil, sql.ErrUnsupportedSyntax.New(ast.String(declareStmt))
-			}
 
 			switch handler.Action {
 			case ast.DeclareHandlerAction_Continue:
@@ -564,7 +565,7 @@ func execOp(ctx *sql.Context, runner sql.StatementRunner, stack *InterpreterStac
 				return 0, nil, nil, nil, fmt.Errorf("unsupported handler action: %s", handler.Action)
 			}
 
-			stack.NewHandler(hCond.ValueType, handler.Action, handler.Statement, counter)
+			stack.NewHandler(hCond.ValueType, hc, handler.Action, handler.Statement, counter)
 		}
 
 		if vars := declareStmt.Variables; vars != nil {
@@ -951,9 +952,21 @@ func Call(ctx *sql.Context, iNode InterpreterNode) (sql.RowIter, *InterpreterSta
 		subCtx.Session = ctx.Session
 
 		operation := statements[counter]
+		warnsBefore := len(ctx.Session.Warnings())
 		newCounter, sch, newSelIter, rowIter, err := execOp(subCtx, runner, stack, operation, statements, asOf, counter)
+		// s2z patch: a statement's warning is a condition a handler may take
+		// (SQLWARNING, its number); a DML statement has run by now
+		if err == nil {
+			if ws := ctx.Session.Warnings(); len(ws) > warnsBefore {
+				w := ws[len(ws)-warnsBefore-1] // the statement's first warning
+				if stack.matchingHandler(uint16(w.Code), "01000") != nil {
+					ctx.Session.ClearWarnings() // handled
+					err = mysql.NewSQLError(w.Code, "01000", "%s", w.Message)
+				}
+			}
+		}
 		if err != nil {
-			hCounter, hErr := handleError(subCtx, runner, stack, statements, counter, err)
+			hCounter, hSch, hRows, hErr := handleErrorRows(subCtx, runner, stack, statements, counter, err)
 			if hErr != nil && hErr != io.EOF {
 				return nil, nil, hErr
 			}
@@ -961,6 +974,9 @@ func Call(ctx *sql.Context, iNode InterpreterNode) (sql.RowIter, *InterpreterSta
 				newCounter = hCounter
 			} else {
 				newCounter = counter
+			}
+			if hSch != nil {
+				rowIter, sch = sql.RowsToRowIter(hRows...), hSch
 			}
 		}
 		if rowIter != nil {
@@ -986,4 +1002,38 @@ func Call(ctx *sql.Context, iNode InterpreterNode) (sql.RowIter, *InterpreterSta
 	}
 
 	return rowIters[len(rowIters)-1], stack, nil
+}
+
+// interpreterHandlerCondition is one condition of DECLARE ... HANDLER FOR.
+// (s2z patch)
+func interpreterHandlerCondition(stack *InterpreterStack, cv ast.DeclareHandlerCondition) (expression.HandlerCondition, error) {
+	switch cv.ValueType {
+	case ast.DeclareHandlerCondition_NotFound:
+		return expression.HandlerCondition{Type: expression.HandlerConditionNotFound}, nil
+	case ast.DeclareHandlerCondition_SqlException:
+		return expression.HandlerCondition{Type: expression.HandlerConditionSqlException}, nil
+	case ast.DeclareHandlerCondition_SqlWarning:
+		return expression.HandlerCondition{Type: expression.HandlerConditionSqlWarning}, nil
+	case ast.DeclareHandlerCondition_SqlState:
+		if len(cv.String) != 5 || cv.String[:2] == "00" {
+			return expression.HandlerCondition{}, mysql.NewSQLError(1407, "42000", "Bad SQLSTATE: '%s'", cv.String)
+		}
+		return expression.HandlerCondition{Type: expression.HandlerConditionSqlState, SqlStatePrefix: cv.String}, nil
+	case ast.DeclareHandlerCondition_MysqlErrorCode:
+		n, err := strconv.ParseUint(string(cv.MysqlErrorCode.Val), 10, 16)
+		if err != nil || n == 0 {
+			return expression.HandlerCondition{}, mysql.NewSQLError(1105, "HY000", "Incorrect CONDITION value: '%s'", string(cv.MysqlErrorCode.Val))
+		}
+		return expression.HandlerCondition{Type: expression.HandlerConditionErrorCode, ErrorCode: uint16(n)}, nil
+	case ast.DeclareHandlerCondition_ConditionName:
+		c := stack.GetCondition(cv.String)
+		if c == nil {
+			return expression.HandlerCondition{}, mysql.NewSQLError(1319, "42000", "Undefined CONDITION: %s", cv.String)
+		}
+		if c.MySQLErrCode != 0 {
+			return expression.HandlerCondition{Type: expression.HandlerConditionErrorCode, ErrorCode: uint16(c.MySQLErrCode)}, nil
+		}
+		return expression.HandlerCondition{Type: expression.HandlerConditionSqlState, SqlStatePrefix: c.SQLState}, nil
+	}
+	return expression.HandlerCondition{}, sql.ErrUnsupportedSyntax.New(string(cv.ValueType))
 }

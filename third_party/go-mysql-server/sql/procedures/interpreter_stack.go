@@ -16,6 +16,7 @@ package procedures
 
 import (
 	"fmt"
+	"github.com/dolthub/go-mysql-server/sql/expression"
 	"strconv"
 	"strings"
 
@@ -99,6 +100,7 @@ type InterpreterCursor struct {
 
 // InterpreterHandler is a declare handler that specifies an Action during an error Condition.
 type InterpreterHandler struct {
+	Cond      expression.HandlerCondition // s2z patch: the handler's conditions
 	Condition ast.DeclareHandlerConditionValue
 	Action    ast.DeclareHandlerAction
 	Statement ast.Statement
@@ -295,8 +297,9 @@ func (is *InterpreterStack) GetCursor(name string) *InterpreterCursor {
 }
 
 // NewHandler creates a new handler in the current scope.
-func (is *InterpreterStack) NewHandler(cond ast.DeclareHandlerConditionValue, action ast.DeclareHandlerAction, stmt ast.Statement, counter int) {
+func (is *InterpreterStack) NewHandler(cond ast.DeclareHandlerConditionValue, hc expression.HandlerCondition, action ast.DeclareHandlerAction, stmt ast.Statement, counter int) {
 	is.stack.Peek().handlers = append(is.stack.Peek().handlers, &InterpreterHandler{
+		Cond:      hc,
 		Condition: cond,
 		Action:    action,
 		Statement: stmt,
@@ -370,4 +373,44 @@ func (is *InterpreterStack) PopScope(ctx *sql.Context) {
 		}
 		cursor.RowIter.Close(ctx)
 	}
+}
+
+// matchingHandler is the handler for an error with MySQL number code and
+// SQLSTATE state, as MySQL chooses it: in the innermost scope that has one,
+// the most specific (a number, then a SQLSTATE, then SQLWARNING, NOT FOUND
+// or SQLEXCEPTION). (s2z patch)
+func (is *InterpreterStack) matchingHandler(code uint16, state string) *InterpreterHandler {
+	for i := 0; i < is.stack.Len(); i++ {
+		var best *InterpreterHandler
+		bestRank := 0
+		for _, h := range is.stack.PeekDepth(i).handlers {
+			if r := conditionRank(&h.Cond, code, state); r > bestRank {
+				best, bestRank = h, r
+			}
+		}
+		if best != nil {
+			return best
+		}
+	}
+	return nil
+}
+
+func conditionRank(c *expression.HandlerCondition, code uint16, state string) int {
+	if len(c.Or) > 0 {
+		r := 0
+		for i := range c.Or {
+			r = max(r, conditionRank(&c.Or[i], code, state))
+		}
+		return r
+	}
+	if !c.MatchesCode(code, state) {
+		return 0
+	}
+	switch c.Type {
+	case expression.HandlerConditionErrorCode:
+		return 3
+	case expression.HandlerConditionSqlState:
+		return 2
+	}
+	return 1
 }

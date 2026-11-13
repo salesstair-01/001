@@ -340,8 +340,7 @@ func (t NumberTypeImpl_) Convert(c context.Context, v interface{}) (interface{},
 			// a single-precision value read back rounded to D, as MySQL
 			// reads a FLOAT(M,D): a float64 (y = -999.99 finds -999.99)
 			num, r := t.s2zFit(num)
-			out, _ := t.s2zFit(float64(float32(num)))
-			return out, r, nil
+			return t.s2zRoundD(float64(float32(num))), r, nil
 		}
 		if t.s2zUnsigned {
 			num, r := t.s2zFit(num)
@@ -1894,4 +1893,14 @@ func TypedString(t sql.Type, v interface{}) (string, bool) {
 		return strconv.FormatFloat(f, 'f', d, 64), true
 	}
 	return MySQLFloatString(f, t.Type() == sqltypes.Float32), true
+}
+
+// s2zRoundD is v rounded to the type's D decimals, without the range check:
+// a stored single-precision value read back (FLOAT(30,0) holds
+// 1.0000000150474662e30 for 1e30). (s2z patch)
+func (t NumberTypeImpl_) s2zRoundD(v float64) float64 {
+	if r, err := strconv.ParseFloat(strconv.FormatFloat(v, 'f', t.s2zD, 64), 64); err == nil {
+		return r
+	}
+	return v
 }

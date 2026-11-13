@@ -16,6 +16,7 @@ package planbuilder
 
 import (
 	"fmt"
+	"github.com/dolthub/vitess/go/mysql"
 	"strconv"
 	"strings"
 
@@ -409,9 +410,11 @@ func (b *Builder) buildDeclareCondition(inScope *scope, d *ast.Declare) (outScop
 			err := fmt.Errorf("invalid value '%s' for MySQL error code", string(dc.MysqlErrorCode.Val))
 			b.handleErr(err)
 		}
-		//TODO: implement MySQL error code support
-		err = sql.ErrUnsupportedSyntax.New(ast.String(d))
-		b.handleErr(err)
+		// s2z patch: a condition for a MySQL error number
+		cond := plan.NewDeclareCondition(strings.ToLower(dc.Name), int64(number), "")
+		inScope.proc.AddCondition(cond)
+		outScope.node = cond
+		return outScope
 	}
 
 	cond := plan.NewDeclareCondition(strings.ToLower(dc.Name), 0, dc.SqlStateValue)
@@ -455,21 +458,16 @@ func (b *Builder) buildDeclareCursor(inScope *scope, d *ast.Declare) (outScope *
 func (b *Builder) buildDeclareHandler(inScope *scope, d *ast.Declare, query string) (outScope *scope) {
 	outScope = inScope.push()
 	dHandler := d.Handler
-	if len(dHandler.ConditionValues) != 1 {
-		err := sql.ErrUnsupportedSyntax.New(ast.String(d))
-		b.handleErr(err)
+	// s2z patch: every condition MySQL has, and lists of them
+	var conds []expression.HandlerCondition
+	for _, cv := range dHandler.ConditionValues {
+		conds = append(conds, b.handlerCondition(inScope, d, cv))
 	}
-
 	var cond expression.HandlerCondition
-
-	switch dHandler.ConditionValues[0].ValueType {
-	case ast.DeclareHandlerCondition_NotFound:
-		cond = expression.HandlerCondition{Type: expression.HandlerConditionNotFound}
-	case ast.DeclareHandlerCondition_SqlException:
-		cond = expression.HandlerCondition{Type: expression.HandlerConditionSqlException}
-	default:
-		err := sql.ErrUnsupportedSyntax.New(ast.String(d))
-		b.handleErr(err)
+	if len(conds) == 1 {
+		cond = conds[0]
+	} else {
+		cond = expression.HandlerCondition{Or: conds}
 	}
 
 	stmtScope := b.build(inScope, dHandler.Statement, query)
@@ -742,4 +740,41 @@ func (b *Builder) buildSignalConditionItemName(name ast.SignalConditionItemName)
 		b.handleErr(err)
 	}
 	return plan.SignalConditionItemName_Unknown
+}
+
+// handlerCondition is one condition of DECLARE ... HANDLER FOR. (s2z patch)
+func (b *Builder) handlerCondition(inScope *scope, d *ast.Declare, cv ast.DeclareHandlerCondition) expression.HandlerCondition {
+	switch cv.ValueType {
+	case ast.DeclareHandlerCondition_NotFound:
+		return expression.HandlerCondition{Type: expression.HandlerConditionNotFound}
+	case ast.DeclareHandlerCondition_SqlException:
+		return expression.HandlerCondition{Type: expression.HandlerConditionSqlException}
+	case ast.DeclareHandlerCondition_SqlWarning:
+		return expression.HandlerCondition{Type: expression.HandlerConditionSqlWarning}
+	case ast.DeclareHandlerCondition_SqlState:
+		if len(cv.String) != 5 || cv.String[:2] == "00" {
+			b.handleErr(mysql.NewSQLError(1407, "42000", "Bad SQLSTATE: '%s'", cv.String))
+		}
+		return expression.HandlerCondition{Type: expression.HandlerConditionSqlState, SqlStatePrefix: cv.String}
+	case ast.DeclareHandlerCondition_MysqlErrorCode:
+		n, err := strconv.ParseUint(string(cv.MysqlErrorCode.Val), 10, 16)
+		if err != nil || n == 0 {
+			b.handleErr(mysql.NewSQLError(1105, "HY000", "Incorrect CONDITION value: '%s'", string(cv.MysqlErrorCode.Val)))
+		}
+		return expression.HandlerCondition{Type: expression.HandlerConditionErrorCode, ErrorCode: uint16(n)}
+	case ast.DeclareHandlerCondition_ConditionName:
+		var dc *plan.DeclareCondition
+		if inScope.procActive() {
+			dc = inScope.proc.GetCondition(cv.String)
+		}
+		if dc == nil {
+			b.handleErr(mysql.NewSQLError(1319, "42000", "Undefined CONDITION: %s", cv.String))
+		}
+		if dc.MysqlErrCode != 0 {
+			return expression.HandlerCondition{Type: expression.HandlerConditionErrorCode, ErrorCode: uint16(dc.MysqlErrCode)}
+		}
+		return expression.HandlerCondition{Type: expression.HandlerConditionSqlState, SqlStatePrefix: dc.SqlStateValue}
+	}
+	b.handleErr(sql.ErrUnsupportedSyntax.New(ast.String(d)))
+	return expression.HandlerCondition{}
 }

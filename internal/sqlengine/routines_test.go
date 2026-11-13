@@ -127,3 +127,39 @@ func TestTriggerUserVariables(t *testing.T) {
 		}
 	}
 }
+
+// TestProcedureHandlerConditions pins DECLARE ... HANDLER FOR a SQLSTATE, a
+// MySQL error number, a named condition, a list of them, SQLWARNING and a
+// warning's number (they were "unsupported syntax"), the most specific
+// handler winning, and an EXIT handler's result, against MySQL 8.0.46.
+func TestProcedureHandlerConditions(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE hx (a int PRIMARY KEY, c char(2))", "[]"},
+		{"CREATE PROCEDURE p1() BEGIN DECLARE CONTINUE HANDLER FOR SQLSTATE '23000' SET @x = 'dup'; SET @x = 'none'; INSERT INTO hx VALUES (1,'a'); INSERT INTO hx VALUES (1,'b'); SELECT @x; END", "[]"},
+		{"CREATE PROCEDURE p2() BEGIN DECLARE EXIT HANDLER FOR 1146 SELECT 'no table'; SELECT * FROM nosuch; SELECT 'after'; END", "[]"},
+		{"CREATE PROCEDURE p3() BEGIN DECLARE nokey CONDITION FOR 1062; DECLARE CONTINUE HANDLER FOR nokey, SQLSTATE '42S02' SET @y = CONCAT(IFNULL(@y,''), 'h'); SET @y = ''; INSERT INTO hx VALUES (1,'c'); SELECT * FROM nosuch2; SELECT @y; END", "[]"},
+		{"CREATE PROCEDURE p5() BEGIN DECLARE CONTINUE HANDLER FOR SQLSTATE '00000' SET @z=1; END", "ERR 1407"},
+		{"CREATE PROCEDURE p6() BEGIN DECLARE CONTINUE HANDLER FOR undefined_cond SET @z=1; END", "ERR 1319"},
+		{"CREATE PROCEDURE p7() BEGIN DECLARE CONTINUE HANDLER FOR 1062 SET @v = 'code'; DECLARE CONTINUE HANDLER FOR SQLEXCEPTION SET @v = 'exc'; INSERT INTO hx VALUES (1,'d'); SELECT @v; END", "[]"},
+		{"CALL p1()", "[dup]"},
+		{"CALL p2()", "[no table]"},
+		{"CALL p3()", "[hh]"},
+		{"CALL p7()", "[code]"},
+		{"SET sql_mode=''", "[]"},
+		{"CREATE PROCEDURE p4() BEGIN DECLARE CONTINUE HANDLER FOR SQLWARNING SET @w = 'warned'; SET @w = 'clean'; INSERT INTO hx VALUES (2, 'abc'); SELECT @w; END", "[]"},
+		{"CREATE PROCEDURE p8() BEGIN DECLARE CONTINUE HANDLER FOR 1265 SET @w2 = 'w1265'; SET @w2 = 'clean'; INSERT INTO hx VALUES (3, 'abc'); SELECT @w2, (SELECT c FROM hx WHERE a=3); END", "[]"},
+		{"CALL p4()", "[warned]"},
+		{"CALL p8()", "[w1265,ab]"},
+		{"SHOW WARNINGS", "[]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}

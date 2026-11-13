@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/expression"
 
 	"github.com/dolthub/vitess/go/mysql"
 	"github.com/dolthub/vitess/go/sqltypes"
@@ -59,6 +60,10 @@ var (
 	errExecutionTime = mysql.NewSQLError(3024, "HY000", "Query execution was interrupted, maximum statement execution time exceeded")
 	errInterrupted   = mysql.NewSQLError(1317, "70100", "Query execution was interrupted")
 )
+
+// A stored routine's handler matches an error by its MySQL number and
+// SQLSTATE, which go-mysql-server's errors get here.
+func init() { expression.SQLErrorMapper = withMySQLCode }
 
 func withMySQLCode(err error) error {
 	var se *mysql.SQLError

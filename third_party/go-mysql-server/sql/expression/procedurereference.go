@@ -448,12 +448,22 @@ const (
 	HandlerConditionUnknown HandlerConditionType = iota
 	HandlerConditionNotFound
 	HandlerConditionSqlException
+	// s2z patch: the other conditions of DECLARE ... HANDLER FOR
+	HandlerConditionSqlWarning
+	HandlerConditionSqlState // SqlStatePrefix is the whole SQLSTATE
+	HandlerConditionErrorCode
 )
 
 type HandlerCondition struct {
 	SqlStatePrefix string
 	Type           HandlerConditionType
+	ErrorCode      uint16             // s2z patch: for HandlerConditionErrorCode
+	Or             []HandlerCondition // s2z patch: FOR a, b, ...: any of them
 }
+
+// SQLErrorMapper gives an error its MySQL number and SQLSTATE (the
+// integrator's mapping) before a handler's condition is matched. (s2z patch)
+var SQLErrorMapper = func(err error) error { return err }
 
 type DeclareHandlerAction byte
 
@@ -465,8 +475,39 @@ const (
 
 func (c *HandlerCondition) Matches(err error) bool {
 	if errors.Is(err, FetchEOF) {
-		return c.Type == HandlerConditionNotFound
-	} else {
-		return c.Type == HandlerConditionSqlException
+		return c.MatchesCode(1329, "02000") // No data - zero rows fetched
 	}
+	se := sql.CastSQLError(SQLErrorMapper(err))
+	return c.MatchesCode(uint16(se.Num), se.State)
+}
+
+// MatchesCode is whether the condition is a condition with MySQL number
+// code and SQLSTATE state, as MySQL matches handlers: SQLWARNING is class
+// 01, NOT FOUND class 02, SQLEXCEPTION any other class but 00. (s2z patch)
+func (c *HandlerCondition) MatchesCode(code uint16, state string) bool {
+	if len(c.Or) > 0 {
+		for i := range c.Or {
+			if c.Or[i].MatchesCode(code, state) {
+				return true
+			}
+		}
+		return false
+	}
+	class := ""
+	if len(state) >= 2 {
+		class = state[:2]
+	}
+	switch c.Type {
+	case HandlerConditionNotFound:
+		return class == "02"
+	case HandlerConditionSqlWarning:
+		return class == "01"
+	case HandlerConditionSqlException:
+		return class != "00" && class != "01" && class != "02"
+	case HandlerConditionSqlState:
+		return state == c.SqlStatePrefix
+	case HandlerConditionErrorCode:
+		return code == c.ErrorCode
+	}
+	return false
 }

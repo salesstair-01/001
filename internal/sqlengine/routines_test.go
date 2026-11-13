@@ -99,3 +99,31 @@ func TestTriggersAndProcedures(t *testing.T) {
 		}
 	}
 }
+
+// TestTriggerUserVariables pins a trigger body that sets a user variable
+// named as a column (SET @b = 1 on a table with column b), which was taken
+// for the column (1052, ambiguous between OLD and NEW), against MySQL 8.0.46.
+func TestTriggerUserVariables(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE t2 (a int, b int)", "[]"},
+		{"CREATE TRIGGER t2_bu BEFORE UPDATE ON t2 FOR EACH ROW SET @b = 1", "[]"},
+		{"INSERT INTO t2 VALUES (1,2)", "[]"},
+		{"SET @b = 0", "[]"},
+		{"UPDATE t2 SET a = 5", "[]"},
+		{"SELECT @b", "[1]"},
+		{"CREATE TRIGGER t2_bi BEFORE INSERT ON t2 FOR EACH ROW SET NEW.b = NEW.a * 10, @c = NEW.a", "[]"},
+		{"INSERT INTO t2 (a) VALUES (7)", "[]"},
+		{"SELECT * FROM t2 ORDER BY a", "[5,2 7,70]"},
+		{"SELECT @c", "[7]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}

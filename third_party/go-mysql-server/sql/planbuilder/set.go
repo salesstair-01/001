@@ -133,7 +133,13 @@ func (b *Builder) setExprsToExpressions(inScope *scope, e ast.SetVarExprs) []sql
 		var setScope ast.SetScope
 
 		tblName := strings.ToLower(setExpr.Name.Qualifier.String())
-		c, ok := inScope.resolveColumn("", tblName, strings.ToLower(setExpr.Name.Name.String()), true, false)
+		// s2z patch: only an unscoped name is a column; @b in a trigger body
+		// was taken for column b (ambiguous between OLD and NEW)
+		var c scopeColumn
+		ok := false
+		if setExpr.Scope == ast.SetScope_None || string(setExpr.Scope) == "" {
+			c, ok = inScope.resolveColumn("", tblName, strings.ToLower(setExpr.Name.Name.String()), true, false)
+		}
 		var setVar sql.Expression
 		if ok {
 			setVar = c.scalarGf()

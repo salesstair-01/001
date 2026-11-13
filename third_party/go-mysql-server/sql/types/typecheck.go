@@ -65,6 +65,9 @@ func IsBit(t sql.Type) bool {
 
 // IsFloat checks if t is float type.
 func IsFloat(t sql.Type) bool {
+	if n, ok := t.(NumberTypeImpl_); ok { // s2z patch: FLOAT(M,D) too
+		return n.baseType == sqltypes.Float32 || n.baseType == sqltypes.Float64
+	}
 	return t == Float32 || t == Float64
 }
 

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/dolthub/vitess/go/sqltypes"
 	ast "github.com/dolthub/vitess/go/vt/sqlparser"
 )
 
@@ -173,6 +174,24 @@ func (m *MySqlSchemaFormatter) GenerateCreateTableColumnDefinition(col *Column, 
 	if !col.Nullable {
 		stmt = fmt.Sprintf("%s NOT NULL", stmt)
 	}
+	// s2z patch: MySQL writes a nullable column's NULL default, but not a
+	// TEXT's or BLOB's (it has no default), and NULL after a nullable
+	// TIMESTAMP.
+	textBlob := col.Type.Type() == sqltypes.Text || col.Type.Type() == sqltypes.Blob
+	if col.Nullable && col.Generated == nil {
+		if col.Type.Type() == sqltypes.Timestamp {
+			stmt += " NULL"
+		}
+		if col.Default == nil && !textBlob && !col.AutoIncrement {
+			colDefault = "NULL"
+		}
+	}
+	if textBlob && strings.EqualFold(colDefault, "NULL") {
+		cc := *col
+		cc.Default, colDefault = nil, ""
+		col = &cc
+	}
+	printNullDefault := col.Default == nil && colDefault == "NULL"
 
 	if col.AutoIncrement {
 		stmt = fmt.Sprintf("%s AUTO_INCREMENT", stmt)
@@ -185,14 +204,14 @@ func (m *MySqlSchemaFormatter) GenerateCreateTableColumnDefinition(col *Column, 
 	}
 
 	if col.Generated != nil {
-		storedStr := ""
+		storedStr := " VIRTUAL" // s2z patch: MySQL writes VIRTUAL too
 		if !col.Virtual {
 			storedStr = " STORED"
 		}
 		stmt = fmt.Sprintf("%s GENERATED ALWAYS AS %s%s", stmt, col.Generated.String(), storedStr)
 	}
 
-	if col.Default != nil && col.Generated == nil {
+	if (col.Default != nil || printNullDefault) && col.Generated == nil {
 		stmt = fmt.Sprintf("%s DEFAULT %s", stmt, colDefault)
 	}
 

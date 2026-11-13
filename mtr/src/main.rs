@@ -522,6 +522,19 @@ fn summary(a: &Args, reports: &[FileReport], passed: usize, total: usize, rate: 
          (\"excluded\").\n"
     );
     let _ = writeln!(s, "**{passed} of {total} statements pass ({rate:.1}%).**\n");
+    let (ep, et) = reports.iter().fold((0, 0), |(p, t), r| {
+        (p + r.score.explain_passed, t + r.score.explain_total())
+    });
+    let (np, nt) = (passed - ep, total - et);
+    if nt > 0 {
+        let _ = writeln!(
+            s,
+            "**Without EXPLAIN: {np} of {nt} statements pass ({:.1}%).** EXPLAIN \
+             statements ({ep} of {et} pass) show the query plan, and sqld's planner \
+             is not MySQL's.\n",
+            100.0 * np as f64 / nt as f64
+        );
+    }
     let _ = writeln!(
         s,
         "| file | passed | failed | excluded | pass rate | note |\n|---|---:|---:|---:|---:|---|"

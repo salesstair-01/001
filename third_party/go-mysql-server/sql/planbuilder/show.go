@@ -501,7 +501,7 @@ func (b *Builder) buildShowIndex(inScope *scope, s *ast.Show) (outScope *scope) 
 }
 
 func (b *Builder) getInfoSchemaIndexes(rt *plan.ResolvedTable) []sql.Index {
-	it, ok := rt.Table.(sql.IndexAddressableTable)
+	it, ok := unwrapVirtualColumns(rt.Table).(sql.IndexAddressableTable)
 	if !ok {
 		return nil
 	}
@@ -959,4 +959,15 @@ func (b *Builder) buildShowCharset(inScope *scope, s *ast.Show) (outScope *scope
 	}
 	outScope.node = node
 	return
+}
+
+// unwrapVirtualColumns is the table under a VirtualColumnTable, which a
+// table with virtual columns is wrapped in: the wrapper hid its indexes
+// and checks (SHOW INDEX, SHOW CREATE TABLE and CHECK enforcement missed
+// them). (s2z patch)
+func unwrapVirtualColumns(t sql.Table) sql.Table {
+	if v, ok := t.(*plan.VirtualColumnTable); ok {
+		return v.Underlying()
+	}
+	return t
 }

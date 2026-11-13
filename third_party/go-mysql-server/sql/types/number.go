@@ -99,6 +99,11 @@ const (
 type NumberTypeImpl_ struct {
 	baseType     query.Type
 	displayWidth int
+	// s2z patch: FLOAT(M,D) and DOUBLE(M,D) (s2zM > 0), and UNSIGNED
+	// floats: values are rounded to D decimals, kept within M digits, and
+	// shown with D decimals, as in MySQL.
+	s2zM, s2zD  int
+	s2zUnsigned bool
 }
 
 var _ sql.Type = NumberTypeImpl_{}
@@ -331,6 +336,10 @@ func (t NumberTypeImpl_) Convert(c context.Context, v interface{}) (interface{},
 		if err != nil {
 			return nil, sql.OutOfRange, err
 		}
+		if t.s2zM > 0 || t.s2zUnsigned {
+			num, r := t.s2zFit(num)
+			return float32(num), r, nil
+		}
 		if num > math.MaxFloat32 {
 			return float32(math.MaxFloat32), sql.OutOfRange, nil
 		} else if num < -math.MaxFloat32 {
@@ -339,6 +348,10 @@ func (t NumberTypeImpl_) Convert(c context.Context, v interface{}) (interface{},
 		return float32(num), sql.InRange, nil
 	case sqltypes.Float64:
 		ret, err := convertToFloat64(t, v)
+		if err == nil && (t.s2zM > 0 || t.s2zUnsigned) {
+			ret, r := t.s2zFit(ret)
+			return ret, r, nil
+		}
 		return ret, sql.InRange, err
 	default:
 		return nil, sql.OutOfRange, sql.ErrInvalidType.New(t.baseType.String())
@@ -533,7 +546,7 @@ func (t NumberTypeImpl_) SQLFloat64(ctx *sql.Context, dest []byte, v interface{}
 	if err != nil {
 		return nil, err
 	}
-	dest = strconv.AppendFloat(dest, num, 'g', -1, 64)
+	dest = append(dest, MySQLFloatString(num, false)...) // s2z patch
 	return dest, nil
 }
 
@@ -547,7 +560,7 @@ func (t NumberTypeImpl_) SQLFloat32(ctx *sql.Context, dest []byte, v interface{}
 	} else if num < -math.MaxFloat32 {
 		num = float64(-math.MaxFloat32)
 	}
-	dest = strconv.AppendFloat(dest, num, 'g', -1, 32)
+	dest = append(dest, MySQLFloatString(num, true)...) // s2z patch
 	return dest, nil
 }
 
@@ -588,10 +601,17 @@ func (t NumberTypeImpl_) SQL(ctx *sql.Context, dest []byte, v interface{}) (sqlt
 		dest, err = t.SQLUint32(ctx, dest, v)
 	case sqltypes.Uint64:
 		dest, err = t.SQLUint64(ctx, dest, v)
-	case sqltypes.Float32:
-		dest, err = t.SQLFloat32(ctx, dest, v)
-	case sqltypes.Float64:
-		dest, err = t.SQLFloat64(ctx, dest, v)
+	case sqltypes.Float32, sqltypes.Float64:
+		if t.s2zM > 0 {
+			var num float64
+			if num, err = convertToFloat64(t, v); err == nil {
+				dest = strconv.AppendFloat(dest, num, 'f', t.s2zD, 64)
+			}
+		} else if t.baseType == sqltypes.Float32 {
+			dest, err = t.SQLFloat32(ctx, dest, v)
+		} else {
+			dest, err = t.SQLFloat64(ctx, dest, v)
+		}
 	default:
 		return sqltypes.Value{}, sql.ErrInvalidType.New(t.baseType.String())
 	}
@@ -830,10 +850,18 @@ func (t NumberTypeImpl_) String() string {
 		return "bigint"
 	case sqltypes.Uint64:
 		return "bigint unsigned"
-	case sqltypes.Float32:
-		return "float"
-	case sqltypes.Float64:
-		return "double"
+	case sqltypes.Float32, sqltypes.Float64:
+		name := "float"
+		if t.baseType == sqltypes.Float64 {
+			name = "double"
+		}
+		if t.s2zM > 0 {
+			name = fmt.Sprintf("%s(%d,%d)", name, t.s2zM, t.s2zD)
+		}
+		if t.s2zUnsigned {
+			name += " unsigned"
+		}
+		return name
 	default:
 		panic(fmt.Sprintf("%v is not a valid number base type", t.baseType.String()))
 	}
@@ -1148,19 +1176,11 @@ func convertToUint64(t NumberTypeImpl_, v interface{}) (uint64, sql.ConvertInRan
 	case uint64:
 		return v, sql.InRange, nil
 	case float32:
-		if v > float32(math.MaxInt64) {
-			return math.MaxUint64, sql.OutOfRange, nil
-		} else if v < 0 {
-			return uint64(math.MaxUint64 - v), sql.OutOfRange, nil
-		}
-		return uint64(math.Round(float64(v))), sql.InRange, nil
+		u, r := s2zFloatToUint(float64(v), s2zUint64Max) // s2z patch
+		return uint64(u), r, nil
 	case float64:
-		if v >= float64(math.MaxUint64) {
-			return math.MaxUint64, sql.OutOfRange, nil
-		} else if v <= 0 {
-			return uint64(math.MaxUint64 - v), sql.OutOfRange, nil
-		}
-		return uint64(math.Round(v)), sql.InRange, nil
+		u, r := s2zFloatToUint(v, s2zUint64Max) // s2z patch
+		return uint64(u), r, nil
 	case decimal.Decimal:
 		if v.GreaterThan(dec_uint64_max) {
 			return math.MaxUint64, sql.InRange, nil
@@ -1248,19 +1268,11 @@ func convertToUint32(t NumberTypeImpl_, v interface{}) (uint32, sql.ConvertInRan
 	case uint64:
 		return uint32(v), sql.InRange, nil
 	case float64:
-		if float32(v) > float32(math.MaxInt32) {
-			return math.MaxUint32, sql.OutOfRange, nil
-		} else if v < 0 {
-			return uint32(math.MaxUint32 - v), sql.OutOfRange, nil
-		}
-		return uint32(math.Round(float64(v))), sql.InRange, nil
+		u, r := s2zFloatToUint(v, math.MaxUint32) // s2z patch
+		return uint32(u), r, nil
 	case float32:
-		if v >= float32(math.MaxUint32) {
-			return math.MaxUint32, sql.OutOfRange, nil
-		} else if v <= 0 {
-			return uint32(math.MaxUint32 - v), sql.OutOfRange, nil
-		}
-		return uint32(math.Round(float64(v))), sql.InRange, nil
+		u, r := s2zFloatToUint(float64(v), math.MaxUint32) // s2z patch
+		return uint32(u), r, nil
 	case decimal.Decimal:
 		if v.GreaterThan(dec_uint32_max) {
 			return math.MaxUint32, sql.InRange, nil
@@ -1344,19 +1356,11 @@ func convertToUint16(t NumberTypeImpl_, v interface{}) (uint16, sql.ConvertInRan
 	case uint16:
 		return v, sql.InRange, nil
 	case float32:
-		if v > float32(math.MaxInt16) {
-			return math.MaxUint16, sql.OutOfRange, nil
-		} else if v < 0 {
-			return uint16(math.MaxUint16 - v), sql.OutOfRange, nil
-		}
-		return uint16(math.Round(float64(v))), sql.InRange, nil
+		u, r := s2zFloatToUint(float64(v), math.MaxUint16) // s2z patch
+		return uint16(u), r, nil
 	case float64:
-		if v >= float64(math.MaxUint16) {
-			return math.MaxUint16, sql.OutOfRange, nil
-		} else if v <= 0 {
-			return uint16(math.MaxUint16 - v), sql.OutOfRange, nil
-		}
-		return uint16(math.Round(v)), sql.InRange, nil
+		u, r := s2zFloatToUint(v, math.MaxUint16) // s2z patch
+		return uint16(u), r, nil
 	case decimal.Decimal:
 		if v.GreaterThan(dec_uint16_max) {
 			return math.MaxUint16, sql.InRange, nil
@@ -1444,19 +1448,11 @@ func convertToUint8(t NumberTypeImpl_, v interface{}) (uint8, sql.ConvertInRange
 	case uint8:
 		return v, sql.InRange, nil
 	case float32:
-		if v > float32(math.MaxInt8) {
-			return math.MaxUint8, sql.OutOfRange, nil
-		} else if v < 0 {
-			return uint8(math.MaxUint8 - v), sql.OutOfRange, nil
-		}
-		return uint8(math.Round(float64(v))), sql.InRange, nil
+		u, r := s2zFloatToUint(float64(v), math.MaxUint8) // s2z patch
+		return uint8(u), r, nil
 	case float64:
-		if v >= float64(math.MaxUint8) {
-			return math.MaxUint8, sql.OutOfRange, nil
-		} else if v <= 0 {
-			return uint8(math.MaxUint8 - v), sql.OutOfRange, nil
-		}
-		return uint8(math.Round(v)), sql.InRange, nil
+		u, r := s2zFloatToUint(v, math.MaxUint8) // s2z patch
+		return uint8(u), r, nil
 	case decimal.Decimal:
 		if v.GreaterThan(dec_uint8_max) {
 			return math.MaxUint8, sql.InRange, nil
@@ -1718,4 +1714,119 @@ func CoalesceInt(val interface{}) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// s2zUint64Max is 2^64 as a float64, the first float above MaxUint64.
+const s2zUint64Max = 18446744073709551616.0
+
+// s2zFloatToUint converts a float to an unsigned integer of at most max as
+// MySQL does: it rounds, then a value below 0 is 0 and one above max is max,
+// out of range. go-mysql-server took 0 and max themselves for out of range,
+// and a UNSIGNED INT value above 2^31. (s2z patch)
+func s2zFloatToUint(v float64, max float64) (uint64, sql.ConvertInRange) {
+	r := math.Round(v)
+	switch {
+	case math.IsNaN(r) || r < 0:
+		return 0, sql.OutOfRange
+	case max == s2zUint64Max && r >= max:
+		return math.MaxUint64, sql.OutOfRange
+	case max != s2zUint64Max && r > max:
+		return uint64(max), sql.OutOfRange
+	}
+	return uint64(r), sql.InRange
+}
+
+// CreateFloatType is FLOAT or DOUBLE (baseType) with M digits, D of them
+// after the point (m 0: no (M,D)), and UNSIGNED. (s2z patch)
+func CreateFloatType(baseType query.Type, m, d int, unsigned bool) sql.NumberType {
+	if m == 0 && !unsigned {
+		if baseType == sqltypes.Float64 {
+			return Float64
+		}
+		return Float32
+	}
+	return NumberTypeImpl_{baseType: baseType, s2zM: m, s2zD: d, s2zUnsigned: unsigned}
+}
+
+// FloatDecimals is a FLOAT(M,D) or DOUBLE(M,D)'s D, or -1. (s2z patch)
+func FloatDecimals(t sql.Type) int {
+	if n, ok := t.(NumberTypeImpl_); ok && n.s2zM > 0 {
+		return n.s2zD
+	}
+	return -1
+}
+
+// s2zFit rounds a value to the type's D decimals and keeps it within M
+// digits and, for UNSIGNED, at least 0. (s2z patch)
+func (t NumberTypeImpl_) s2zFit(num float64) (float64, sql.ConvertInRange) {
+	r := sql.InRange
+	if t.s2zM > 0 {
+		if rounded, err := strconv.ParseFloat(strconv.FormatFloat(num, 'f', t.s2zD, 64), 64); err == nil {
+			num = rounded
+		}
+		max := math.Pow10(t.s2zM-t.s2zD) - math.Pow10(-t.s2zD)
+		if num > max {
+			num, r = max, sql.OutOfRange
+		} else if num < -max {
+			num, r = -max, sql.OutOfRange
+		}
+	}
+	if t.s2zUnsigned && num < 0 {
+		num, r = 0, sql.OutOfRange
+	}
+	return num, r
+}
+
+// MySQLFloatString formats a DOUBLE, or a FLOAT (single), as MySQL does
+// (my_gcvt): a FLOAT with at most 6 significant digits, a DOUBLE with the
+// fewest that read back the same; in positional notation when the decimal
+// exponent is between -14 and 15 or the digits reach past the point, else
+// as 1.5e-20 (no '+', no padding). Go's %g wrote 1e+20 and 1e-05, and a
+// FLOAT's 3.4028235e+38 where MySQL writes 3.40282e38. (s2z patch)
+func MySQLFloatString(v float64, single bool) string {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return strconv.FormatFloat(v, 'g', -1, 64)
+	}
+	var e string
+	if single {
+		e = strconv.FormatFloat(v, 'e', 5, 64)
+	} else {
+		e = strconv.FormatFloat(v, 'e', -1, 64)
+	}
+	neg := strings.HasPrefix(e, "-")
+	e = strings.TrimPrefix(e, "-")
+	mant, exps, _ := strings.Cut(e, "e")
+	exp, _ := strconv.Atoi(exps)
+	digits := strings.TrimRight(strings.Replace(mant, ".", "", 1), "0")
+	if digits == "" {
+		digits = "0"
+	}
+	sign := ""
+	if neg {
+		sign = "-"
+	}
+	if v == 0 {
+		return sign + "0"
+	}
+	decpt := exp + 1
+	n := len(digits)
+	var out string
+	switch {
+	case (decpt >= -14 && decpt <= 15) || n > decpt && decpt > 0:
+		switch {
+		case decpt <= 0:
+			out = "0." + strings.Repeat("0", -decpt) + digits
+		case decpt >= n:
+			out = digits + strings.Repeat("0", decpt-n)
+		default:
+			out = digits[:decpt] + "." + digits[decpt:]
+		}
+	default:
+		out = digits[:1]
+		if n > 1 {
+			out += "." + digits[1:]
+		}
+		out += "e" + strconv.Itoa(decpt-1)
+	}
+	return sign + out
 }

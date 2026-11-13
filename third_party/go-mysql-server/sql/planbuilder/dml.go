@@ -789,7 +789,7 @@ func (b *Builder) buildInto(inScope *scope, into *ast.Into) {
 
 func (b *Builder) loadChecksFromTable(inScope *scope, table sql.Table) []*sql.CheckConstraint {
 	var loadedChecks []*sql.CheckConstraint
-	if checkTable, ok := table.(sql.CheckTable); ok {
+	if checkTable, ok := unwrapVirtualColumns(table).(sql.CheckTable); ok { // s2z patch
 		checks, err := checkTable.GetChecks(b.ctx)
 		if err != nil {
 			b.handleErr(err)

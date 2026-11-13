@@ -53,12 +53,35 @@ pub struct Score {
     pub failures: Vec<Failure>,
     /// Statements left out because they fail on MySQL too (baseline).
     pub excluded: usize,
+    /// Of passed, the EXPLAIN statements (reported apart: sqld's plans are
+    /// its own).
+    pub explain_passed: usize,
+}
+
+/// Whether a statement is an EXPLAIN (or DESCRIBE/DESC of a query).
+pub fn is_explain(sql: &str) -> bool {
+    let t = sql.trim_start_matches(|c: char| c.is_whitespace() || c == '(').to_ascii_lowercase();
+    t.starts_with("explain") || ((t.starts_with("describe ") || t.starts_with("desc ")) && t.contains("select"))
 }
 
 struct Group<'a> {
     head: &'a str,
     body: String,
     stmts: Vec<&'a Segment>,
+}
+
+impl Score {
+    fn pass(&mut self, sql: &str) {
+        self.passed += 1;
+        if is_explain(sql) {
+            self.explain_passed += 1;
+        }
+    }
+
+    /// EXPLAIN statements scored (passed and failed).
+    pub fn explain_total(&self) -> usize {
+        self.explain_passed + self.failures.iter().filter(|f| is_explain(&f.sql)).count()
+    }
 }
 
 pub fn score(out: &[Segment], expected: &str, exclude: &HashSet<String>) -> Score {
@@ -161,9 +184,9 @@ pub fn score(out: &[Segment], expected: &str, exclude: &HashSet<String>) -> Scor
             match (&s.error, s.expected.is_empty()) {
                 // An expected error with the expected code: the message may differ.
                 (Some(e), false) if s.expected.iter().any(|x| x.matches(e.code, &e.state)) => {
-                    score.passed += 1
+                    score.pass(&s.sql)
                 }
-                _ if g.body == exp => score.passed += 1,
+                _ if g.body == exp => score.pass(&s.sql),
                 (Some(_), _) if exp_error => score.failures.push(fail(Kind::WrongError, exp)),
                 (Some(_), _) => score.failures.push(fail(Kind::OurError, exp)),
                 (None, _) if exp_error => score.failures.push(fail(Kind::MissingError, exp)),

@@ -204,7 +204,23 @@ func ColumnTypeToType(ct *sqlparser.ColumnType) (sql.Type, error) {
 			return Uint64, nil
 		}
 		return Int64, nil
-	case "float":
+	case "float", "double", "real", "double precision":
+		// s2z patch: FLOAT(M,D), DOUBLE(M,D) and UNSIGNED floats
+		if m, d, ok := s2zFloatMD(ct); ok || bool(ct.Unsigned) {
+			base := sqltypes.Float64
+			if strings.ToLower(ct.Type) == "float" {
+				base = sqltypes.Float32
+				if !ok && ct.Length != nil {
+					if p, err := strconv.ParseInt(string(ct.Length.Val), 10, 8); err == nil && p > 24 {
+						base = sqltypes.Float64
+					}
+				}
+			}
+			return CreateFloatType(base, m, d, bool(ct.Unsigned)), nil
+		}
+		if strings.ToLower(ct.Type) != "float" {
+			return Float64, nil
+		}
 		if ct.Length != nil {
 			precision, err := strconv.ParseInt(string(ct.Length.Val), 10, 8)
 			if err != nil {
@@ -219,8 +235,6 @@ func ColumnTypeToType(ct *sqlparser.ColumnType) (sql.Type, error) {
 			}
 		}
 		return Float32, nil
-	case "double", "real", "double precision":
-		return Float64, nil
 	case "decimal", "fixed", "dec", "numeric":
 		precision := int64(0)
 		scale := int64(0)
@@ -550,4 +564,17 @@ func TypesEqual(a, b sql.Type) bool {
 	default:
 		return a.Equals(b)
 	}
+}
+
+// s2zFloatMD is a FLOAT or DOUBLE column type's (M,D). (s2z patch)
+func s2zFloatMD(ct *sqlparser.ColumnType) (int, int, bool) {
+	if ct.Length == nil || ct.Scale == nil {
+		return 0, 0, false
+	}
+	m, err1 := strconv.Atoi(string(ct.Length.Val))
+	d, err2 := strconv.Atoi(string(ct.Scale.Val))
+	if err1 != nil || err2 != nil || m <= 0 {
+		return 0, 0, false
+	}
+	return m, d, true
 }

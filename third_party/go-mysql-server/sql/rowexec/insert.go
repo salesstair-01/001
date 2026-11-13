@@ -16,6 +16,7 @@ package rowexec
 
 import (
 	"fmt"
+	"github.com/dolthub/vitess/go/mysql"
 	"io"
 
 	"github.com/dolthub/vitess/go/vt/proto/query"
@@ -134,6 +135,11 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 						cErr = types.ErrLengthBeyondLimit.New(row[idx], col.Name)
 					} else if sql.ErrNotMatchingSRID.Is(cErr) {
 						cErr = sql.ErrNotMatchingSRIDWithColName.New(col.Name, cErr)
+					} else if _, ok := col.Type.(sql.NumberType); ok && sql.ErrValueOutOfRange.Is(cErr) {
+						// s2z patch: in strict mode, the warning MySQL gives
+						// outside it is the error (1264)
+						w := ignoreWarning(col, row[idx], cErr, i.rowNum)
+						cErr = mysql.NewSQLError(int(w.Code), "22003", "%s", w.Message)
 					}
 					return nil, sql.NewWrappedInsertError(origRow, cErr)
 				}

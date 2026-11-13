@@ -37,6 +37,9 @@ func selectColumnsNullable(n sql.Node, sch sql.Schema) {
 }
 
 func neverNull(e sql.Expression) bool {
+	if nn, ok := e.(interface{ NeverNull() bool }); ok && nn.NeverNull() {
+		return true
+	}
 	switch e := e.(type) {
 	case *expression.Alias:
 		return neverNull(e.Child)
@@ -76,6 +79,8 @@ func neverNull(e sql.Expression) bool {
 			}
 		}
 		return true
+	case *function.Now, *function.UTCTimestamp, *function.CurrDate, *function.CurrTime:
+		return true // the clock is never NULL, with or without a precision
 	case *function.Coalesce, *function.IfNull:
 		for _, c := range e.Children() {
 			if neverNull(c) {

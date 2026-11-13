@@ -38,3 +38,25 @@ func TestShowCreateDefaultsAndVirtualColumns(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateSelectClockNotNull pins CREATE TABLE ... SELECT of the clock
+// functions, whose columns MySQL 8.0.46 makes NOT NULL (FROM_UNIXTIME may be
+// NULL).
+func TestCreateSelectClockNotNull(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE t1 AS SELECT NOW(0), NOW(3), SYSDATE(2), FROM_UNIXTIME(1.12)", "[]"},
+		{"SHOW CREATE TABLE t1", "[t1,CREATE TABLE `t1` (\n  `NOW(0)` datetime NOT NULL,\n  `NOW(3)` datetime(3) NOT NULL,\n" +
+			"  `SYSDATE(2)` datetime(2) NOT NULL,\n  `FROM_UNIXTIME(1.12)` datetime(2) DEFAULT NULL\n" +
+			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}

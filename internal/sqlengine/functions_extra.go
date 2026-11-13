@@ -34,6 +34,17 @@ type scalarFn struct {
 
 var _ sql.FunctionExpression = (*scalarFn)(nil)
 
+// NeverNull is whether the function is the clock (CURTIME and the UTC
+// functions), which is never NULL: CREATE TABLE ... SELECT makes its column
+// NOT NULL, as MySQL does.
+func (f *scalarFn) NeverNull() bool {
+	switch f.name {
+	case "curtime", "current_time", "utc_time", "utc_date":
+		return true
+	}
+	return false
+}
+
 func (f *scalarFn) FunctionName() string { return f.name }
 func (f *scalarFn) Description() string  { return f.name }
 func (f *scalarFn) Resolved() bool {
@@ -45,7 +56,7 @@ func (f *scalarFn) Resolved() bool {
 	return true
 }
 func (f *scalarFn) Type() sql.Type             { return f.typ(f.args) }
-func (f *scalarFn) IsNullable() bool           { return true }
+func (f *scalarFn) IsNullable() bool           { return !f.NeverNull() }
 func (f *scalarFn) Children() []sql.Expression { return f.args }
 func (f *scalarFn) IsNonDeterministic() bool {
 	return f.name == "uuid_short" || strings.HasPrefix(f.name, "utc_")

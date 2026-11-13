@@ -123,9 +123,13 @@ func (c *Concat) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 			return nil, nil
 		}
 
-		val, _, err = types.LongText.Convert(ctx, val)
-		if err != nil {
-			return nil, err
+		if ts, ok := types.TypedString(arg.Type(), val); ok { // s2z patch
+			val = ts
+		} else {
+			val, _, err = types.LongText.Convert(ctx, val)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		val, _, err = sql.Unwrap[string](ctx, val)

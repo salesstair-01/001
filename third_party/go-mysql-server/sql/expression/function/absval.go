@@ -58,6 +58,14 @@ func (t *AbsVal) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
+	// s2z patch: a comparison's result is the integer 0 or 1
+	if b, ok := val.(bool); ok {
+		if b {
+			return int8(1), nil
+		}
+		return int8(0), nil
+	}
+
 	// Fucking Golang
 	switch x := val.(type) {
 	case uint, uint64, uint32, uint16, uint8:

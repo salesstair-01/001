@@ -43,8 +43,26 @@ func constFold(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan.S
 		switch e := e.(type) {
 		case *expression.Equals, *expression.NullSafeEquals, *expression.GreaterThan, *expression.LessThan,
 			*expression.GreaterThanOrEqual, *expression.LessThanOrEqual:
+			if f := foldYearCompare(ctx, e.(expression.Comparer)); f != nil {
+				return f, transform.NewTree, nil
+			}
 			if f := foldIntCompare(ctx, e.(expression.Comparer)); f != nil {
 				return f, transform.NewTree, nil
+			}
+			if f := foldDecimalCompare(ctx, e.(expression.Comparer)); f != nil {
+				return f, transform.NewTree, nil
+			}
+		case *expression.InTuple:
+			if f := foldYearIn(ctx, e); f != nil {
+				return f, transform.NewTree, nil
+			}
+		case *expression.Between:
+			if types.IsYear(e.Val.Type()) {
+				lo, okLo := yearOperand(ctx, e.Lower)
+				hi, okHi := yearOperand(ctx, e.Upper)
+				if okLo || okHi {
+					return expression.NewBetween(e.Val, lo, hi), transform.NewTree, nil
+				}
 			}
 		case *plan.Subquery:
 			q, same, err := constFold(ctx, a, e.Query, scope, sel, qf)
@@ -347,4 +365,199 @@ func exactIntInserts(ctx *sql.Context, n sql.Node) (sql.Node, bool, error) {
 		return ii.WithSource(nv), transform.NewTree, nil
 	})
 	return out, same, err
+}
+
+// ---- YEAR ----------------------------------------------------------------------
+//
+// MySQL compares a YEAR with a constant as YEARs: the constant becomes the
+// year it stands for (1 and '1' are 2001, 70 is 1970, '0' is 2000, 0 and
+// '0000' are 0000, 1.5 rounds to 2002), when it stands for one; otherwise
+// (100, -1, 2156) the two compare as numbers. So does BETWEEN; IN does not.
+
+// foldYearCompare is c with its constant operand as a YEAR, or nil.
+func foldYearCompare(ctx *sql.Context, c expression.Comparer) sql.Expression {
+	l, r := c.Left(), c.Right()
+	switch {
+	case types.IsYear(l.Type()) && !types.IsYear(r.Type()):
+		if y, ok := yearOperand(ctx, r); ok {
+			return opOf(c).build(l, y)
+		}
+	case types.IsYear(r.Type()) && !types.IsYear(l.Type()):
+		if y, ok := yearOperand(ctx, l); ok {
+			return opOf(c).build(y, r)
+		}
+	}
+	return nil
+}
+
+// foldYearIn is MySQL's YEAR IN (...): with one value it is =; with more,
+// strings stand for years and the YEAR compares with the list as a number
+// (y IN (1, 70) does not find 2001). Else nil.
+func foldYearIn(ctx *sql.Context, in *expression.InTuple) sql.Expression {
+	if !types.IsYear(in.Left().Type()) {
+		return nil
+	}
+	tup, ok := in.Right().(expression.Tuple)
+	if !ok {
+		return nil
+	}
+	if len(tup) == 1 {
+		if y, ok := yearOperand(ctx, tup[0]); ok {
+			return expression.NewEquals(in.Left(), y)
+		}
+		return nil
+	}
+	vals := make([]sql.Expression, len(tup))
+	for i, v := range tup {
+		if !isConstant(v) {
+			return nil
+		}
+		vals[i] = v
+		if types.IsText(v.Type()) {
+			vals[i], _ = yearOperand(ctx, v)
+		}
+	}
+	return expression.NewInTuple(expression.NewConvert(in.Left(), expression.ConvertToSigned), expression.NewTuple(vals...))
+}
+
+// yearOperand is e as a YEAR literal, when e is a constant that stands for
+// a year; else e and false.
+func yearOperand(ctx *sql.Context, e sql.Expression) (sql.Expression, bool) {
+	if !isConstant(e) {
+		return e, false
+	}
+	v, err := e.Eval(ctx, nil)
+	if err != nil || v == nil {
+		return e, false
+	}
+	if y, ok := yearOf(v); ok {
+		return expression.NewLiteral(y, types.Int64), true
+	}
+	return e, false
+}
+
+// isConstant is whether e is made of literals and arithmetic.
+func isConstant(e sql.Expression) bool {
+	constant := true
+	transform.InspectExpr(e, func(x sql.Expression) bool {
+		switch x.(type) {
+		case *expression.Literal:
+		case *expression.Arithmetic, *expression.UnaryMinus, *expression.Div, *expression.IntDiv, *expression.Mod:
+		default:
+			constant = false
+		}
+		return !constant
+	})
+	return constant
+}
+
+// yearOf is the YEAR a constant stands for, as MySQL converts it.
+func yearOf(v any) (int64, bool) {
+	var r *big.Rat
+	var ok bool
+	if s, isStr := v.(string); isStr {
+		t := strings.TrimSpace(s)
+		if r, ok = new(big.Rat).SetString(t); !ok {
+			return 0, false
+		}
+		if r.Sign() == 0 && len(t) < 4 {
+			return 2000, true // '0' and '00' are 2000; '0000' is 0000
+		}
+	} else if r, ok = constValue(v); !ok {
+		return 0, false
+	}
+	// round half away from zero
+	f, _ := r.Float64()
+	n := int64(math.Round(f))
+	switch {
+	case n == 0:
+		return 0, true
+	case n >= 1 && n <= 69:
+		return 2000 + n, true
+	case n >= 70 && n <= 99:
+		return 1900 + n, true
+	case n >= 1901 && n <= 2155:
+		return n, true
+	}
+	return 0, false
+}
+
+// ---- DECIMAL -------------------------------------------------------------------
+//
+// A DECIMAL(p,s) column compared with a constant that has more than s
+// decimals, or is out of the column's range: go-mysql-server converted the
+// constant to the column's type, rounding it (d = 10.31 found 10.3 in a
+// DECIMAL(3,1)). MySQL compares exactly, as foldIntCompare does for
+// integers, in steps of 10^-s.
+
+func foldDecimalCompare(ctx *sql.Context, c expression.Comparer) sql.Expression {
+	op := opOf(c)
+	col, ok := c.Left().(*expression.GetField)
+	v, okLit := exactConst(c.Right())
+	if !ok || !okLit {
+		col, ok = c.Right().(*expression.GetField)
+		v, okLit = exactConst(c.Left())
+		if !ok || !okLit {
+			return nil
+		}
+		op = op.mirror()
+	}
+	dt, isDec := col.Type().(sql.DecimalType)
+	if !isDec {
+		return nil
+	}
+	scale := new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale())), nil))
+	units := new(big.Rat).Mul(v, scale) // v in steps of 10^-s
+	maxUnits := new(big.Rat).SetInt(new(big.Int).Sub(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Precision())), nil), big.NewInt(1)))
+	switch {
+	case units.Cmp(maxUnits) > 0:
+		return alwaysBool(col, op, op == opLt || op == opLe)
+	case units.Cmp(new(big.Rat).Neg(maxUnits)) < 0:
+		return alwaysBool(col, op, op == opGt || op == opGe)
+	case units.IsInt():
+		return nil // exact in the column's type
+	}
+	floor := new(big.Int).Quo(units.Num(), units.Denom()) // toward zero
+	if units.Sign() < 0 {
+		floor.Sub(floor, big.NewInt(1))
+	}
+	ceil := new(big.Int).Add(floor, big.NewInt(1))
+	bound := func(n *big.Int) sql.Expression {
+		d := decimal.NewFromBigInt(n, -int32(dt.Scale()))
+		return expression.NewLiteral(d, col.Type())
+	}
+	switch op {
+	case opEq, opNullSafeEq:
+		return alwaysBool(col, op, false)
+	case opGt, opGe:
+		return opGe.build(col, bound(ceil))
+	default:
+		return opLe.build(col, bound(floor))
+	}
+}
+
+// exactConst is an integer or DECIMAL constant's value, also negated (-10.31
+// is a minus on 10.31). Floats compare with a DECIMAL as doubles, and
+// strings are left as they are.
+func exactConst(e sql.Expression) (*big.Rat, bool) {
+	neg := false
+	if m, ok := e.(*expression.UnaryMinus); ok {
+		neg, e = true, m.Child
+	}
+	lit, ok := e.(*expression.Literal)
+	if !ok {
+		return nil, false
+	}
+	switch lit.Value().(type) {
+	case string, float32, float64, nil:
+		return nil, false
+	}
+	v, ok := constValue(lit.Value())
+	if !ok {
+		return nil, false
+	}
+	if neg {
+		v = new(big.Rat).Neg(v)
+	}
+	return v, true
 }

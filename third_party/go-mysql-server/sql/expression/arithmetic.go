@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/dolthub/vitess/go/mysql"
+	"github.com/dolthub/vitess/go/sqltypes"
 	"github.com/dolthub/vitess/go/vt/sqlparser"
 	"github.com/shopspring/decimal"
 	errors "gopkg.in/src-d/go-errors.v1"
@@ -149,6 +150,9 @@ func (a *Arithmetic) Type() sql.Type {
 	}
 
 	if types.IsFloat(lTyp) || types.IsFloat(rTyp) {
+		if t := s2zFloatDecimalsType(a.Op, lTyp, rTyp); t != nil {
+			return t
+		}
 		return types.Float64
 	}
 
@@ -868,4 +872,44 @@ func (a *Arithmetic) NullOnlyOfNull() bool {
 		return true
 	}
 	return false
+}
+
+// s2zFloatDecimalsType is the type of FLOAT(M,D) arithmetic: MySQL keeps
+// the decimals, as DOUBLE(22,D), the larger D for + and -, the sum for *
+// (a FLOAT(5,2) a+0 is -999.99, a*2 -1999.98, and a+1 is created as
+// double(22,2)). nil when no operand is a FLOAT(M,D), or an operand has no
+// fixed decimals. (s2z patch)
+func s2zFloatDecimalsType(op string, l, r sql.Type) sql.Type {
+	dl, dr := types.FloatDecimals(l), types.FloatDecimals(r)
+	if dl < 0 && dr < 0 {
+		return nil
+	}
+	decimals := func(t sql.Type, d int) int {
+		switch {
+		case d >= 0:
+			return d
+		case types.IsInteger(t):
+			return 0
+		case types.IsDecimal(t):
+			return int(t.(sql.DecimalType).Scale())
+		}
+		return -1
+	}
+	dl, dr = decimals(l, dl), decimals(r, dr)
+	if dl < 0 || dr < 0 {
+		return nil
+	}
+	var d int
+	switch op {
+	case sqlparser.PlusStr, sqlparser.MinusStr:
+		d = max(dl, dr)
+	case sqlparser.MultStr:
+		d = dl + dr
+	default:
+		return nil
+	}
+	if d > 30 {
+		return nil
+	}
+	return types.CreateFloatType(sqltypes.Float64, 22, d, false)
 }

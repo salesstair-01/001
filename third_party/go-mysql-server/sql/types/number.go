@@ -336,7 +336,14 @@ func (t NumberTypeImpl_) Convert(c context.Context, v interface{}) (interface{},
 		if err != nil {
 			return nil, sql.OutOfRange, err
 		}
-		if t.s2zM > 0 || t.s2zUnsigned {
+		if t.s2zM > 0 {
+			// a single-precision value read back rounded to D, as MySQL
+			// reads a FLOAT(M,D): a float64 (y = -999.99 finds -999.99)
+			num, r := t.s2zFit(num)
+			out, _ := t.s2zFit(float64(float32(num)))
+			return out, r, nil
+		}
+		if t.s2zUnsigned {
 			num, r := t.s2zFit(num)
 			return float32(num), r, nil
 		}
@@ -1829,4 +1836,37 @@ func MySQLFloatString(v float64, single bool) string {
 		out += "e" + strconv.Itoa(decpt-1)
 	}
 	return sign + out
+}
+
+// TypedString is v, a value of type t, as MySQL writes it as text where
+// the type matters: a YEAR with 4 digits (0000), a FLOAT(M,D) with D
+// decimals, a FLOAT or DOUBLE as MySQL writes floats. ok is false for other
+// types. (s2z patch: CONCAT, CAST AS CHAR and GROUP_CONCAT converted the
+// bare Go value, giving 0, 3.3 and 3.299999952316284.)
+func TypedString(t sql.Type, v interface{}) (string, bool) {
+	if v == nil || t == nil {
+		return "", false
+	}
+	if IsYear(t) {
+		if n, ok := v.(int16); ok {
+			return fmt.Sprintf("%04d", n), true
+		}
+		return "", false
+	}
+	if !IsFloat(t) {
+		return "", false
+	}
+	var f float64
+	switch x := v.(type) {
+	case float32:
+		f = float64(x)
+	case float64:
+		f = x
+	default:
+		return "", false
+	}
+	if d := FloatDecimals(t); d >= 0 {
+		return strconv.FormatFloat(f, 'f', d, 64), true
+	}
+	return MySQLFloatString(f, t.Type() == sqltypes.Float32), true
 }

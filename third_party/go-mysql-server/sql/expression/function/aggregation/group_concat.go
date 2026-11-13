@@ -230,6 +230,8 @@ func (g *groupConcatBuffer) Update(ctx *sql.Context, originalRow sql.Row) error 
 		if len(vs) == 0 {
 			return nil
 		}
+	} else if ts, ok := types.TypedString(g.gc.selectExprs[0].Type(), evalRow[0]); ok && len(g.gc.selectExprs) == 1 { // s2z patch
+		vs = ts
 	} else {
 		v, _, err = types.LongText.Convert(ctx, evalRow[0])
 		if err != nil {

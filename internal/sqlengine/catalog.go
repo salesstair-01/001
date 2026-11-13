@@ -105,6 +105,9 @@ type TableInfo struct {
 	ForeignKeys []ForeignKeyInfo `json:"foreign_keys,omitempty"`
 	// Checks are its CHECK constraints (checks.go).
 	Checks []CheckInfo `json:"checks,omitempty"`
+	// RewriteUntil marks a table an ALTER TABLE is copying (rewrite.go),
+	// until this time (unix nanos): writes to it are refused.
+	RewriteUntil int64 `json:"rewrite_until,omitempty"`
 }
 
 // clone deep-copies a table so the cached original is never mutated.

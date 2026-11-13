@@ -39,6 +39,12 @@ type Session struct {
 
 	txnMu   sync.Mutex
 	current *Txn // the open transaction, until it commits or rolls back
+
+	rewriteMu   sync.Mutex
+	rewrittenIn *Txn            // the transaction rewritten was noted in
+	rewritten   map[uint32]bool // tables a rewrite made in it (rewrite.go)
+	// openRewrites are the current statement's unfinished rewrites.
+	openRewrites []*rewriter
 }
 
 // autoBatch is a reservation of consecutive AUTO_INCREMENT values. It doubles
@@ -124,6 +130,7 @@ func (s *Session) CommandEnd() {
 		_ = cur.Rollback(context.Background())
 	}
 	s.endOrphan()
+	s.abandonRewrites()
 	if s.lentDB {
 		s.lentDB = false
 		s.SetCurrentDatabase("")

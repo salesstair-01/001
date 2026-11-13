@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/mysql"
 
 	"github.com/salesstair-01/001/internal/encoding"
@@ -327,6 +328,13 @@ func (t *Table) PartitionRows(ctx *sql.Context, part sql.Partition) (sql.RowIter
 		return nil, fmt.Errorf("unexpected partition %T", part)
 	}
 	txn, done := sessionTxn(ctx, t.store)
+	if readsRewritten(ctx, t.info.ID) {
+		// a table a rewrite made in this statement: its rows were committed
+		// after the session's snapshot (rewrite.go)
+		done()
+		txn = t.store.NewTxn(kv.ReadCommitted, true)
+		done = func() { _ = txn.Rollback(context.Background()) }
+	}
 	opts := readOpts(ctx, t.info.Name)
 	if t.refCheck {
 		opts.IncludeStmt = true
@@ -532,11 +540,17 @@ type editor struct {
 	// go-mysql-server's checkpointing iterator does after every row of an
 	// INSERT IGNORE; DiscardChanges then drops only the failed row.
 	checkpointed bool
+	// own is a rewrite's transaction (rewrite.go), which the editor writes
+	// in instead of the session's.
+	own *Txn
 }
 
 var _ sql.TableEditor = (*editor)(nil)
 
 func (e *editor) txn(ctx *sql.Context) (*Txn, uint64, error) {
+	if e.own != nil {
+		return e.own, 1, nil
+	}
 	t, ok := ctx.GetTransaction().(*Txn)
 	if !ok || t == nil {
 		return nil, 0, fmt.Errorf("write outside a transaction")
@@ -583,7 +597,12 @@ func (e *editor) flush(ctx *sql.Context) error {
 	if txn.IsReadOnly() {
 		return sql.ErrReadOnlyTransaction.New()
 	}
-	e.t.guard(txn)
+	if e.own == nil {
+		if e.t.beingRewritten() {
+			return errBeingRewritten()
+		}
+		e.t.guard(txn)
+	}
 	e.t.store.noteWrites(e.t.info, len(buf))
 	return mysqlError(txn.Mutate(ctx, stmt, buf, lockWait(ctx)))
 }
@@ -856,7 +875,11 @@ func (t *Table) GetNextAutoIncrementValue(ctx *sql.Context, insertVal interface{
 	}
 	s, _ := ctx.Session.(*Session)
 	if insertVal != nil {
-		n, err := toUint64(ctx, t.codecs[t.autoOrd].typ, insertVal)
+		var typ sql.Type = types.Uint64
+		if t.autoOrd >= 0 {
+			typ = t.codecs[t.autoOrd].typ
+		} // else a column an ALTER TABLE is making AUTO_INCREMENT (rewrite.go)
+		n, err := toUint64(ctx, typ, insertVal)
 		if err != nil {
 			return 0, err
 		}

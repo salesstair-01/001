@@ -62,8 +62,8 @@ func (b *Builder) buildSelect(inScope *scope, s *ast.Select) (outScope *scope) {
 	if err := rollup(s); err != nil { // s2z patch: GROUP BY ... WITH ROLLUP (s2z_rollup.go)
 		b.handleErr(err)
 	}
-	groupedWindows(s) // s2z patch: window functions over groups (s2z_groupwindow.go)
-	b.checkOrderBy(s) // s2z patch: MySQL's ORDER BY errors (s2z_orderbycheck.go)
+	groupedWindows(s)       // s2z patch: window functions over groups (s2z_groupwindow.go)
+	b.checkOrderBy(s)       // s2z patch: MySQL's ORDER BY errors (s2z_orderbycheck.go)
 	anyValueOfAggregates(s) // s2z patch: ANY_VALUE of an aggregate (s2z_anyvalue.go)
 	if b.setOpDepth == 0 {
 		windowOutputOrder(s) // s2z patch: rows in a window's order (s2z_windoworder.go)

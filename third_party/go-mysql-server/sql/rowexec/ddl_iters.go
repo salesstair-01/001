@@ -529,6 +529,10 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 		rewriteRequired = true
 	}
 
+	if _, ok := rwt.(sql.RewriteDecidingTable); ok {
+		rewriteRequired = false // s2z patch: the table decides
+	}
+
 	// TODO: codify rewrite requirements
 	rewriteRequested := rwt.ShouldRewriteTable(ctx, oldPkSchema, newPkSchema, oldCol, newCol)
 	if !rewriteRequired && !rewriteRequested {
@@ -546,6 +550,7 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 	}
 
 	rowIter := sql.NewTableRowIter(ctx, rwt, partitions)
+	rowNum := 0
 	for {
 		r, err := rowIter.Next(ctx)
 		if err == io.EOF {
@@ -577,7 +582,8 @@ func (i *modifyColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTabl
 			return false, err
 		}
 
-		err = i.validateNullability(ctx, newSch, newRow)
+		rowNum++
+		err = i.validateNullability(ctx, newSch, newRow, rowNum)
 		if err != nil {
 			_ = inserter.DiscardChanges(ctx, err)
 			_ = inserter.Close(ctx)
@@ -704,13 +710,29 @@ func modifyColumnInSchema(schema sql.Schema, name string, column *sql.Column, or
 }
 
 // TODO: this shares logic with insert
-func (i *modifyColumnIter) validateNullability(ctx *sql.Context, dstSchema sql.Schema, row sql.Row) error {
+// validateNullability refuses a NULL in a NOT NULL column as MySQL does
+// (1138); outside strict mode the NULL becomes the type's zero value, with
+// warning 1265. rowNum counts from 1. (s2z patch)
+func (i *modifyColumnIter) validateNullability(ctx *sql.Context, dstSchema sql.Schema, row sql.Row, rowNum int) error {
 	for count, col := range dstSchema {
 		if !col.Nullable && row[count] == nil {
-			return sql.ErrInsertIntoNonNullableProvidedNull.New(col.Name)
+			if s2zStrict(ctx) {
+				return mysql.NewSQLError(mysql.ERInvalidUseOfNull, "22004", "Invalid use of NULL value")
+			}
+			z, _, err := col.Type.Convert(ctx, col.Type.Zero())
+			if err != nil {
+				return err
+			}
+			row[count] = z
+			ctx.Warn(mysql.ERWarnDataTruncated, "Data truncated for column '%s' at row %d", col.Name, rowNum)
 		}
 	}
 	return nil
+}
+
+func s2zStrict(ctx *sql.Context) bool {
+	m := sql.LoadSqlMode(ctx)
+	return m.ModeEnabled("STRICT_TRANS_TABLES") || m.ModeEnabled("STRICT_ALL_TABLES") || m.ModeEnabled("TRADITIONAL")
 }
 
 func createIndex(
@@ -1104,7 +1126,9 @@ func (c *createPkIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTable) e
 		// check for null values in the primary key insert
 		for _, i := range newSchema.PkOrdinals {
 			if r[i] == nil {
-				return sql.ErrInsertIntoNonNullableProvidedNull.New(newSchema.Schema[i].Name)
+				_ = inserter.DiscardChanges(ctx, nil)
+				_ = inserter.Close(ctx)
+				return mysql.NewSQLError(mysql.ERInvalidUseOfNull, "22004", "Invalid use of NULL value") // s2z patch: MySQL's error
 			}
 		}
 
@@ -1388,6 +1412,9 @@ func (i *addColumnIter) rewriteTable(ctx *sql.Context, rwt sql.RewritableTable) 
 		rewriteRequired = true
 	}
 
+	if _, ok := rwt.(sql.RewriteDecidingTable); ok {
+		rewriteRequired = false // s2z patch: the table decides
+	}
 	if !rewriteRequired && !rwt.ShouldRewriteTable(ctx, oldPkSchema, newPkSchema, nil, i.a.Column()) {
 		return false, nil
 	}
@@ -2043,6 +2070,9 @@ func (b *BaseBuilder) executeAlterIndex(ctx *sql.Context, n *plan.AlterIndex) er
 
 		// The second way to rebuild an index is with a full table rewrite
 		rwt, isRewritable := idxAltTbl.(sql.RewritableTable)
+		if _, decides := rwt.(sql.RewriteDecidingTable); decides {
+			isRewritable = false // s2z patch: CreateIndex built it
+		}
 		if isRewritable && indexCreateRequiresBuild(n) {
 			return rewriteTableForIndexCreate(ctx, n, table, rwt)
 		}

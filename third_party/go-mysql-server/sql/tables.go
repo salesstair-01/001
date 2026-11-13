@@ -440,6 +440,15 @@ type RewritableTable interface {
 	RewriteInserter(ctx *Context, oldSchema, newSchema PrimaryKeySchema, oldColumn, newColumn *Column, idxCols []IndexColumn) (RowInserter, error)
 }
 
+// RewriteDecidingTable is a RewritableTable that decides by itself, in
+// ShouldRewriteTable, whether a change rewrites it: the engine does not
+// rewrite it for an added column with a default or a column made NOT NULL,
+// and builds a new unique index with CreateIndex. (s2z patch)
+type RewriteDecidingTable interface {
+	RewritableTable
+	DecidesRewrite()
+}
+
 // AlterableTable should be implemented by tables that can receive
 // ALTER TABLE statements to modify their schemas.
 type AlterableTable interface {

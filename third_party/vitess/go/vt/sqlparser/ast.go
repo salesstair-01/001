@@ -3766,6 +3766,15 @@ const (
 	colKeyFulltextKey
 )
 
+// The key options of a column definition, for code outside the parser.
+// (s2z patch)
+const (
+	ColKeyNone      = colKeyNone
+	ColKeyPrimary   = colKeyPrimary
+	ColKeyUnique    = colKeyUnique
+	ColKeyUniqueKey = colKeyUniqueKey
+)
+
 // AutoIncSpec defines an autoincrement value for a ADD AUTO_INCREMENT statement
 type AutoIncSpec struct {
 	Column   ColIdent

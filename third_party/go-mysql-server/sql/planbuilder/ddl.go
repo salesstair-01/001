@@ -102,8 +102,9 @@ func (b *Builder) buildAlterTable(inScope *scope, query string, c *ast.AlterTabl
 		b.handleErr(err)
 	}
 	statements := make([]sql.Node, 0, len(c.Statements))
-	for i := 0; i < len(c.Statements); i++ {
-		scopes := b.buildAlterTableClause(inScope, c.Statements[i])
+	clauses := inlineColumnKeys(c.Statements)
+	for i := 0; i < len(clauses); i++ {
+		scopes := b.buildAlterTableClause(inScope, clauses[i])
 		for _, scope := range scopes {
 			statements = append(statements, scope.node)
 		}
@@ -1942,4 +1943,42 @@ func (d dummyDb) GetTableInsensitive(ctx *sql.Context, tblName string) (sql.Tabl
 }
 func (d dummyDb) GetTableNames(ctx *sql.Context) ([]string, error) {
 	return nil, nil
+}
+
+// inlineColumnKeys splits a MODIFY or CHANGE whose column definition says
+// PRIMARY KEY or UNIQUE into the column change and an ADD PRIMARY KEY or ADD
+// UNIQUE of the column, which is what MySQL makes of it; go-mysql-server
+// ignored the key. (s2z patch)
+func inlineColumnKeys(ddls []*ast.DDL) []*ast.DDL {
+	var out []*ast.DDL
+	for _, d := range ddls {
+		out = append(out, d)
+		if d == nil || d.TableSpec == nil || len(d.TableSpec.Columns) != 1 {
+			continue
+		}
+		if a := strings.ToLower(d.ColumnAction); a != ast.ModifyStr && a != ast.ChangeStr {
+			continue
+		}
+		col := *d.TableSpec.Columns[0]
+		var typ string
+		switch col.Type.KeyOpt {
+		case ast.ColKeyPrimary:
+			typ = ast.PrimaryStr
+		case ast.ColKeyUnique, ast.ColKeyUniqueKey:
+			typ = ast.UniqueStr
+		default:
+			continue
+		}
+		col.Type.KeyOpt = ast.ColKeyNone
+		spec := *d.TableSpec
+		spec.Columns = []*ast.ColumnDefinition{&col}
+		changed := *d
+		changed.TableSpec = &spec
+		out[len(out)-1] = &changed
+		key := *d
+		key.ColumnAction, key.Column, key.ToColumn, key.TableSpec, key.ColumnOrder = "", ast.NewColIdent(""), ast.NewColIdent(""), nil, nil
+		key.IndexSpec = &ast.IndexSpec{Action: ast.CreateStr, Type: typ, Columns: []*ast.IndexColumn{{Column: col.Name}}}
+		out = append(out, &key)
+	}
+	return out
 }

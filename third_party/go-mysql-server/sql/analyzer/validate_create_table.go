@@ -230,6 +230,27 @@ func resolveAlterColumn(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.S
 	sch = sch.Copy() // Make a copy of the original schema to deal with any references to the original table.
 	initialSch := sch
 
+	// s2z patch: a column a later clause makes a key (MODIFY a ... AUTO_INCREMENT,
+	// ADD PRIMARY KEY (a)) is keyed for the MODIFY's AUTO_INCREMENT check.
+	laterKeys := map[string]bool{}
+	transform.Inspect(n, func(n sql.Node) bool {
+		switch n := n.(type) {
+		case *plan.AlterPK:
+			if n.Action == plan.PrimaryKeyAction_Create {
+				for _, c := range n.Columns {
+					laterKeys[c.Name] = true
+				}
+			}
+		case *plan.AlterIndex:
+			if n.Action == plan.IndexAction_Create {
+				for _, c := range n.Columns {
+					laterKeys[c.Name] = true
+				}
+			}
+		}
+		return true
+	})
+
 	addedColumn := false
 
 	// Need a TransformUp here because multiple of these statement types can be nested under a Block node.
@@ -242,7 +263,7 @@ func resolveAlterColumn(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.S
 				return nil, transform.SameTree, err
 			}
 
-			sch, err = ValidateModifyColumn(ctx, initialSch, sch, n.(*plan.ModifyColumn), keyedColumns)
+			sch, err = ValidateModifyColumn(ctx, initialSch, sch, n.(*plan.ModifyColumn), withLaterKeys(keyedColumns, laterKeys))
 			if err != nil {
 				return nil, transform.SameTree, err
 			}
@@ -1054,4 +1075,19 @@ func HasPrimaryKeys(sch sql.Schema) bool {
 	}
 
 	return false
+}
+
+// withLaterKeys is keyed plus later. (s2z patch)
+func withLaterKeys(keyed, later map[string]bool) map[string]bool {
+	if len(later) == 0 {
+		return keyed
+	}
+	out := make(map[string]bool, len(keyed)+len(later))
+	for k := range keyed {
+		out[k] = true
+	}
+	for k := range later {
+		out[k] = true
+	}
+	return out
 }

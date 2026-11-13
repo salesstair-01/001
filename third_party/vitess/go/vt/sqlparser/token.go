@@ -320,7 +320,9 @@ func (tkn *Tokenizer) Scan() (int, []byte) {
 			fmt.Fprintf(buf, ":v%d", tkn.posVarIndex)
 			return VALUE_ARG, buf.Bytes()
 		case '.':
-			if isDigit(tkn.lastChar) {
+			// s2z patch: after a name (t1.1a20), the dot qualifies and a
+			// name follows; elsewhere .5 is a number
+			if isDigit(tkn.lastChar) && !tkn.afterName() {
 				return tkn.scanNumber(true)
 			}
 			return int(ch), nil
@@ -638,6 +640,11 @@ func (tkn *Tokenizer) scanNumber(seenDecimalPoint bool) (int, []byte) {
 	}
 
 exponent:
+	// s2z patch: e is an exponent only before digits (or a sign and digits);
+	// 1e and 1ea10 are names, as in MySQL
+	if (tkn.lastChar == 'e' || tkn.lastChar == 'E') && !tkn.exponentFollows() {
+		return LEX_ERROR, buffer.Bytes()
+	}
 	if tkn.lastChar == 'e' || tkn.lastChar == 'E' {
 		token = FLOAT
 		tkn.consumeNext(buffer)
@@ -941,4 +948,25 @@ func isSpace(ch uint16) bool {
 
 func isIdentChar(ch uint16) bool {
 	return isLetter(ch) || isDigit(ch) || ch == '_' || ch == '$'
+}
+
+// exponentFollows is whether the e at lastChar starts an exponent: digits
+// follow, or a sign and digits. (s2z patch)
+func (tkn *Tokenizer) exponentFollows() bool {
+	i := tkn.bufPos
+	if i < tkn.bufSize && (tkn.buf[i] == '+' || tkn.buf[i] == '-') {
+		i++
+	}
+	return i < tkn.bufSize && tkn.buf[i] >= '0' && tkn.buf[i] <= '9'
+}
+
+// afterName is whether the '.' just read follows a name directly (t1.,
+// `t`.). (s2z patch)
+func (tkn *Tokenizer) afterName() bool {
+	i := tkn.bufPos - 3 // the '.' is at bufPos-2
+	if i < 0 || i >= tkn.bufSize {
+		return false
+	}
+	c := uint16(tkn.buf[i])
+	return isLetter(c) || isDigit(c) || c == '`'
 }

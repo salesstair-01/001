@@ -959,14 +959,14 @@ func (b *Builder) ConvertVal(v *ast.SQLVal) sql.Expression {
 		if err != nil {
 			b.handleErr(err)
 		}
-		return expression.NewLiteral(val, types.LongBlob)
+		return expression.NewHexLiteral(val) // s2z patch: marked
 	case ast.HexVal:
 		//TODO: binary collation?
 		val, err := v.HexDecode()
 		if err != nil {
 			b.handleErr(err)
 		}
-		return expression.NewLiteral(val, types.LongBlob)
+		return expression.NewHexLiteral(val) // s2z patch: marked
 	case ast.ValArg:
 		name := strings.TrimPrefix(string(v.Val), ":")
 		if b.bindCtx != nil {

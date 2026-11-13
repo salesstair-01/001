@@ -105,3 +105,28 @@ func TestMySQLSyntax(t *testing.T) {
 		}
 	}
 }
+
+// TestDigitLedNames pins names that start with digits against MySQL
+// 8.0.46: 1ea10 and 1e are names (e is an exponent only before digits),
+// t.1a20 qualifies a column, and 1e+1 is still a number.
+func TestDigitLedNames(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"create table 1ea10 (1a20 int, 1e int)", "[]"},
+		{"insert into 1ea10 values (1, 2)", "[]"},
+		{"select 1ea10.1a20, 1e, 1e+1 from 1ea10", "[1,2,10]"},
+		{"select `1ea10`.1e from 1ea10", "[2]"},
+		{"select 1e1, 1.5e-1, .5, 1.e2, 2E3, 0x1F+0, 3e-2", "[10,0.15,0.5,100,2000,31,0.03]"},
+		{"select (.5), 1+.5, 2*.25", "[0.5,1.5,0.50]"},
+		{"drop table 1ea10", "[]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}

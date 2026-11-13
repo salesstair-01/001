@@ -2,6 +2,11 @@ package sqlengine
 
 import (
 	"fmt"
+	"github.com/dolthub/go-mysql-server/sql/analyzer"
+	"github.com/dolthub/vitess/go/mysql"
+	"github.com/dolthub/vitess/go/vt/sqlparser"
+	"strconv"
+	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
 )
@@ -213,5 +218,108 @@ func (d *Database) RenameTable(ctx *sql.Context, oldName, newName string) error 
 	if info == nil {
 		return sql.ErrTableNotFound.New(oldName)
 	}
+	if info, err = renamedChecks(ctx, d.cat, info, d.name, newName); err != nil {
+		return err
+	}
 	return d.cat.RenameTable(ctx, info, newName)
+}
+
+var _ sql.TableMover = (*Database)(nil)
+
+// MoveTable is RENAME TABLE a.t TO b.u: the table goes to database b, its
+// generated CHECK names renamed (3822 when b has one of them).
+func (d *Database) MoveTable(ctx *sql.Context, oldDb, oldName, newDb, newName string) error {
+	info, err := d.cat.Table(ctx, oldDb, oldName)
+	if err != nil {
+		return err
+	}
+	if info == nil {
+		return mysql.NewSQLError(1146, "42S02", "Table '%s.%s' doesn't exist", oldDb, oldName)
+	}
+	if db, err := d.cat.Database(ctx, newDb); err != nil {
+		return err
+	} else if db == nil {
+		return sql.ErrDatabaseNotFound.New(newDb)
+	}
+	if existing, err := d.cat.Table(ctx, newDb, newName); err != nil {
+		return err
+	} else if existing != nil {
+		return mysql.NewSQLError(1050, "42S01", "Table '%s' already exists", newName)
+	}
+	if info, err = renamedChecks(ctx, d.cat, info, newDb, newName); err != nil {
+		return err
+	}
+	return d.cat.MoveTable(ctx, info, newDb, newName)
+}
+
+// renamedChecks is info with its generated CHECK names (<old>_chk_<n>)
+// renamed for the table's new name, as MySQL renames them; a name another
+// table of database db has is refused (3822).
+func renamedChecks(ctx *sql.Context, cat *Catalog, info *TableInfo, db, newName string) (*TableInfo, error) {
+	prefix := strings.ToLower(info.Name) + "_chk_"
+	out := info.clone()
+	for i, c := range out.Checks {
+		if rest, ok := strings.CutPrefix(strings.ToLower(c.Name), prefix); ok {
+			if _, err := strconv.Atoi(rest); err == nil {
+				out.Checks[i].Name = newName + "_chk_" + rest
+			}
+		}
+	}
+	for _, c := range out.Checks {
+		dup := false
+		err := cat.eachTable(ctx, func(ti *TableInfo) {
+			if ti.ID == info.ID || !strings.EqualFold(ti.DB, db) {
+				return
+			}
+			for _, x := range ti.Checks {
+				dup = dup || strings.EqualFold(x.Name, c.Name)
+			}
+		})
+		if err != nil {
+			return nil, err
+		}
+		if dup {
+			return nil, errDuplicateCheck(c.Name)
+		}
+	}
+	return out, nil
+}
+
+// alterRenameErrors refuses, before any of its clauses runs, an ALTER TABLE
+// ... RENAME TO whose renamed CHECK names clash (3822): ALTER TABLE is not
+// atomic here, and MySQL changes nothing.
+func alterRenameErrors(ctx *sql.Context, a *analyzer.Analyzer, st sqlparser.Statement) error {
+	at, ok := st.(*sqlparser.AlterTable)
+	if !ok {
+		return nil
+	}
+	for _, d := range at.Statements {
+		if d == nil || !strings.EqualFold(d.Action, sqlparser.RenameStr) || len(d.FromTables) != 1 || len(d.ToTables) != 1 {
+			continue
+		}
+		cur := ctx.GetCurrentDatabase()
+		fromDb, toDb := d.FromTables[0].DbQualifier.String(), d.ToTables[0].DbQualifier.String()
+		if fromDb == "" {
+			fromDb = cur
+		}
+		if toDb == "" {
+			toDb = cur
+		}
+		sdb, err := a.Catalog.Database(ctx, fromDb)
+		if err != nil {
+			return nil // the ALTER fails on its own
+		}
+		db, ok := sdb.(*Database)
+		if !ok {
+			return nil
+		}
+		info, err := db.cat.Table(ctx, fromDb, d.FromTables[0].Name.String())
+		if err != nil || info == nil {
+			return nil
+		}
+		if _, err := renamedChecks(ctx, db.cat, info, toDb, d.ToTables[0].Name.String()); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -534,3 +534,9 @@ type IndexSearchableTable interface {
 	IndexAddressableTable
 	IndexSearchable
 }
+
+// TableMover renames a table into, out of or within another database than
+// its own (RENAME TABLE a.t TO b.t). (s2z patch)
+type TableMover interface {
+	MoveTable(ctx *Context, oldDb, oldName, newDb, newName string) error
+}

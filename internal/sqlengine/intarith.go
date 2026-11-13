@@ -375,7 +375,33 @@ func (c *exactCmp) WithChildren(children ...sql.Expression) (sql.Expression, err
 // gives 0. The parser makes ~x into x ^ 0xFFFFFFFFFFFFFFFF.
 type bitOp struct{ *expression.BitOp }
 
-func (b *bitOp) Type() sql.Type { return types.Uint64 }
+func (b *bitOp) Type() sql.Type {
+	if b.binary() {
+		return types.LongBlob
+	}
+	return types.Uint64
+}
+
+// binary is whether MySQL computes the operator on binary strings: &, |
+// and ^ on two of them (two hexadecimal literals are numbers), << and >> on
+// a binary string that is not a hexadecimal literal.
+func (b *bitOp) binary() bool {
+	l, r := b.Left(), b.Right()
+	switch b.Op {
+	case sqlparser.BitAndStr, sqlparser.BitOrStr, sqlparser.BitXorStr:
+		return types.IsBinaryType(l.Type()) && types.IsBinaryType(r.Type()) && !(hexNumber(l) && hexNumber(r))
+	case sqlparser.ShiftLeftStr, sqlparser.ShiftRightStr:
+		return types.IsBinaryType(l.Type()) && !hexNumber(l)
+	}
+	return false
+}
+
+// hexNumber is whether e is a hexadecimal or bit literal without an
+// introducer (0x0F, not _binary 0x0F).
+func hexNumber(e sql.Expression) bool {
+	l, ok := e.(*expression.Literal)
+	return ok && l.HexNumber
+}
 
 func (b *bitOp) Eval(ctx *sql.Context, row sql.Row) (any, error) {
 	l, err := b.Left().Eval(ctx, row)
@@ -388,7 +414,15 @@ func (b *bitOp) Eval(ctx *sql.Context, row sql.Row) (any, error) {
 	}
 	lb, lBin := l.([]byte)
 	rb, rBin := r.([]byte)
-	if lBin && rBin && (b.Op == sqlparser.BitAndStr || b.Op == sqlparser.BitOrStr || b.Op == sqlparser.BitXorStr) {
+	if lBin && (b.Op == sqlparser.ShiftLeftStr || b.Op == sqlparser.ShiftRightStr) && !hexNumber(b.Left()) {
+		n, err := bitOperand(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		return shiftBytes(lb, n, b.Op == sqlparser.ShiftLeftStr), nil
+	}
+	if lBin && rBin && (b.Op == sqlparser.BitAndStr || b.Op == sqlparser.BitOrStr || b.Op == sqlparser.BitXorStr) &&
+		!(hexNumber(b.Left()) && hexNumber(b.Right())) {
 		if len(lb) != len(rb) {
 			return nil, mysql.NewSQLError(3513, "HY000", "Binary operands of bitwise operators must be of equal length")
 		}
@@ -404,6 +438,14 @@ func (b *bitOp) Eval(ctx *sql.Context, row sql.Row) (any, error) {
 			}
 		}
 		return out, nil
+	}
+	// a binary string that is no hexadecimal literal is a number as text
+	// (its numeric prefix), as MySQL takes it here
+	if lBin && !hexNumber(b.Left()) {
+		l = string(lb)
+	}
+	if rBin && !hexNumber(b.Right()) {
+		r = string(rb)
 	}
 	x, err := bitOperand(ctx, l)
 	if err != nil {
@@ -503,4 +545,54 @@ func bitOperand(ctx *sql.Context, v any) (uint64, error) {
 		return uint64(q.Int64()), nil
 	}
 	return q.Uint64(), nil
+}
+
+// shiftBytes shifts a binary string by n bits, as MySQL does: within its
+// length, the bits shifted out lost.
+func shiftBytes(b []byte, n uint64, left bool) []byte {
+	out := make([]byte, len(b))
+	total := uint64(len(b)) * 8
+	if n >= total {
+		return out
+	}
+	bit := func(i uint64) byte { // bit i from the most significant
+		return (b[i/8] >> (7 - i%8)) & 1
+	}
+	for i := uint64(0); i < total; i++ {
+		var src int64
+		if left {
+			src = int64(i + n)
+		} else {
+			src = int64(i) - int64(n)
+		}
+		if src < 0 || uint64(src) >= total || bit(uint64(src)) == 0 {
+			continue
+		}
+		out[i/8] |= 1 << (7 - i%8)
+	}
+	return out
+}
+
+// ~x (the parser's s2z_bitnot): a binary string's bytes inverted, else the
+// 64-bit complement.
+func init() {
+	overrides["s2z_bitnot"] = fnN("s2z_bitnot", 1, 1, func(args []sql.Expression) sql.Type {
+		if types.IsBinaryType(args[0].Type()) && !hexNumber(args[0]) {
+			return types.LongBlob
+		}
+		return types.Uint64
+	}, false, func(ctx *sql.Context, args []sql.Expression, v []any) (any, error) {
+		if b, ok := v[0].([]byte); ok && !hexNumber(args[0]) {
+			out := make([]byte, len(b))
+			for i := range b {
+				out[i] = ^b[i]
+			}
+			return out, nil
+		}
+		x, err := bitOperand(ctx, v[0])
+		if err != nil {
+			return nil, err
+		}
+		return ^x, nil
+	})
 }

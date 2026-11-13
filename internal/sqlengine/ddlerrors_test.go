@@ -204,3 +204,104 @@ func TestMiscCompat(t *testing.T) {
 		}
 	}
 }
+
+// TestRequirePrimaryKey pins sql_require_primary_key against MySQL 8.0.46:
+// tables without a primary key are refused (3750), also temporary ones, a
+// CREATE ... SELECT and a table with only a UNIQUE key, and so is dropping
+// the primary key.
+func TestRequirePrimaryKey(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"SET sql_require_primary_key = ON", "[]"},
+		{"CREATE TABLE r1 (a int)", "ERR 3750"},
+		{"CREATE TABLE r2 (a int PRIMARY KEY)", "[]"},
+		{"CREATE TABLE r3 LIKE r2", "[]"},
+		{"CREATE TEMPORARY TABLE r4 (a int)", "ERR 3750"},
+		{"CREATE TABLE r5 AS SELECT 1 AS a", "ERR 3750"},
+		{"ALTER TABLE r2 DROP PRIMARY KEY", "ERR 3750"},
+		{"ALTER TABLE r2 ADD COLUMN b int", "[]"},
+		{"CREATE TABLE r6 (a int, UNIQUE KEY (a))", "ERR 3750"},
+		{"CREATE TABLE r7 (a int NOT NULL, UNIQUE KEY (a))", "ERR 3750"},
+		{"SHOW TABLES", "[r2 r3]"},
+		{"SET sql_require_primary_key = OFF", "[]"},
+		{"CREATE TABLE r9 (a int)", "[]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}
+
+// TestCheckConstraintColumns pins CHECK constraints that name a column the
+// table lacks (3820) or, for a column's own CHECK, another column (3813),
+// against MySQL 8.0.46.
+func TestCheckConstraintColumns(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE t1(CHECK((f1 + f3) > 10), f1 int CHECK (f1 < 10), f2 int)", "ERR 3820"},
+		{"CREATE TABLE t2(f1 int CONSTRAINT ck CHECK (f9 > 1))", "ERR 3813"},
+		{"CREATE TABLE t3(f1 int CHECK (f1 > 1), CHECK (f1 + f2 > 2))", "ERR 3820"},
+		{"CREATE TABLE t4(f1 int CHECK (f1 > 1), f2 int, CHECK (f1 + f2 > 2))", "[]"},
+		{"SHOW TABLES", "[t4]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}
+
+// TestRenameChecksAndDatabases pins RENAME TABLE and ALTER TABLE ... RENAME
+// against MySQL 8.0.46: generated CHECK names follow the table's name, and
+// a clash with another table's (also in the target database) is 3822 with
+// nothing changed; a table renamed into another database goes there with
+// its rows (it stayed in the current database under the new name).
+func TestRenameChecksAndDatabases(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE t(c1 INT CONSTRAINT t2_chk_1 CHECK (c1 > 10))", "[]"},
+		{"CREATE TABLE t1(c1 INT CHECK (c1 > 10), CONSTRAINT ck CHECK(c1 > 10))", "[]"},
+		{"CREATE TABLE t2(c1 INT, CONSTRAINT ck CHECK(c1 > 10))", "ERR 3822"},
+		{"ALTER TABLE t1 ADD CONSTRAINT ck CHECK(c1 > 10)", "ERR 3822"},
+		{"ALTER TABLE t1 RENAME TO t2", "ERR 3822"},
+		{"ALTER TABLE t1 ADD c2 INT, RENAME TO t2", "ERR 3822"},
+		{"DROP TABLE t", "[]"},
+		{"CREATE DATABASE db1", "[]"},
+		{"CREATE TABLE db1.t(c1 INT CONSTRAINT t2_chk_1 CHECK (c1 > 10))", "[]"},
+		{"ALTER TABLE t1 ADD c2 INT, RENAME TO db1.t2", "ERR 3822"},
+		{"ALTER TABLE t1 RENAME TO db1.t2", "ERR 3822"},
+		{"DROP DATABASE db1", "[]"},
+		{"DROP TABLE t1", "[]"},
+		{"SHOW TABLES", "[]"},
+
+		{"CREATE DATABASE db2", "[]"},
+		{"CREATE TABLE m (a int PRIMARY KEY, CHECK (a > 0))", "[]"},
+		{"INSERT INTO m VALUES (1), (2)", "[]"},
+		{"RENAME TABLE m TO db2.m2", "[]"},
+		{"SHOW TABLES", "[]"},
+		{"SELECT * FROM db2.m2", "[1 2]"},
+		{"SHOW CREATE TABLE db2.m2", "[m2,CREATE TABLE `m2` (\n  `a` int NOT NULL,\n  PRIMARY KEY (`a`),\n  CONSTRAINT `m2_chk_1` CHECK ((`a` > 0))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci]"},
+		{"INSERT INTO db2.m2 VALUES (0)", "ERR 3819"},
+		{"ALTER TABLE db2.m2 RENAME TO m", "[]"},
+		{"SELECT * FROM m", "[1 2]"},
+		{"RENAME TABLE nosuch TO db2.x", "ERR 1146"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}

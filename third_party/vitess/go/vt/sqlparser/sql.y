@@ -9397,9 +9397,10 @@ value_expression:
   }
 | '~'  value_expression
   {
-    // s2z patch: ~x is x ^ 0xFFFFFFFFFFFFFFFF, as MySQL computes it in 64
-    // bits (go-mysql-server has no unary ~).
-    $$ = &BinaryExpr{Operator: BitXorStr, Left: tryCastExpr($2).(Expr), Right: NewIntVal([]byte("18446744073709551615"))}
+    // s2z patch: ~x is s2z_bitnot(x), which sqld computes as MySQL does:
+    // bytewise on a binary string, else in 64 bits (go-mysql-server has no
+    // unary ~).
+    $$ = &FuncExpr{Name: NewColIdent("s2z_bitnot"), Exprs: SelectExprs{&AliasedExpr{Expr: tryCastExpr($2).(Expr)}}}
   }
 | '!' value_expression %prec UNARY
   {

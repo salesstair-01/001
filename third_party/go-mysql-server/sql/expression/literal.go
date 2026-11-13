@@ -31,6 +31,10 @@ type Literal struct {
 	Val  interface{}
 	Typ  sql.Type
 	val2 sql.Value
+	// HexNumber marks a hexadecimal or bit literal written without an
+	// introducer (0x0F, X'0F'), which MySQL's bit operators take as a
+	// number next to another such literal. (s2z patch)
+	HexNumber bool
 }
 
 var _ sql.Expression = &Literal{}
@@ -39,6 +43,13 @@ var _ sql.CollationCoercible = &Literal{}
 var _ sqlparser.Injectable = &Literal{}
 
 // NewLiteral creates a new Literal expression.
+// NewHexLiteral is a hexadecimal literal's bytes (0x0F). (s2z patch)
+func NewHexLiteral(value []byte) *Literal {
+	l := NewLiteral(value, types.LongBlob)
+	l.HexNumber = true
+	return l
+}
+
 func NewLiteral(value interface{}, fieldType sql.Type) *Literal {
 	val2, _ := sql.ConvertToValue(value)
 	return &Literal{

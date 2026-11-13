@@ -561,15 +561,19 @@ func (b *Builder) buildRenameTable(inScope *scope, ddl *ast.DDL) (outScope *scop
 		panic("Expected from tables and to tables of equal length")
 	}
 
-	var fromTables, toTables []string
+	var fromTables, toTables, fromDbs, toDbs []string
 	for _, table := range ddl.FromTables {
 		fromTables = append(fromTables, table.Name.String())
+		fromDbs = append(fromDbs, table.DbQualifier.String())
 	}
 	for _, table := range ddl.ToTables {
 		toTables = append(toTables, table.Name.String())
+		toDbs = append(toDbs, table.DbQualifier.String())
 	}
 
-	outScope.node = plan.NewRenameTable(b.currentDb(), fromTables, toTables, b.multiDDL)
+	rt := plan.NewRenameTable(b.currentDb(), fromTables, toTables, b.multiDDL)
+	rt.OldDbs, rt.NewDbs = fromDbs, toDbs // s2z patch: db.t on either side
+	outScope.node = rt
 	return
 }
 

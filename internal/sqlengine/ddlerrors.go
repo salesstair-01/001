@@ -25,6 +25,9 @@ func ddlErrors(ctx *sql.Context, st sqlparser.Statement) error {
 	case *sqlparser.AlterTable:
 		ddls = s.Statements
 	}
+	if err := requirePrimaryKey(ctx, st, ddls); err != nil {
+		return err
+	}
 	mode := sql.LoadSqlMode(ctx)
 	strict := mode.ModeEnabled("STRICT_TRANS_TABLES") || mode.ModeEnabled("STRICT_ALL_TABLES") || mode.ModeEnabled("TRADITIONAL")
 	noZeroDate := strict && (mode.ModeEnabled("NO_ZERO_DATE") || mode.ModeEnabled("TRADITIONAL"))
@@ -55,11 +58,14 @@ func ddlErrors(ctx *sql.Context, st sqlparser.Statement) error {
 }
 
 // checkErrors refuses a new table's CHECK constraint that is not a
-// condition (3812) or uses an AUTO_INCREMENT column (3818). Unnamed
+// condition (3812), names a column the table does not have (3820) or uses
+// an AUTO_INCREMENT column (3818). Unnamed
 // constraints are named as MySQL names them, <table>_chk_<n> in order.
 func checkErrors(d *sqlparser.DDL) error {
 	auto := map[string]bool{}
+	cols := map[string]bool{}
 	for _, c := range d.TableSpec.Columns {
+		cols[c.Name.Lowered()] = true
 		if c.Type.Autoincrement {
 			auto[c.Name.Lowered()] = true
 		}
@@ -77,6 +83,33 @@ func checkErrors(d *sqlparser.DDL) error {
 		}
 		if !isCondition(cc.Expr) {
 			return mysql.NewSQLError(3812, "HY000", "An expression of non-boolean type specified to a check constraint '%s'.", name)
+		}
+		// a column's own CHECK may name only that column (3813); any CHECK
+		// only the table's columns (3820)
+		own := ""
+		for _, col := range d.TableSpec.Columns {
+			if col.Type.Constraint == c {
+				own = col.Name.Lowered()
+			}
+		}
+		var other, missing string
+		_ = sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
+			if col, ok := node.(*sqlparser.ColName); ok {
+				n := col.Name.Lowered()
+				if own != "" && n != own && other == "" {
+					other = n
+				}
+				if !cols[n] && missing == "" {
+					missing = col.Name.String()
+				}
+			}
+			return true, nil
+		}, cc.Expr)
+		if other != "" {
+			return mysql.NewSQLError(3813, "HY000", "Column check constraint '%s' references other column.", name)
+		}
+		if missing != "" {
+			return mysql.NewSQLError(3820, "HY000", "Check constraint '%s' refers to non-existing column '%s'.", name, missing)
 		}
 		usesAuto := false
 		_ = sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
@@ -255,4 +288,79 @@ func bodyStatementError(s sqlparser.Statement) error {
 		}
 	}
 	return nil
+}
+
+// errRequirePrimaryKey is MySQL's refusal of a table without a primary key
+// under sql_require_primary_key.
+var errRequirePrimaryKey = mysql.NewSQLError(3750, "HY000", "Unable to create or change a table without a primary key, when the system variable 'sql_require_primary_key' is set. Add a primary key to the table or unset this variable to avoid this message. Note that tables without a primary key can cause performance problems in row-based replication, so please consult your DBA before changing this setting.")
+
+// requirePrimaryKey refuses, under sql_require_primary_key, a CREATE TABLE
+// without a primary key (a UNIQUE key is not one; temporary tables and
+// CREATE ... SELECT too) and an ALTER TABLE that drops the primary key
+// without adding one.
+func requirePrimaryKey(ctx *sql.Context, st sqlparser.Statement, ddls []*sqlparser.DDL) error {
+	v, err := ctx.GetSessionVariable(ctx, "sql_require_primary_key")
+	if err != nil || !truthy(v) {
+		return nil
+	}
+	switch st.(type) {
+	case *sqlparser.DDL:
+		d := ddls[0]
+		if d.Action != sqlparser.CreateStr || d.OptLike != nil || d.ViewSpec != nil || d.TriggerSpec != nil || d.ProcedureSpec != nil || d.EventSpec != nil {
+			return nil
+		}
+		if d.TableSpec == nil || !specHasPrimaryKey(d.TableSpec) {
+			return errRequirePrimaryKey
+		}
+	case *sqlparser.AlterTable:
+		drops, adds := false, false
+		for _, d := range ddls {
+			if d == nil {
+				continue
+			}
+			if is := d.IndexSpec; is != nil && strings.EqualFold(is.Type, sqlparser.PrimaryStr) {
+				switch strings.ToLower(is.Action) {
+				case sqlparser.DropStr:
+					drops = true
+				case sqlparser.CreateStr:
+					adds = true
+				}
+			}
+			if d.TableSpec != nil && specHasPrimaryKey(d.TableSpec) {
+				adds = true
+			}
+		}
+		if drops && !adds {
+			return errRequirePrimaryKey
+		}
+	}
+	return nil
+}
+
+func specHasPrimaryKey(ts *sqlparser.TableSpec) bool {
+	for _, c := range ts.Columns {
+		if c.Type.KeyOpt == sqlparser.ColKeyPrimary {
+			return true
+		}
+	}
+	for _, ix := range ts.Indexes {
+		if ix.Info != nil && ix.Info.Primary {
+			return true
+		}
+	}
+	return false
+}
+
+func truthy(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case int8:
+		return x != 0
+	case int64:
+		return x != 0
+	case string:
+		return strings.EqualFold(x, "on") || x == "1"
+	}
+	return fmt.Sprint(v) == "1"
 }

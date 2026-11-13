@@ -2,6 +2,7 @@ package aggregation
 
 import (
 	"fmt"
+	"github.com/dolthub/vitess/go/mysql"
 	"math"
 	"reflect"
 
@@ -236,6 +237,7 @@ func (a *avgBuffer) Dispose() {
 }
 
 type bitAndBuffer struct {
+	bin  binBits // s2z patch: a binary string argument
 	res  uint64
 	rows uint64
 	expr sql.Expression
@@ -247,7 +249,7 @@ func NewBitAndBuffer(child sql.Expression) *bitAndBuffer {
 		rows = uint64(0)
 	)
 
-	return &bitAndBuffer{res, rows, child}
+	return &bitAndBuffer{res: res, rows: rows, expr: child}
 }
 
 // Update implements the AggregationBuffer interface.
@@ -259,6 +261,10 @@ func (b *bitAndBuffer) Update(ctx *sql.Context, row sql.Row) error {
 
 	if v == nil {
 		return nil
+	}
+
+	if types.IsBinaryType(b.expr.Type()) {
+		return b.bin.update(v, "and")
 	}
 
 	v, _, err = types.Uint64.Convert(ctx, v)
@@ -274,6 +280,9 @@ func (b *bitAndBuffer) Update(ctx *sql.Context, row sql.Row) error {
 
 // Eval implements the AggregationBuffer interface.
 func (b *bitAndBuffer) Eval(ctx *sql.Context) (interface{}, error) {
+	if types.IsBinaryType(b.expr.Type()) {
+		return b.bin.result(b.expr.Type(), "and"), nil
+	}
 	return b.res, nil
 }
 
@@ -283,6 +292,7 @@ func (b *bitAndBuffer) Dispose() {
 }
 
 type bitOrBuffer struct {
+	bin  binBits // s2z patch: a binary string argument
 	res  uint64
 	rows uint64
 	expr sql.Expression
@@ -294,7 +304,7 @@ func NewBitOrBuffer(child sql.Expression) *bitOrBuffer {
 		rows = uint64(0)
 	)
 
-	return &bitOrBuffer{res, rows, child}
+	return &bitOrBuffer{res: res, rows: rows, expr: child}
 }
 
 // Update implements the AggregationBuffer interface.
@@ -306,6 +316,10 @@ func (b *bitOrBuffer) Update(ctx *sql.Context, row sql.Row) error {
 
 	if v == nil {
 		return nil
+	}
+
+	if types.IsBinaryType(b.expr.Type()) {
+		return b.bin.update(v, "or")
 	}
 
 	v, _, err = types.Uint64.Convert(ctx, v)
@@ -321,6 +335,9 @@ func (b *bitOrBuffer) Update(ctx *sql.Context, row sql.Row) error {
 
 // Eval implements the AggregationBuffer interface.
 func (b *bitOrBuffer) Eval(ctx *sql.Context) (interface{}, error) {
+	if types.IsBinaryType(b.expr.Type()) {
+		return b.bin.result(b.expr.Type(), "or"), nil
+	}
 	return b.res, nil
 }
 
@@ -330,6 +347,7 @@ func (b *bitOrBuffer) Dispose() {
 }
 
 type bitXorBuffer struct {
+	bin  binBits // s2z patch: a binary string argument
 	res  uint64
 	rows uint64
 	expr sql.Expression
@@ -341,7 +359,7 @@ func NewBitXorBuffer(child sql.Expression) *bitXorBuffer {
 		rows = uint64(0)
 	)
 
-	return &bitXorBuffer{res, rows, child}
+	return &bitXorBuffer{res: res, rows: rows, expr: child}
 }
 
 // Update implements the AggregationBuffer interface.
@@ -353,6 +371,10 @@ func (b *bitXorBuffer) Update(ctx *sql.Context, row sql.Row) error {
 
 	if v == nil {
 		return nil
+	}
+
+	if types.IsBinaryType(b.expr.Type()) {
+		return b.bin.update(v, "xor")
 	}
 
 	v, _, err = types.Uint64.Convert(ctx, v)
@@ -368,6 +390,9 @@ func (b *bitXorBuffer) Update(ctx *sql.Context, row sql.Row) error {
 
 // Eval implements the AggregationBuffer interface.
 func (b *bitXorBuffer) Eval(ctx *sql.Context) (interface{}, error) {
+	if types.IsBinaryType(b.expr.Type()) {
+		return b.bin.result(b.expr.Type(), "xor"), nil
+	}
 	// This case is triggered when no rows exist.
 	if b.res == 0 && b.rows == 0 {
 		return uint64(0), nil
@@ -787,4 +812,59 @@ func (vp *varSampBuffer) Eval(ctx *sql.Context) (interface{}, error) {
 		return nil, nil
 	}
 	return vp.std2 / float64(vp.count-1), nil
+}
+
+// binBits is BIT_AND, BIT_OR or BIT_XOR of binary strings, as MySQL
+// computes them: bytewise, the strings of one length (3513), and of no rows
+// the type's length of 1s (AND) or 0s. (s2z patch)
+type binBits struct {
+	acc  []byte
+	seen bool
+}
+
+func (bb *binBits) update(v interface{}, op string) error {
+	var b []byte
+	switch x := v.(type) {
+	case []byte:
+		b = x
+	case string:
+		b = []byte(x)
+	default:
+		return nil
+	}
+	if !bb.seen {
+		bb.acc, bb.seen = append([]byte(nil), b...), true
+		return nil
+	}
+	if len(b) != len(bb.acc) {
+		return mysql.NewSQLError(3513, "HY000", "Binary operands of bitwise operators must be of equal length")
+	}
+	for i := range b {
+		switch op {
+		case "and":
+			bb.acc[i] &= b[i]
+		case "or":
+			bb.acc[i] |= b[i]
+		default:
+			bb.acc[i] ^= b[i]
+		}
+	}
+	return nil
+}
+
+func (bb *binBits) result(t sql.Type, op string) []byte {
+	if bb.seen {
+		return bb.acc
+	}
+	n := 0
+	if st, ok := t.(sql.StringType); ok {
+		n = int(st.MaxByteLength())
+	}
+	out := make([]byte, n)
+	if op == "and" {
+		for i := range out {
+			out[i] = 0xFF
+		}
+	}
+	return out
 }

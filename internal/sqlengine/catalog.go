@@ -572,6 +572,30 @@ func (c *Catalog) CreateTable(ctx context.Context, t *TableInfo) error {
 	})
 }
 
+// MoveTable renames a table into database newDB, keeping its id (its rows
+// are keyed by the id).
+func (c *Catalog) MoveTable(ctx context.Context, t *TableInfo, newDB, newName string) error {
+	return c.ddl(ctx, func(txn *Txn) error {
+		updated := *t.clone()
+		updated.DB, updated.Name = newDB, newName
+		updated.Version++
+		if err := c.setSchemaVersion(ctx, txn, &updated); err != nil {
+			return err
+		}
+		err := put(txn, ctx, kv.OpInsertOnly, c.store.tableNameKey(newDB, newName), t.ID)
+		if errIsKind(err, kv.KindDuplicateKey) {
+			return sql.ErrTableAlreadyExists.New(newName)
+		}
+		if err != nil {
+			return err
+		}
+		if err := txn.Mutate(ctx, 1, []kv.Mutation{{Op: kv.OpDelete, Key: c.store.tableNameKey(t.DB, t.Name)}}, 0); err != nil {
+			return err
+		}
+		return put(txn, ctx, kv.OpPut, c.store.tableKey(t.ID), &updated)
+	})
+}
+
 // RenameTable renames a table, keeping its id.
 func (c *Catalog) RenameTable(ctx context.Context, t *TableInfo, newName string) error {
 	return c.ddl(ctx, func(txn *Txn) error {

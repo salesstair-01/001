@@ -44,6 +44,9 @@ func ddlWarnings(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan
 			if err := ddlErrors(ctx, st); err != nil {
 				return nil, transform.SameTree, err
 			}
+			if err := alterRenameErrors(ctx, a, st); err != nil {
+				return nil, transform.SameTree, err
+			}
 			for _, c := range columnDefinitions(st) {
 				if strings.EqualFold(c.Type.Type, "year") && c.Type.Length != nil {
 					// YEAR(4) is deprecated; other widths are refused.

@@ -29,6 +29,9 @@ type RenameTable struct {
 	OldNames    []string
 	NewNames    []string
 	alterTblDef bool
+	// OldDbs and NewDbs are the names' database qualifiers, "" for the
+	// current database. (s2z patch)
+	OldDbs, NewDbs []string
 }
 
 var _ sql.Node = (*RenameTable)(nil)
@@ -65,6 +68,24 @@ func (r *RenameTable) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error
 	viewRegistry := ctx.GetViewRegistry()
 
 	for i, oldName := range r.OldNames {
+		// s2z patch: a name in another database: the integrator moves it
+		oldDb, newDb := r.Db.Name(), r.Db.Name()
+		if i < len(r.OldDbs) && r.OldDbs[i] != "" {
+			oldDb = r.OldDbs[i]
+		}
+		if i < len(r.NewDbs) && r.NewDbs[i] != "" {
+			newDb = r.NewDbs[i]
+		}
+		if !strings.EqualFold(oldDb, r.Db.Name()) || !strings.EqualFold(newDb, r.Db.Name()) {
+			mover, ok := r.Db.(sql.TableMover)
+			if !ok {
+				return nil, sql.ErrRenameTableNotSupported.New(r.Db.Name())
+			}
+			if err := mover.MoveTable(ctx, oldDb, oldName, newDb, r.NewNames[i]); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if tbl, exists := r.tableExists(ctx, oldName); exists {
 			err := r.renameTable(ctx, renamer, tbl, oldName, r.NewNames[i])
 			if err != nil {

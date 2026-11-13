@@ -12,6 +12,7 @@ import (
 	"github.com/dolthub/vitess/go/mysql"
 	"github.com/dolthub/vitess/go/sqltypes"
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
+	"github.com/dolthub/vitess/go/vt/sqlparser"
 )
 
 // go-mysql-server reports many errors as 1105 (ER_UNKNOWN_ERROR) where
@@ -129,7 +130,27 @@ func withQueryCode(err error, query string) error {
 			return mysql.NewSQLError(1054, "42S22", "Unknown column in '%s'", row)
 		}
 	}
+	// A CREATE TABLE's CHECK naming a column the table lacks fails while it
+	// is planned (1054); MySQL's error is the constraint's (3820, 3813).
+	if mapped := withMySQLCode(err); strings.Contains(sqlErrorMessage(mapped), "could not be found in any table in scope") || sqlErrorCode(mapped) == 1054 {
+		if st, perr := sqlparser.Parse(query); perr == nil {
+			if d, ok := st.(*sqlparser.DDL); ok && d.Action == sqlparser.CreateStr && d.TableSpec != nil {
+				if cerr := checkErrors(d); cerr != nil {
+					return cerr
+				}
+			}
+		}
+		return mapped
+	}
 	return withMySQLCode(err)
+}
+
+func sqlErrorCode(err error) int {
+	var se *mysql.SQLError
+	if errors.As(err, &se) {
+		return se.Num
+	}
+	return 0
 }
 
 func sqlErrorMessage(err error) string {

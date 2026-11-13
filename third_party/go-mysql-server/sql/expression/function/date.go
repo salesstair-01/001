@@ -481,19 +481,19 @@ func (c CurrDate) Description() string {
 
 func NewCurrDate() sql.Expression {
 	return CurrDate{
-		NoArgFunc: NoArgFunc{"curdate", types.LongText},
+		NoArgFunc: NoArgFunc{"curdate", types.Date}, // s2z patch: a DATE
 	}
 }
 
 func NewCurrentDate() sql.Expression {
 	return CurrDate{
-		NoArgFunc: NoArgFunc{"current_date", types.LongText},
+		NoArgFunc: NoArgFunc{"current_date", types.Date}, // s2z patch: a DATE
 	}
 }
 
 func currDateLogic(ctx *sql.Context, _ sql.Row) (interface{}, error) {
 	t := ctx.QueryTime()
-	return fmt.Sprintf("%d-%02d-%02d", t.Year(), t.Month(), t.Day()), nil
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), nil // s2z patch: a DATE
 }
 
 // Eval implements sql.Expression

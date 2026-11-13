@@ -1865,6 +1865,13 @@ func TypedString(t sql.Type, v interface{}) (string, bool) {
 		}
 		return "", false
 	}
+	if tt, ok := t.(TimespanType_); ok {
+		if ts, ok := v.(Timespan); ok {
+			p, _ := tt.Precision()
+			return ts.s2zString(p), true // TIME(2): 00:00:00.00
+		}
+		return "", false
+	}
 	if IsYear(t) {
 		if n, ok := v.(int16); ok {
 			return fmt.Sprintf("%04d", n), true

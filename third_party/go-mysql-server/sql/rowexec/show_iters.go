@@ -386,6 +386,9 @@ func convertColumnDefaultToString(ctx *sql.Context, def *sql.ColumnDefaultValue)
 	// TODO : string literals should have character set introducer
 	colDefaultStr := def.String()
 	defType := def.Type()
+	if colDefaultStr == "0x" && types.IsBinaryType(defType) {
+		return "''", nil // s2z patch: MySQL writes an empty binary default ''
+	}
 
 	// These types do not need to be quoted
 	if !def.IsLiteral() || colDefaultStr == "NULL" || types.IsTime(defType) || types.IsText(defType) {
@@ -397,6 +400,9 @@ func convertColumnDefaultToString(ctx *sql.Context, def *sql.ColumnDefaultValue)
 	}
 	if types.IsBit(def.OutType) {
 		return fmt.Sprintf("b'%b'", v), nil
+	}
+	if ts, ok := types.TypedString(def.OutType, v); ok {
+		return fmt.Sprintf("'%s'", ts), nil // s2z patch: '0.00' for a DECIMAL(5,2)
 	}
 	return fmt.Sprintf("'%v'", v), nil
 }

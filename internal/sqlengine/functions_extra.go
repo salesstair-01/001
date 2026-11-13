@@ -55,8 +55,22 @@ func (f *scalarFn) Resolved() bool {
 	}
 	return true
 }
-func (f *scalarFn) Type() sql.Type             { return f.typ(f.args) }
-func (f *scalarFn) IsNullable() bool           { return !f.NeverNull() }
+func (f *scalarFn) Type() sql.Type { return f.typ(f.args) }
+func (f *scalarFn) IsNullable() bool {
+	if f.NeverNull() {
+		return false
+	}
+	switch f.name {
+	case "greatest", "least": // NULL only of a NULL argument
+		for _, a := range f.args {
+			if a.IsNullable() {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
 func (f *scalarFn) Children() []sql.Expression { return f.args }
 func (f *scalarFn) IsNonDeterministic() bool {
 	return f.name == "uuid_short" || strings.HasPrefix(f.name, "utc_")
@@ -453,3 +467,8 @@ func evalBenchmark(ctx *sql.Context, args []sql.Expression, v []any) (any, error
 	}
 	return int64(0), nil
 }
+
+// NullOnlyOfNull is whether the function is NULL only when an argument is
+// (GREATEST, LEAST): CREATE TABLE ... SELECT of non-NULL arguments makes a
+// NOT NULL column, as MySQL does.
+func (f *scalarFn) NullOnlyOfNull() bool { return f.name == "greatest" || f.name == "least" }

@@ -34,10 +34,14 @@ type typedLiteral struct {
 
 var _ sql.FunctionExpression = (*typedLiteral)(nil)
 
-func (l *typedLiteral) FunctionName() string       { return "s2z_" + l.kind + "_literal" }
-func (l *typedLiteral) Description() string        { return l.kind + " literal" }
-func (l *typedLiteral) Resolved() bool             { return l.arg.Resolved() }
-func (l *typedLiteral) IsNullable() bool           { return false }
+func (l *typedLiteral) FunctionName() string { return "s2z_" + l.kind + "_literal" }
+func (l *typedLiteral) Description() string  { return l.kind + " literal" }
+func (l *typedLiteral) Resolved() bool       { return l.arg.Resolved() }
+func (l *typedLiteral) IsNullable() bool     { return false }
+
+// NeverNull: a typed literal is a value (CREATE TABLE ... SELECT makes it
+// NOT NULL).
+func (l *typedLiteral) NeverNull() bool            { return true }
 func (l *typedLiteral) Children() []sql.Expression { return []sql.Expression{l.arg} }
 func (l *typedLiteral) String() string             { return strings.ToUpper(l.kind) + l.arg.String() }
 func (l *typedLiteral) IsNonDeterministic() bool   { return false }

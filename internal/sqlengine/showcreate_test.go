@@ -60,3 +60,28 @@ func TestCreateSelectClockNotNull(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateSelectTypesAndDefaults pins CREATE TABLE ... SELECT's columns
+// against MySQL 8.0.46: a table's column keeps its definition and default,
+// an expression that is never NULL is NOT NULL with its type's zero as
+// default (not a DATE or DATETIME), and a string literal is a VARCHAR of its
+// length.
+func TestCreateSelectTypesAndDefaults(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE TABLE src (i int NOT NULL, v varchar(5) NOT NULL, d decimal(5,2) NOT NULL, t text NOT NULL, dt datetime NOT NULL, dd date NOT NULL, tm time(2) NOT NULL, ts timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, f double NOT NULL, e enum('x','y') NOT NULL, j json NOT NULL, y year NOT NULL, b blob NOT NULL, bi bit(2) NOT NULL, iv int NOT NULL DEFAULT 7)", "[]"},
+		{"CREATE TABLE cz AS SELECT i, v, d, t, dt, dd, tm, ts, f, e, j, y, b, bi, iv, i+1 AS ie, 'ab' AS s, 1.5 AS dl, CURDATE() AS cd, LEAST(TIME'00:00:00.1', TIME'00:00:00.12') AS le FROM src", "[]"},
+		{"SHOW CREATE TABLE cz", "[cz,CREATE TABLE `cz` (\n  `i` int NOT NULL,\n  `v` varchar(5) NOT NULL,\n  `d` decimal(5,2) NOT NULL,\n  `t` text NOT NULL,\n  `dt` datetime NOT NULL,\n  `dd` date NOT NULL,\n  `tm` time(2) NOT NULL,\n  `ts` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `f` double NOT NULL,\n  `e` enum('x','y') NOT NULL,\n  `j` json NOT NULL,\n  `y` year NOT NULL,\n  `b` blob NOT NULL,\n  `bi` bit(2) NOT NULL,\n  `iv` int NOT NULL DEFAULT '7',\n  `ie` bigint NOT NULL DEFAULT '0',\n  `s` varchar(2) NOT NULL DEFAULT '',\n  `dl` decimal(2,1) NOT NULL DEFAULT '0.0',\n  `cd` date NOT NULL,\n  `le` time(2) NOT NULL DEFAULT '00:00:00.00'\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci]"},
+		{"CREATE TABLE cs2 AS SELECT '' AS e, 'ab' AS s, 'é' AS u, X'4142' AS x", "[]"},
+		{"SHOW CREATE TABLE cs2", "[cs2,CREATE TABLE `cs2` (\n  `e` char(0) NOT NULL DEFAULT '',\n  `s` varchar(2) NOT NULL DEFAULT '',\n  `u` varchar(1) NOT NULL DEFAULT '',\n  `x` varbinary(2) NOT NULL DEFAULT ''\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}

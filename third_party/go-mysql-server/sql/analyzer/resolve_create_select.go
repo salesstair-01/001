@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"github.com/dolthub/go-mysql-server/sql/types"
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
@@ -27,7 +28,9 @@ func resolveCreateSelect(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.
 	// statement. When the underlying select node is a table, we must remove all such info from its schema. The only
 	// exception is NOT NULL constraints, which we leave alone.
 	selectSchema := stripSchema(analyzedSelect.Schema())
-	selectColumnsNullable(analyzedSelect, selectSchema) // s2z patch
+	selectColumnsNullable(analyzedSelect, selectSchema)                         // s2z patch
+	selectLiteralTypes(analyzedSelect, selectSchema)                            // s2z patch
+	selectColumnDefaults(analyzedSelect, analyzedSelect.Schema(), selectSchema) // s2z patch
 	// s2z patch: without a table spec, the planner made one of the SELECT's
 	// schema, which wins the merge below: it takes the nullability found
 	// here
@@ -39,6 +42,12 @@ func resolveCreateSelect(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.
 		for i := range spec {
 			if same && selectSchema[i].Nullable {
 				spec[i].Nullable = true
+			}
+			if same && spec[i].Default == nil {
+				spec[i].Default = selectSchema[i].Default
+			}
+			if same && types.IsTextBlob(spec[i].Type) && !types.IsTextBlob(selectSchema[i].Type) {
+				spec[i].Type = selectSchema[i].Type
 			}
 		}
 	}

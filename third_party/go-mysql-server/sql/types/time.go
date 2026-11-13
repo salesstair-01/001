@@ -742,3 +742,17 @@ func (t TimespanType_) sign(us int64, neg bool) Timespan {
 	}
 	return Timespan(us)
 }
+
+// s2zString is the TIME with p fractional digits, as MySQL writes a TIME(p).
+// (s2z patch)
+func (t Timespan) s2zString(p int) string {
+	neg, h, m, sec, us := t.timespanToUnits()
+	out := fmt.Sprintf("%02d:%02d:%02d", h, m, sec)
+	if p > 0 {
+		out += "." + fmt.Sprintf("%06d", us)[:p]
+	}
+	if neg {
+		out = "-" + out
+	}
+	return out
+}

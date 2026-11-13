@@ -184,7 +184,7 @@ func TestSetTimestamp(t *testing.T) {
 	defer conn.Close()
 	for _, s := range []struct{ q, want string }{
 		{"SET TIMESTAMP = 1000000000", "[]"},
-		{"SELECT CURDATE(), UNIX_TIMESTAMP(), CURRENT_TIME()", "[2001-09-09,1000000000,01:46:40]"},
+		{"SELECT CURDATE(), UNIX_TIMESTAMP(), CURRENT_TIME()", "[2001-09-09T00:00:00Z,1000000000,01:46:40]"},
 		{"SET TIMESTAMP = 1000000000.5", "[]"},
 		{"SELECT UNIX_TIMESTAMP(NOW(6))", "[1000000000.500000]"},
 		{"SET TIMESTAMP = DEFAULT", "[]"},

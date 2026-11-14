@@ -152,6 +152,12 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 						cErr = types.ErrLengthBeyondLimit.New(row[idx], col.Name)
 					} else if sql.ErrNotMatchingSRID.Is(cErr) {
 						cErr = sql.ErrNotMatchingSRIDWithColName.New(col.Name, cErr)
+					} else if types.IsDecimal(col.Type) && types.ErrConvertToDecimalLimit.Is(cErr) {
+						// s2z patch: MySQL's error for a DECIMAL out of range
+						cErr = mysql.NewSQLError(1264, "22003", "Out of range value for column '%s' at row %d", col.Name, i.rowNum)
+					} else if types.IsTime(col.Type) && types.ErrConvertingToTimeOutOfRange.Is(cErr) {
+						// s2z patch: MySQL's error for a TIMESTAMP (DATETIME) out of range
+						cErr = mysql.NewSQLError(1292, "22007", "Incorrect datetime value: '%s' for column '%s' at row %d", s2zNumberText(row[idx]), col.Name, i.rowNum)
 					} else if types.IsTimespan(col.Type) && (sql.ErrValueOutOfRange.Is(cErr) || types.ErrConvertingToTimeType.Is(cErr)) {
 						// s2z patch: MySQL's error for a number that is no TIME
 						cErr = mysql.NewSQLError(1292, "22007", "Incorrect time value: '%s' for column '%s' at row %d", s2zNumberText(row[idx]), col.Name, i.rowNum)

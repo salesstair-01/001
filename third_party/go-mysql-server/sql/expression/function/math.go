@@ -16,12 +16,14 @@ package function
 
 import (
 	"fmt"
+	"github.com/dolthub/vitess/go/sqltypes"
 	"hash/crc32"
 	"math"
 	"math/rand"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -35,6 +37,29 @@ import (
 // generator, effectively turning it into a hash on that value.
 type Rand struct {
 	Child sql.Expression
+	s2z   *s2zRandState // s2z patch: MySQL's generator for a constant seed
+}
+
+// s2zRandState is MySQL's random generator (my_rnd), seeded once per
+// statement for a constant seed. (s2z patch)
+type s2zRandState struct {
+	mu           sync.Mutex
+	pid          uint64
+	at           time.Time
+	seed1, seed2 uint64
+}
+
+const s2zRandMax = 0x3FFFFFFF
+
+func s2zRandInit(seed int64) (uint64, uint64) {
+	t := uint64(uint32(seed))
+	return uint64(uint32(t*0x10001+55555555)) % s2zRandMax, uint64(uint32(t*0x10000001)) % s2zRandMax
+}
+
+func s2zRandNext(seed1, seed2 *uint64) float64 {
+	*seed1 = (*seed1*3 + *seed2) % s2zRandMax
+	*seed2 = (*seed1 + *seed2 + 33) % s2zRandMax
+	return float64(*seed1) / float64(s2zRandMax)
 }
 
 var _ sql.Expression = (*Rand)(nil)
@@ -48,7 +73,7 @@ func NewRand(exprs ...sql.Expression) (sql.Expression, error) {
 		return nil, sql.ErrInvalidArgumentNumber.New("rand", "0 or 1", len(exprs))
 	}
 	if len(exprs) > 0 {
-		return &Rand{Child: exprs[0]}, nil
+		return &Rand{Child: exprs[0], s2z: &s2zRandState{}}, nil
 	}
 	return &Rand{}, nil
 }
@@ -130,14 +155,27 @@ func (r *Rand) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	}
 
 	var seed int64
-	if types.IsNumber(r.Child.Type()) {
-		e, _, err = types.Int64.Convert(ctx, e)
-		if err == nil {
-			seed = e.(int64)
+	if e != nil {
+		// s2z patch: any value is its integer, as in MySQL
+		if v, _, err := types.Int64.Convert(ctx, e); err == nil {
+			seed = v.(int64)
 		}
 	}
 
-	return rand.New(rand.NewSource(seed)).Float64(), nil
+	// s2z patch: MySQL's generator; a constant seed starts it once per
+	// statement, another value reseeds it on each row
+	if _, constant := r.Child.(*expression.Literal); constant && r.s2z != nil {
+		st := r.s2z
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if st.pid != ctx.Pid() || !st.at.Equal(ctx.QueryTime()) {
+			st.pid, st.at = ctx.Pid(), ctx.QueryTime()
+			st.seed1, st.seed2 = s2zRandInit(seed)
+		}
+		return s2zRandNext(&st.seed1, &st.seed2), nil
+	}
+	s1, s2 := s2zRandInit(seed)
+	return s2zRandNext(&s1, &s2), nil
 }
 
 // Sin is the SIN function
@@ -905,7 +943,7 @@ func (p *Pi) String() string {
 
 // Type implements sql.Expression
 func (p *Pi) Type() sql.Type {
-	return types.Float64
+	return types.CreateFloatType(sqltypes.Float64, 8, 6, false) // s2z patch: MySQL's DOUBLE(8,6)
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

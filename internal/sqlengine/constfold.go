@@ -43,6 +43,18 @@ func constFold(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan.S
 		switch e := e.(type) {
 		case *expression.Equals, *expression.NullSafeEquals, *expression.GreaterThan, *expression.LessThan,
 			*expression.GreaterThanOrEqual, *expression.LessThanOrEqual:
+			if f := foldHexNumber(ctx, e.(expression.Comparer)); f != nil {
+				return f, transform.NewTree, nil
+			}
+			if f := foldStringNumber(ctx, e.(expression.Comparer)); f != nil {
+				if g := foldIntCompare(ctx, f); g != nil {
+					return g, transform.NewTree, nil
+				}
+				if g := foldDecimalCompare(ctx, f); g != nil {
+					return g, transform.NewTree, nil
+				}
+				return f, transform.NewTree, nil
+			}
 			if f := foldYearCompare(ctx, e.(expression.Comparer)); f != nil {
 				return f, transform.NewTree, nil
 			}
@@ -560,4 +572,93 @@ func exactConst(e sql.Expression) (*big.Rat, bool) {
 		v = new(big.Rat).Neg(v)
 	}
 	return v, true
+}
+
+// foldStringNumber is a number compared with a string constant that is not
+// a number, as MySQL folds it once: the string's numeric prefix ('1abc' is
+// 1, 'A' 0), with warning 1292 Truncated incorrect DOUBLE (DECIMAL) value;
+// nil if the comparison is not one. go-mysql-server took such a string as 0.
+func foldStringNumber(ctx *sql.Context, c expression.Comparer) expression.Comparer {
+	op := opOf(c)
+	other, lit := c.Left(), c.Right()
+	l, ok := lit.(*expression.Literal)
+	if !ok {
+		other, lit = c.Right(), c.Left()
+		if l, ok = lit.(*expression.Literal); !ok {
+			return nil
+		}
+		op = op.mirror()
+	}
+	str, isStr := l.Value().(string)
+	t := other.Type()
+	if !isStr || !types.IsText(l.Type()) || !types.IsNumber(t) || types.IsYear(t) || types.IsBit(t) {
+		return nil
+	}
+	if _, isLit := other.(*expression.Literal); isLit {
+		return nil
+	}
+	trimmed := strings.TrimSpace(str)
+	if trimmed == "" {
+		return nil // '' is 0 without a warning
+	}
+	if _, ok := new(big.Rat).SetString(trimmed); ok {
+		return nil // a number
+	}
+	var num sql.Expression
+	if types.IsDecimal(t) {
+		ctx.Warn(1292, "Truncated incorrect DECIMAL value: '%s'", str)
+		d, err := decimal.NewFromString(strings.TrimSpace(reFloatPrefix.FindString(str)))
+		if err != nil {
+			d = decimal.Zero
+		}
+		num = expression.NewLiteral(d, types.MustCreateDecimalType(65, uint8(min(30, max(0, -d.Exponent())))))
+	} else {
+		ctx.Warn(1292, "Truncated incorrect DOUBLE value: '%s'", str)
+		num = expression.NewLiteral(stringPrefixFloat(str), types.Float64)
+	}
+	r, ok := op.build(other, num).(expression.Comparer)
+	if !ok {
+		return nil
+	}
+	return r
+}
+
+// foldHexNumber is a number compared with a hexadecimal literal (0x100),
+// which MySQL takes as the unsigned number of its bytes, folded once: over
+// 8 bytes with warning 1292 Truncated incorrect BINARY value.
+func foldHexNumber(ctx *sql.Context, c expression.Comparer) sql.Expression {
+	op := opOf(c)
+	other, lit := c.Left(), c.Right()
+	l, ok := lit.(*expression.Literal)
+	if !ok || !l.HexNumber {
+		other, lit = c.Right(), c.Left()
+		if l, ok = lit.(*expression.Literal); !ok || !l.HexNumber {
+			return nil
+		}
+		op = op.mirror()
+	}
+	b, ok := l.Value().([]byte)
+	if _, isLit := other.(*expression.Literal); !ok || isLit || !types.IsNumber(other.Type()) {
+		return nil
+	}
+	if len(b) > 8 {
+		ctx.Warn(1292, "Truncated incorrect BINARY value: 'x'%x''", b)
+	}
+	n := new(big.Int).SetBytes(b)
+	var num sql.Expression
+	if n.IsUint64() {
+		num = expression.NewLiteral(n.Uint64(), types.Uint64)
+	} else {
+		num = expression.NewLiteral(decimal.NewFromBigInt(n, 0), types.MustCreateDecimalType(65, 0))
+	}
+	f := op.build(other, num)
+	if fc, ok := f.(expression.Comparer); ok {
+		if g := foldIntCompare(ctx, fc); g != nil {
+			return g
+		}
+		if g := foldDecimalCompare(ctx, fc); g != nil {
+			return g
+		}
+	}
+	return f
 }

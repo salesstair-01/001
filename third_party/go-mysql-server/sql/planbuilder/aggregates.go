@@ -234,6 +234,17 @@ func (b *Builder) buildAggregation(fromScope, projScope *scope, groupingCols []s
 					selectGfs = append(selectGfs, e)
 					selectStr[colName] = true
 				}
+			case *plan.Subquery:
+				// s2z patch: and the columns a subquery takes from the
+				// grouped rows (SELECT (SELECT t1.a) FROM t1 GROUP BY a)
+				for _, gf := range s2zOuterRefs(e.Query, fromScope) {
+					colName := strings.ToLower(gf.String())
+					if !selectStr[colName] {
+						selectExprs = append(selectExprs, gf)
+						selectGfs = append(selectGfs, gf)
+						selectStr[colName] = true
+					}
+				}
 			default:
 			}
 			return false
@@ -275,6 +286,18 @@ func isAggregateFunc(name string) bool {
 func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExpr) sql.Expression {
 	if name != "any_value" {
 		checkNestedAggregate(b, e.Exprs) // s2z patch
+	}
+	if outer := s2zAggOuterScope(inScope, e); outer != nil {
+		// s2z patch: an aggregate of only the outer query's columns is the
+		// outer query's (SELECT (SELECT SUM(t1.b)) FROM t1 GROUP BY a)
+		r := b.buildAggregateFunc(outer, name, e)
+		if gf, ok := r.(*expression.GetField); ok {
+			// the subquery is correlated with the outer group's value
+			for n := inScope; n != nil && n != outer; n = n.parent {
+				n.activeSubquery.addOutOfScope(columnId(gf.Id()))
+			}
+		}
+		return r
 	}
 	if len(inScope.windowFuncs) > 0 {
 		err := sql.ErrNonAggregatedColumnWithoutGroupBy.New()
@@ -443,6 +466,15 @@ func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExp
 
 func (b *Builder) buildGroupConcat(inScope *scope, e *ast.GroupConcatExpr) sql.Expression {
 	checkNestedAggregate(b, e.Exprs) // s2z patch
+	if outer := s2zAggOuterScopeOf(inScope, e.Exprs); outer != nil {
+		r := b.buildGroupConcat(outer, e) // s2z patch: the outer query's
+		if gf, ok := r.(*expression.GetField); ok {
+			for n := inScope; n != nil && n != outer; n = n.parent {
+				n.activeSubquery.addOutOfScope(columnId(gf.Id()))
+			}
+		}
+		return r
+	}
 	if inScope.groupBy == nil {
 		inScope.initGroupBy()
 	}
@@ -827,6 +859,9 @@ func (b *Builder) analyzeHaving(fromScope, projScope *scope, having *ast.Where) 
 				// references projection alias
 				break
 			}
+			if aerr := b.s2zAliasReference(colName); aerr != nil {
+				b.handleErr(aerr) // s2z patch: an enclosing query's alias
+			}
 			err := sql.ErrColumnNotFound.New(n.Name)
 			b.handleErr(err)
 		}
@@ -940,4 +975,115 @@ func (b *Builder) buildHaving(fromScope, projScope, outScope *scope, having *ast
 	h := b.buildScalar(havingScope, having.Expr)
 	outScope.node = plan.NewHaving(h, outScope.node)
 	return
+}
+
+// s2zOuterRefs is the columns of from's tables that the subquery query
+// refers to, in subqueries of it too. (s2z patch)
+func s2zOuterRefs(query sql.Node, from *scope) []*expression.GetField {
+	ids := map[sql.ColumnId]bool{}
+	for _, c := range from.cols {
+		ids[sql.ColumnId(c.id)] = true
+	}
+	var refs []*expression.GetField
+	var walk func(n sql.Node)
+	walk = func(n sql.Node) {
+		transform.InspectExpressions(n, func(e sql.Expression) bool {
+			switch e := e.(type) {
+			case *expression.GetField:
+				if ids[e.Id()] {
+					refs = append(refs, e)
+				}
+			case *plan.Subquery:
+				walk(e.Query)
+			}
+			return true
+		})
+	}
+	walk(query)
+	return refs
+}
+
+// s2zAggOuterScope is the outer query's scope when inScope is in a
+// subquery and every column e's arguments name is the outer query's, else
+// nil. (s2z patch)
+func s2zAggOuterScope(inScope *scope, e *ast.FuncExpr) *scope {
+	return s2zAggOuterScopeOf(inScope, e.Exprs)
+}
+
+func s2zAggOuterScopeOf(inScope *scope, exprs ast.SelectExprs) *scope {
+	var cols []*ast.ColName
+	for _, se := range exprs {
+		ae, ok := se.(*ast.AliasedExpr)
+		if !ok {
+			return nil
+		}
+		_ = ast.Walk(func(n ast.SQLNode) (bool, error) {
+			switch n := n.(type) {
+			case *ast.ColName:
+				cols = append(cols, n)
+			case *ast.Subquery:
+				return false, nil
+			}
+			return true, nil
+		}, ae.Expr)
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	// the nearest enclosing query whose own columns the arguments all are
+	resolves := func(n *scope, c *ast.ColName) bool {
+		_, ok := n.resolveColumn(c.Qualifier.DbQualifier.String(), c.Qualifier.Name.String(), c.Name.String(), false, false)
+		return ok
+	}
+	n := inScope
+	for {
+		// scopes of this query level, up to its subquery boundary
+		for ; n != nil && n.activeSubquery == nil; n = n.parent {
+			for _, c := range cols {
+				if resolves(n, c) {
+					if n == inScope || !s2zSameLevel(inScope, n) {
+						return s2zIfAll(n, cols, resolves, inScope)
+					}
+					return nil
+				}
+			}
+		}
+		if n == nil {
+			return nil
+		}
+		for _, c := range cols {
+			if resolves(n, c) { // the subquery scope itself
+				return s2zIfAll(n, cols, resolves, inScope)
+			}
+		}
+		n = n.parent
+	}
+}
+
+// s2zSameLevel is whether n is in inScope's query (no subquery boundary
+// between them).
+func s2zSameLevel(inScope, n *scope) bool {
+	for s := inScope; s != nil; s = s.parent {
+		if s == n {
+			return true
+		}
+		if s.activeSubquery != nil {
+			return false
+		}
+	}
+	return false
+}
+
+// s2zIfAll is n when it is outside inScope's query and every column
+// resolves in it.
+func s2zIfAll(n *scope, cols []*ast.ColName, resolves func(*scope, *ast.ColName) bool, inScope *scope) *scope {
+	if s2zSameLevel(inScope, n) {
+		return nil // the aggregate's own query
+	}
+	for _, c := range cols {
+		if !resolves(n, c) {
+			return nil
+		}
+	}
+	return n
 }

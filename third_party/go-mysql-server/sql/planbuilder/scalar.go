@@ -17,6 +17,7 @@ package planbuilder
 import (
 	"encoding/hex"
 	"fmt"
+	"github.com/dolthub/vitess/go/mysql"
 	"strconv"
 	"strings"
 
@@ -138,6 +139,8 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 				err = sql.ErrTableNotFound.New(tblName)
 			} else if tblName != "" {
 				err = sql.ErrTableColumnNotFound.New(tblName, colName)
+			} else if aerr := b.s2zAliasReference(colName); aerr != nil {
+				err = aerr // s2z patch
 			} else {
 				err = sql.ErrColumnNotFound.New(v)
 			}
@@ -1147,4 +1150,38 @@ func findMatchAgainstIndex(cols []*expression.GetField, indexes []sql.Index) ful
 		}
 	}
 	return found
+}
+
+// s2zAliasReference is MySQL's error 1247 for a name that is no column but
+// an alias of an enclosing SELECT list being built: an alias of an aggregate (used in
+// its GROUP BY, or a subquery), else a reference ahead of the alias; nil if
+// no alias has the name. (s2z patch)
+func (b *Builder) s2zAliasReference(name string) error {
+	for i := len(b.s2zSelects) - 2; i >= 0; i-- { // an enclosing query's
+		for _, se := range b.s2zSelects[i] {
+			ae, ok := se.(*ast.AliasedExpr)
+			if !ok || !strings.EqualFold(ae.As.String(), name) {
+				continue
+			}
+			agg := false
+			_ = ast.Walk(func(n ast.SQLNode) (bool, error) {
+				switch n := n.(type) {
+				case *ast.FuncExpr:
+					if isAggregateFunc(n.Name.Lowered()) && n.Over == nil {
+						agg = true
+					}
+				case *ast.GroupConcatExpr:
+					agg = true
+				case *ast.Subquery:
+					return false, nil
+				}
+				return !agg, nil
+			}, ae.Expr)
+			if agg {
+				return mysql.NewSQLError(1247, "42S22", "Reference '%s' not supported (reference to group function)", ae.As.String())
+			}
+			return mysql.NewSQLError(1247, "42S22", "Reference '%s' not supported (forward reference in item list)", ae.As.String())
+		}
+	}
+	return nil
 }

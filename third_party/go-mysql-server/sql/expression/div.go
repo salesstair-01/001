@@ -16,6 +16,7 @@ package expression
 
 import (
 	"fmt"
+	"github.com/dolthub/vitess/go/sqltypes"
 	"math"
 	"strconv"
 	"strings"
@@ -87,6 +88,25 @@ func (d *Div) Type() sql.Type {
 	// s2z patch: a temporal value divided is its number, a DECIMAL
 	if t := S2zTimeArithmeticType(sqlparser.DivStr, d.LeftChild.Type(), d.RightChild.Type()); t != nil {
 		return t
+	}
+	// s2z patch: a DOUBLE(M,D) divided keeps D + 4 decimals (PI()/3 is
+	// 1.0471975512), as MySQL
+	if dl, dr := types.FloatDecimals(d.LeftChild.Type()), types.FloatDecimals(d.RightChild.Type()); dl >= 0 || dr >= 0 {
+		dec := func(t sql.Type, n int) int {
+			switch {
+			case n >= 0:
+				return n
+			case types.IsInteger(t):
+				return 0
+			case types.IsDecimal(t):
+				return int(t.(sql.DecimalType).Scale())
+			}
+			return 31
+		}
+		if n := max(dec(d.LeftChild.Type(), dl), dec(d.RightChild.Type(), dr)) + 4; n < 31 {
+			return types.CreateFloatType(sqltypes.Float64, 22, n, false)
+		}
+		return types.Float64
 	}
 	return d.determineResultType(isOutermostDiv(d, 0, d.divOps))
 }
@@ -213,7 +233,9 @@ func (d *Div) div(ctx *sql.Context, lval, rval interface{}) (interface{}, error)
 		switch r := rval.(type) {
 		case float32:
 			if r == 0 {
-				arithmeticWarning(ctx, ERDivisionByZero, "Division by 0")
+				if err := s2zDivisionByZero(ctx); err != nil { // s2z patch
+					return nil, err
+				}
 				return nil, nil
 			}
 			return l / r, nil
@@ -222,7 +244,9 @@ func (d *Div) div(ctx *sql.Context, lval, rval interface{}) (interface{}, error)
 		switch r := rval.(type) {
 		case float64:
 			if r == 0 {
-				arithmeticWarning(ctx, ERDivisionByZero, "Division by 0")
+				if err := s2zDivisionByZero(ctx); err != nil { // s2z patch
+					return nil, err
+				}
 				return nil, nil
 			}
 			return l / r, nil
@@ -231,7 +255,9 @@ func (d *Div) div(ctx *sql.Context, lval, rval interface{}) (interface{}, error)
 		switch r := rval.(type) {
 		case decimal.Decimal:
 			if r.Equal(decimal.NewFromInt(0)) {
-				arithmeticWarning(ctx, ERDivisionByZero, "Division by 0")
+				if err := s2zDivisionByZero(ctx); err != nil { // s2z patch
+					return nil, err
+				}
 				return nil, nil
 			}
 
@@ -770,7 +796,9 @@ func intDiv(ctx *sql.Context, lval, rval interface{}) (interface{}, error) {
 		switch r := rval.(type) {
 		case uint64:
 			if r == 0 {
-				arithmeticWarning(ctx, ERDivisionByZero, "Division by 0")
+				if err := s2zDivisionByZero(ctx); err != nil { // s2z patch
+					return nil, err
+				}
 				return nil, nil
 			}
 			return l / r, nil
@@ -779,7 +807,9 @@ func intDiv(ctx *sql.Context, lval, rval interface{}) (interface{}, error) {
 		switch r := rval.(type) {
 		case int64:
 			if r == 0 {
-				arithmeticWarning(ctx, ERDivisionByZero, "Division by 0")
+				if err := s2zDivisionByZero(ctx); err != nil { // s2z patch
+					return nil, err
+				}
 				return nil, nil
 			}
 			return l / r, nil
@@ -788,7 +818,9 @@ func intDiv(ctx *sql.Context, lval, rval interface{}) (interface{}, error) {
 		switch r := rval.(type) {
 		case float64:
 			if r == 0 {
-				arithmeticWarning(ctx, ERDivisionByZero, "Division by 0")
+				if err := s2zDivisionByZero(ctx); err != nil { // s2z patch
+					return nil, err
+				}
 				return nil, nil
 			}
 			res := l / r
@@ -798,7 +830,9 @@ func intDiv(ctx *sql.Context, lval, rval interface{}) (interface{}, error) {
 		switch r := rval.(type) {
 		case decimal.Decimal:
 			if r.Equal(decimal.NewFromInt(0)) {
-				arithmeticWarning(ctx, ERDivisionByZero, "Division by 0")
+				if err := s2zDivisionByZero(ctx); err != nil { // s2z patch
+					return nil, err
+				}
 				return nil, nil
 			}
 

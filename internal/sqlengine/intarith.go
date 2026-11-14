@@ -199,7 +199,7 @@ func (c *intCast) Eval(ctx *sql.Context, row sql.Row) (any, error) {
 	case []byte:
 		return stringToInt(ctx, string(x), c.signed), nil
 	}
-	return c.Convert.Eval(ctx, row)
+	return c.Convert.S2zEvalValue(ctx, v)
 }
 
 func (c *intCast) WithChildren(children ...sql.Expression) (sql.Expression, error) {

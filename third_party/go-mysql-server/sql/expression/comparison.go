@@ -16,6 +16,8 @@ package expression
 
 import (
 	"fmt"
+	"github.com/shopspring/decimal"
+	"math/big"
 
 	errors "gopkg.in/src-d/go-errors.v1"
 
@@ -222,6 +224,22 @@ func (c *comparison) castLeftAndRight(ctx *sql.Context, left, right interface{})
 		return left, right, types.JSON, nil
 	}
 
+	// s2z patch: a hexadecimal literal compared with a number is a number
+	if hl, hr := s2zHexNumber(c.Left()), s2zHexNumber(c.Right()); (hl && types.IsNumber(rightType)) || (hr && types.IsNumber(leftType)) {
+		if hl {
+			left = s2zBytesNumber(ctx, left)
+		}
+		if hr {
+			right = s2zBytesNumber(ctx, right)
+		}
+		if types.IsFloat(leftType) || types.IsFloat(rightType) {
+			l, r, err := convertLeftAndRight(ctx, left, right, ConvertToDouble)
+			return l, r, types.Float64, err
+		}
+		l, r, err := convertLeftAndRight(ctx, left, right, ConvertToDecimal)
+		return l, r, types.InternalDecimalType, err
+	}
+
 	if types.IsBinaryType(leftType) || types.IsBinaryType(rightType) {
 		l, r, err := convertLeftAndRight(ctx, left, right, ConvertToBinary)
 		if err != nil {
@@ -231,18 +249,15 @@ func (c *comparison) castLeftAndRight(ctx *sql.Context, left, right interface{})
 	}
 
 	if types.IsNumber(leftType) || types.IsNumber(rightType) {
-		if types.IsDecimal(leftType) || types.IsDecimal(rightType) {
-			//TODO: We need to set to the actual DECIMAL type
+		if (types.IsDecimal(leftType) || types.IsDecimal(rightType)) && !types.IsFloat(leftType) && !types.IsFloat(rightType) {
+			// s2z patch: compared exactly (the column's DECIMAL type rounded
+			// the other value to its scale: 10.3 = 10.31); with a float, as
+			// DOUBLEs (below), as in MySQL
 			l, r, err := convertLeftAndRight(ctx, left, right, ConvertToDecimal)
 			if err != nil {
 				return nil, nil, nil, err
 			}
-
-			if types.IsDecimal(leftType) {
-				return l, r, leftType, nil
-			} else {
-				return l, r, rightType, nil
-			}
+			return l, r, types.InternalDecimalType, nil
 		}
 
 		if types.IsFloat(leftType) || types.IsFloat(rightType) {
@@ -289,6 +304,7 @@ func (c *comparison) castLeftAndRight(ctx *sql.Context, left, right interface{})
 }
 
 func convertLeftAndRight(ctx *sql.Context, left, right interface{}, convertTo string) (interface{}, interface{}, error) {
+	left, right = s2zNumericString(ctx, left, convertTo), s2zNumericString(ctx, right, convertTo)
 	l, err := convertValue(ctx, left, convertTo, nil, 0, 0)
 	if err != nil {
 		return nil, nil, err
@@ -688,3 +704,41 @@ var (
 	// operand in an IN operator.
 	ErrUnsupportedInOperand = errors.NewKind("right operand in IN operation must be tuple, but is %T")
 )
+
+// s2zNumericString is v, compared as a DOUBLE or DECIMAL: a string that is
+// not wholly a number is its numeric prefix, with MySQL's warning (it was 0).
+// (s2z patch)
+func s2zNumericString(ctx *sql.Context, v interface{}, convertTo string) interface{} {
+	str, ok := v.(string)
+	if !ok || (convertTo != ConvertToDouble && convertTo != ConvertToDecimal) {
+		return v
+	}
+	p, truncated := types.S2zNumberPrefix(str)
+	if !truncated {
+		return v
+	}
+	kind := "DOUBLE"
+	if convertTo == ConvertToDecimal {
+		kind = "DECIMAL"
+	}
+	ctx.Warn(1292, "Truncated incorrect %s value: '%s'", kind, str)
+	return p
+}
+
+// s2zHexNumber is whether e is a hexadecimal or bit literal written without
+// an introducer, which MySQL takes as a number in a numeric context.
+// (s2z patch)
+func s2zHexNumber(e sql.Expression) bool {
+	l, ok := e.(*Literal)
+	return ok && l.HexNumber
+}
+
+// s2zBytesNumber is a binary string as the unsigned number of its bytes.
+func s2zBytesNumber(ctx *sql.Context, v interface{}) interface{} {
+	b, ok := v.([]byte)
+	if !ok {
+		return v
+	}
+
+	return decimal.NewFromBigInt(new(big.Int).SetBytes(b), 0)
+}

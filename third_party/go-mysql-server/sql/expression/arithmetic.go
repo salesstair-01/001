@@ -459,6 +459,11 @@ func convertValueToType(ctx *sql.Context, typ sql.Type, val interface{}, isTimeT
 		val = convertTimeTypeToString(val)
 	}
 
+	if types.FloatDecimals(typ) >= 0 {
+		// s2z patch: DOUBLE(M,D) shows D decimals, but an operand is not
+		// rounded to them (PI()*2 is 6.283185, not 2 * 3.141593)
+		typ = types.Float64
+	}
 	cval, _, err := typ.Convert(ctx, val)
 	if err != nil {
 		arithmeticWarning(ctx, mysql.ERTruncatedWrongValue, fmt.Sprintf("Truncated incorrect %s value: '%v'", truncatedTypeName(typ), val)) // s2z patch
@@ -1094,3 +1099,29 @@ func s2zIntervalType(a *Arithmetic) sql.Type {
 	}
 	return nil
 }
+
+var s2zDataChange = regexp.MustCompile(`(?is)^(\s+|/\*.*?\*/|(#|-- )[^\n]*\n)*(insert|update|delete|replace)\b`)
+
+// s2zDivisionByZero is MySQL's handling of a division by zero: nothing
+// without ERROR_FOR_DIVISION_BY_ZERO, else warning 1365, or error 1365 in
+// a statement that changes rows in strict mode. (s2z patch)
+func s2zDivisionByZero(ctx *sql.Context) error {
+	if ctx == nil || ctx.Session == nil {
+		return nil
+	}
+	mode := sql.LoadSqlMode(ctx)
+	if !mode.ModeEnabled("ERROR_FOR_DIVISION_BY_ZERO") {
+		return nil
+	}
+	strict := mode.ModeEnabled("STRICT_TRANS_TABLES") || mode.ModeEnabled("STRICT_ALL_TABLES")
+	if strict && s2zDataChange.MatchString(ctx.Query()) && !s2zIgnoring(ctx.Query()) {
+		return mysql.NewSQLError(ERDivisionByZero, "22012", "Division by 0")
+	}
+	arithmeticWarning(ctx, ERDivisionByZero, "Division by 0")
+	return nil
+}
+
+var s2zIgnoreRe = regexp.MustCompile(`(?is)^(\s+|/\*.*?\*/|(#|-- )[^\n]*\n)*(insert|update|delete|replace)\s+((low_priority|delayed|high_priority|quick)\s+)*ignore\b`)
+
+// s2zIgnoring is whether the statement is INSERT / UPDATE / DELETE IGNORE.
+func s2zIgnoring(q string) bool { return s2zIgnoreRe.MatchString(q) }

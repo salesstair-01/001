@@ -28,6 +28,10 @@ func ddlErrors(ctx *sql.Context, st sqlparser.Statement) error {
 	if err := requirePrimaryKey(ctx, st, ddls); err != nil {
 		return err
 	}
+	if _, alter := st.(*sqlparser.AlterTable); alter && reInplace.MatchString(ctx.Query()) && addsEnforcedCheck(ddls) {
+		// an enforced CHECK is checked against the rows: a table copy
+		return mysql.NewSQLError(1845, "0A000", "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.")
+	}
 	mode := sql.LoadSqlMode(ctx)
 	strict := mode.ModeEnabled("STRICT_TRANS_TABLES") || mode.ModeEnabled("STRICT_ALL_TABLES") || mode.ModeEnabled("TRADITIONAL")
 	noZeroDate := strict && (mode.ModeEnabled("NO_ZERO_DATE") || mode.ModeEnabled("TRADITIONAL"))
@@ -363,4 +367,36 @@ func truthy(v any) bool {
 		return strings.EqualFold(x, "on") || x == "1"
 	}
 	return fmt.Sprint(v) == "1"
+}
+
+var reInplace = regexp.MustCompile(`(?i)\balgorithm\s*=?\s*inplace\b`)
+
+// addsEnforcedCheck is whether an ALTER TABLE adds an enforced CHECK
+// constraint, alone or on a new column.
+func addsEnforcedCheck(ddls []*sqlparser.DDL) bool {
+	enforced := func(c *sqlparser.ConstraintDefinition) bool {
+		if c == nil {
+			return false
+		}
+		ch, ok := c.Details.(*sqlparser.CheckConstraintDefinition)
+		return ok && ch.Enforced
+	}
+	for _, d := range ddls {
+		if d == nil || d.TableSpec == nil {
+			continue
+		}
+		if d.ConstraintAction == sqlparser.AddStr {
+			for _, c := range d.TableSpec.Constraints {
+				if enforced(c) {
+					return true
+				}
+			}
+		}
+		for _, c := range d.TableSpec.Columns {
+			if enforced(c.Type.Constraint) {
+				return true
+			}
+		}
+	}
+	return false
 }

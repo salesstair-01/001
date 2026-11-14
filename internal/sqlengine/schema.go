@@ -718,12 +718,107 @@ func (s *Store) noteWrites(t *TableInfo, n int) {
 
 // statsProvider wraps go-mysql-server's in-memory statistics so that ANALYZE
 // TABLE also stores the row count in system table 2.
+//
+// It also remembers the shape (columns and indexes) of each table it
+// analyzed and ignores statistics of a table whose shape changed: a table
+// dropped and created again under the same name kept the old one's
+// histograms, and planning with an index they named failed (the expression
+// `t1.b` could not be found from the index `a`). go-mysql-server's map has
+// no lock, so calls are serialized.
 type statsProvider struct {
 	sql.StatsProvider
+	mu     sync.Mutex
+	shapes map[string]string
+}
+
+func statsKey(db string, table sql.Table) string {
+	return strings.ToLower(db) + "." + strings.ToLower(table.Name())
+}
+
+// tableShape is a table's columns and indexes.
+func tableShape(ctx *sql.Context, table sql.Table) string {
+	var b strings.Builder
+	for _, c := range table.Schema() {
+		fmt.Fprintf(&b, "%s %s;", c.Name, c.Type)
+	}
+	if ia, ok := sql.GetUnderlyingTable(table).(sql.IndexAddressable); ok {
+		if idxs, err := ia.GetIndexes(ctx); err == nil {
+			for _, i := range idxs {
+				fmt.Fprintf(&b, "|%s(%s)", i.ID(), strings.Join(i.Expressions(), ","))
+			}
+		}
+	}
+	return b.String()
+}
+
+// current is whether table's statistics are of its present shape.
+func (p *statsProvider) current(ctx *sql.Context, db string, table sql.Table) bool {
+	shape, ok := p.shapes[statsKey(db, table)]
+	return ok && shape == tableShape(ctx, table)
+}
+
+func (p *statsProvider) GetTableStats(ctx *sql.Context, db string, table sql.Table) ([]sql.Statistic, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.current(ctx, db, table) {
+		return nil, nil
+	}
+	return p.StatsProvider.GetTableStats(ctx, db, table)
+}
+
+func (p *statsProvider) RowCount(ctx *sql.Context, db string, table sql.Table) (uint64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.current(ctx, db, table) {
+		return 0, nil
+	}
+	return p.StatsProvider.RowCount(ctx, db, table)
+}
+
+func (p *statsProvider) DataLength(ctx *sql.Context, db string, table sql.Table) (uint64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.current(ctx, db, table) {
+		return 0, nil
+	}
+	return p.StatsProvider.DataLength(ctx, db, table)
+}
+
+func (p *statsProvider) GetStats(ctx *sql.Context, qual sql.StatQualifier, cols []string) (sql.Statistic, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.StatsProvider.GetStats(ctx, qual, cols)
+}
+
+func (p *statsProvider) SetStats(ctx *sql.Context, stats sql.Statistic) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.StatsProvider.SetStats(ctx, stats)
+}
+
+func (p *statsProvider) DropStats(ctx *sql.Context, qual sql.StatQualifier, cols []string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.StatsProvider.DropStats(ctx, qual, cols)
+}
+
+func (p *statsProvider) DropDbStats(ctx *sql.Context, db string, flush bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.StatsProvider.DropDbStats(ctx, db, flush)
 }
 
 func (p *statsProvider) AnalyzeTable(ctx *sql.Context, table sql.Table, db string) error {
-	if err := p.histograms(ctx, table, db); err != nil {
+	p.mu.Lock()
+	err := p.histograms(ctx, table, db)
+	if err == nil {
+		if p.shapes == nil {
+			p.shapes = map[string]string{}
+		}
+		p.shapes[statsKey(db, table)] = tableShape(ctx, table)
+	}
+	p.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	if t, ok := sql.GetUnderlyingTable(table).(*Table); ok {

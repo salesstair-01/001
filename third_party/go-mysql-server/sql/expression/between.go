@@ -71,7 +71,16 @@ func (b *Between) Resolved() bool {
 func (b *Between) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	// TODO: Delete Between expression entirely?
 	// Reuse type conversion logic in comparison expressions by creating a logically equivalent expression
-	return NewAnd(NewLessThanOrEqual(b.Lower, b.Val), NewGreaterThanOrEqual(b.Upper, b.Val)).Eval(ctx, row)
+	// s2z patch: both bounds are compared, as in MySQL (their warnings too)
+	lo, err := NewLessThanOrEqual(b.Lower, b.Val).Eval(ctx, row)
+	if err != nil {
+		return nil, err
+	}
+	hi, err := NewGreaterThanOrEqual(b.Upper, b.Val).Eval(ctx, row)
+	if err != nil {
+		return nil, err
+	}
+	return NewAnd(NewLiteral(lo, types.Boolean), NewLiteral(hi, types.Boolean)).Eval(ctx, row)
 }
 
 // WithChildren implements the Expression interface.

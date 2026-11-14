@@ -166,7 +166,9 @@ func mod(ctx *sql.Context, lval, rval interface{}) (interface{}, error) {
 		switch r := rval.(type) {
 		case float32:
 			if r == 0 {
-				arithmeticWarning(ctx, ERDivisionByZero, "Division by 0")
+				if err := s2zDivisionByZero(ctx); err != nil { // s2z patch
+					return nil, err
+				}
 				return nil, nil
 			}
 			return math.Mod(float64(l), float64(r)), nil
@@ -176,7 +178,9 @@ func mod(ctx *sql.Context, lval, rval interface{}) (interface{}, error) {
 		switch r := rval.(type) {
 		case float64:
 			if r == 0 {
-				arithmeticWarning(ctx, ERDivisionByZero, "Division by 0")
+				if err := s2zDivisionByZero(ctx); err != nil { // s2z patch
+					return nil, err
+				}
 				return nil, nil
 			}
 			return math.Mod(l, r), nil
@@ -185,7 +189,9 @@ func mod(ctx *sql.Context, lval, rval interface{}) (interface{}, error) {
 		switch r := rval.(type) {
 		case decimal.Decimal:
 			if r.Equal(decimal.NewFromInt(0)) {
-				arithmeticWarning(ctx, ERDivisionByZero, "Division by 0")
+				if err := s2zDivisionByZero(ctx); err != nil { // s2z patch
+					return nil, err
+				}
 				return nil, nil
 			}
 

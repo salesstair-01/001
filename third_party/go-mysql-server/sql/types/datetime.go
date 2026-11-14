@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -215,7 +216,8 @@ func ConvertToTime(ctx context.Context, v interface{}, t datetimeType) (time.Tim
 			return time.Time{}, ErrConvertingToTimeOutOfRange.New(res.Format(sql.TimestampDatetimeLayout), t.String())
 		}
 	case sqltypes.Timestamp:
-		if res.Before(datetimeTypeMinTimestamp) || res.After(datetimeTypeMaxTimestamp) {
+		// s2z patch: the range is UTC's, the value the session time zone's
+		if utc := res.Add(-s2zSessionOffset(ctx, res)); utc.Before(datetimeTypeMinTimestamp) || utc.After(datetimeTypeMaxTimestamp) {
 			return time.Time{}, ErrConvertingToTimeOutOfRange.New(res.Format(sql.TimestampDatetimeLayout), t.String())
 		}
 	}
@@ -488,4 +490,43 @@ func ValidateTime(t time.Time) interface{} {
 func isZeroDatetime(s string) bool {
 	rest, ok := strings.CutPrefix(s, ZeroTimestampDatetimeStr+".")
 	return ok && strings.Trim(rest, "0") == ""
+}
+
+// s2zSessionOffset is the session time zone's offset from UTC at local
+// time t (0 for SYSTEM, which is UTC here). (s2z patch)
+func s2zSessionOffset(ctx context.Context, t time.Time) time.Duration {
+	sc, ok := ctx.(*sql.Context)
+	if !ok || sc == nil || sc.Session == nil {
+		return 0
+	}
+	v, err := sc.GetSessionVariable(sc, "time_zone")
+	if err != nil {
+		return 0
+	}
+	tz, _ := v.(string)
+	switch {
+	case tz == "" || strings.EqualFold(tz, "SYSTEM"):
+		return 0
+	case tz[0] == '+' || tz[0] == '-':
+		h, m, ok := strings.Cut(tz[1:], ":")
+		if !ok {
+			return 0
+		}
+		hh, err1 := strconv.Atoi(h)
+		mm, err2 := strconv.Atoi(m)
+		if err1 != nil || err2 != nil {
+			return 0
+		}
+		d := time.Duration(hh)*time.Hour + time.Duration(mm)*time.Minute
+		if tz[0] == '-' {
+			d = -d
+		}
+		return d
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return 0
+	}
+	_, off := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, loc).Zone()
+	return time.Duration(off) * time.Second
 }

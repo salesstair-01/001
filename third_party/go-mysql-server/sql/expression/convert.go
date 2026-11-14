@@ -262,7 +262,14 @@ func (c *Convert) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+	return c.S2zEvalValue(ctx, val)
+}
 
+// S2zEvalValue is Eval of the child's value val, for a wrapper that has
+// evaluated the child already (evaluating it again draws RAND() twice).
+// (s2z patch)
+func (c *Convert) S2zEvalValue(ctx *sql.Context, val interface{}) (interface{}, error) {
+	var err error
 	if val == nil {
 		return nil, nil
 	}

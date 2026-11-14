@@ -378,6 +378,16 @@ func convertOrTruncate(ctx *sql.Context, i interface{}, t sql.Type) (interface{}
 		ctx.Session.Warn(&warning)
 	}
 
+	// s2z patch: a string is its numeric prefix ('1x' is 1)
+	if str, ok := i.(string); ok && types.IsNumber(t) {
+		if p, _ := types.S2zNumberPrefix(str); p != "0" {
+			if f, err := strconv.ParseFloat(p, 64); err == nil {
+				if c, _, err := t.Convert(ctx, f); err == nil {
+					return c, nil
+				}
+			}
+		}
+	}
 	return t.Zero(), nil
 }
 

@@ -2,6 +2,8 @@ package sqlengine
 
 import (
 	"fmt"
+	"github.com/dolthub/vitess/go/mysql"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -51,15 +53,37 @@ func numDatetime(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan
 			*expression.GreaterThanOrEqual, *expression.LessThanOrEqual:
 			c := e.(expression.Comparer)
 			l, r := c.Left(), c.Right()
-			if _, ok := l.(*expression.GetField); ok && types.IsTime(l.Type()) {
+			if gf, ok := l.(*expression.GetField); ok && types.IsTime(l.Type()) {
 				if lit := datetimeLiteral(r); lit != nil {
 					ne, err := e.WithChildren(l, lit)
 					return ne, transform.NewTree, err
 				}
+				if n := numberNotDatetime(ctx, gf, r); n != nil {
+					ne, err := e.WithChildren(n, r)
+					return ne, transform.NewTree, err
+				}
+				if n, lit, err := invalidDateLiteral(ctx, gf, r); err != nil || n != nil {
+					if err != nil {
+						return nil, transform.SameTree, err
+					}
+					ne, err := e.WithChildren(n, lit)
+					return ne, transform.NewTree, err
+				}
 			}
-			if _, ok := r.(*expression.GetField); ok && types.IsTime(r.Type()) {
+			if gf, ok := r.(*expression.GetField); ok && types.IsTime(r.Type()) {
 				if lit := datetimeLiteral(l); lit != nil {
 					ne, err := e.WithChildren(lit, r)
+					return ne, transform.NewTree, err
+				}
+				if n := numberNotDatetime(ctx, gf, l); n != nil {
+					ne, err := e.WithChildren(l, n)
+					return ne, transform.NewTree, err
+				}
+				if n, lit, err := invalidDateLiteral(ctx, gf, l); err != nil || n != nil {
+					if err != nil {
+						return nil, transform.SameTree, err
+					}
+					ne, err := e.WithChildren(lit, n)
 					return ne, transform.NewTree, err
 				}
 			}
@@ -250,6 +274,14 @@ func datetimeLiteral(e sql.Expression) sql.Expression {
 	}
 	var digits, frac string
 	switch v := lit.Value().(type) {
+	case float64:
+		if v < 0 || v >= 1e15 {
+			return nil
+		}
+		digits, frac, _ = strings.Cut(strconv.FormatFloat(v, 'f', -1, 64), ".")
+		if len(frac) > 6 {
+			frac = frac[:6]
+		}
 	case int8, int16, int32, int64, uint8, uint16, uint32, uint64:
 		digits = fmt.Sprint(v)
 	case decimal.Decimal:
@@ -349,4 +381,78 @@ func formatDigits(d, frac string) sql.Expression {
 		out += "." + frac
 	}
 	return expression.NewLiteral(out, types.LongText)
+}
+
+// numberNotDatetime is col as a number, when col (a DATE, DATETIME or
+// TIMESTAMP) is compared with a number that is no date: MySQL compares them
+// as numbers, with warning 1292 Incorrect datetime value; nil otherwise.
+func numberNotDatetime(ctx *sql.Context, col *expression.GetField, e sql.Expression) sql.Expression {
+	lit, ok := e.(*expression.Literal)
+	if !ok || lit.Value() == nil || !types.IsNumber(lit.Type()) {
+		return nil
+	}
+	var text string
+	zero := false
+	switch v := lit.Value().(type) {
+	case float64:
+		zero, text = v == 0, types.MySQLFloatString(v, false)
+	case decimal.Decimal:
+		zero, text = v.IsZero(), v.String()
+	default:
+		n, err := fnInt64(ctx, v)
+		if err != nil {
+			return nil
+		}
+		zero, text = n == 0, fmt.Sprint(v)
+	}
+	if !zero { // 0 is the zero date, without a warning
+		ctx.Warn(1292, "Incorrect datetime value: '%s' for column '%s' at row 1", text, col.Name())
+	}
+	return expression.NewArithmetic(col, expression.NewLiteral(int8(0), types.Int8), "+")
+}
+
+var reDateParts = regexp.MustCompile(`^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{1,2}):(\d{1,2})(\.\d{1,6})?)?\s*$`)
+
+// invalidDateLiteral handles col compared with a date string that is no
+// valid date ('2018-02-31', '2018-00-03'): with ALLOW_INVALID_DATES (a month
+// up to 12, a day up to 31) MySQL compares it as the number
+// YYYYMMDDhhmmss.f, returned as col+0 and that number; otherwise it is
+// warning 1292 and error 1525. All nil for any other string.
+func invalidDateLiteral(ctx *sql.Context, col *expression.GetField, e sql.Expression) (sql.Expression, sql.Expression, error) {
+	lit, ok := e.(*expression.Literal)
+	if !ok {
+		return nil, nil, nil
+	}
+	str, ok := lit.Value().(string)
+	if !ok {
+		return nil, nil, nil
+	}
+	m := reDateParts.FindStringSubmatch(str)
+	if m == nil {
+		return nil, nil, nil
+	}
+	if _, _, err := types.DatetimeMaxPrecision.Convert(ctx, str); err == nil {
+		return nil, nil, nil // a date
+	}
+	n := func(i int) int { v, _ := strconv.Atoi(m[i]); return v }
+	isDate := types.IsDateType(col.Type())
+	kind := "datetime"
+	if isDate {
+		kind = "date"
+	}
+	allow := sql.LoadSqlMode(ctx).ModeEnabled("ALLOW_INVALID_DATES")
+	if !allow || n(2) > 12 || n(3) > 31 || (m[4] != "" && (n(4) > 23 || n(5) > 59 || n(6) > 59)) {
+		ctx.Warn(1292, "Incorrect %s value: '%s' for column '%s' at row 1", kind, str, col.Name())
+		return nil, nil, mysql.NewSQLError(1525, "HY000", "Incorrect %s value: '%s'", strings.ToUpper(kind), str)
+	}
+	num := fmt.Sprintf("%04d%02d%02d", n(1), n(2), n(3))
+	if !isDate {
+		num += fmt.Sprintf("%02d%02d%02d%s", n(4), n(5), n(6), m[7])
+	}
+	d, err := decimal.NewFromString(num)
+	if err != nil {
+		return nil, nil, nil
+	}
+	return expression.NewArithmetic(col, expression.NewLiteral(int8(0), types.Int8), "+"),
+		expression.NewLiteral(d, types.MustCreateDecimalType(65, uint8(max(0, -d.Exponent())))), nil
 }

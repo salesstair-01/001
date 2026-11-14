@@ -27,6 +27,7 @@ var errCodes = []struct {
 }{
 	{regexp.MustCompile(`^syntax error at position`), 1064, "42000"},
 	{regexp.MustCompile(`^Identifier name '.*' is too long$`), 1059, "42000"},
+	{regexp.MustCompile(`^Out of range value for column of Decimal type`), 1264, "22003"},
 	{regexp.MustCompile(`could not be found in any table in scope`), 1054, "42S22"},
 	{regexp.MustCompile(`^table with name \S+ already exists`), 1050, "42S01"},
 	{regexp.MustCompile(`^no database selected`), 1046, "3D000"},
@@ -56,6 +57,10 @@ var errCodes = []struct {
 
 // reMissingFunction is DropStoredProcedure's error for a stored function
 // (routines.go).
+// reCheckDependency is go-mysql-server's error for dropping or renaming a
+// column a CHECK constraint uses (MySQL: 3959).
+var reCheckDependency = regexp.MustCompile(`^can't alter column "(.*)" because it would invalidate check constraint "(.*)"`)
+
 var reMissingFunction = regexp.MustCompile(`^stored procedure "s2z_fn_(.*)" does not exist`)
 
 var (
@@ -75,6 +80,9 @@ func withMySQLCode(err error) error {
 	msg := err.Error()
 	if se != nil {
 		msg = se.Message
+	}
+	if m := reCheckDependency.FindStringSubmatch(msg); m != nil {
+		return mysql.NewSQLError(3959, "HY000", "Check constraint '%s' uses column '%s', hence column cannot be dropped or renamed.", m[2], m[1])
 	}
 	if m := reMissingFunction.FindStringSubmatch(msg); m != nil {
 		return mysql.NewSQLError(1305, "42000", "FUNCTION %s does not exist", m[1])

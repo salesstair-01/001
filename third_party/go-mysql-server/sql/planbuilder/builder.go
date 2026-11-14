@@ -33,6 +33,7 @@ var BinderFactory = &sync.Pool{New: func() interface{} {
 }}
 
 type Builder struct {
+	s2zSelects      []ast.SelectExprs // s2z patch: the SELECT lists being built, innermost last
 	ctx             *sql.Context
 	cat             sql.Catalog
 	parserOpts      ast.ParserOptions

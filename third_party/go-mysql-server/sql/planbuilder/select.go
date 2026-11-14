@@ -59,6 +59,8 @@ func (b *Builder) buildSelect(inScope *scope, s *ast.Select) (outScope *scope) {
 	// 5) Build top-level scopes, replacing aggregation and aliases with
 	//    projections from (4).
 	// 6) Finish with final target projections.
+	b.s2zSelects = append(b.s2zSelects, s.SelectExprs) // s2z patch (s2zAliasReference)
+	defer func() { b.s2zSelects = b.s2zSelects[:len(b.s2zSelects)-1] }()
 	if err := rollup(s); err != nil { // s2z patch: GROUP BY ... WITH ROLLUP (s2z_rollup.go)
 		b.handleErr(err)
 	}

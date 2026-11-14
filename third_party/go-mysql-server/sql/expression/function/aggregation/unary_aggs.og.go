@@ -109,7 +109,7 @@ func NewAvg(e sql.Expression) *Avg {
 }
 
 func (a *Avg) Type() sql.Type {
-	return a.Child.Type()
+	return avgType(a.Child) // s2z patch: MySQL's
 }
 
 func (a *Avg) IsNullable() bool {
@@ -899,7 +899,7 @@ func NewSum(e sql.Expression) *Sum {
 }
 
 func (a *Sum) Type() sql.Type {
-	return a.Child.Type()
+	return sumType(a.Child) // s2z patch: MySQL's
 }
 
 func (a *Sum) IsNullable() bool {

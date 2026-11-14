@@ -1871,6 +1871,22 @@ func TypedString(t sql.Type, v interface{}) (string, bool) {
 		}
 		return "", false
 	}
+	if IsDateType(t) {
+		if tm, ok := v.(time.Time); ok {
+			return tm.Format("2006-01-02"), true
+		}
+		return "", false
+	}
+	if dt, ok := t.(sql.DatetimeType); ok && !IsDateType(t) {
+		if tm, ok := v.(time.Time); ok {
+			s := tm.Format("2006-01-02 15:04:05") // DATETIME(2): ....00.00
+			if p := dt.Precision(); p > 0 {
+				s += fmt.Sprintf(".%06d", tm.Nanosecond()/1000)[:p+1]
+			}
+			return s, true
+		}
+		return "", false
+	}
 	if IsYear(t) {
 		if n, ok := v.(int16); ok {
 			return fmt.Sprintf("%04d", n), true

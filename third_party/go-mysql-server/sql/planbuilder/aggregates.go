@@ -420,10 +420,7 @@ func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExp
 		b.qFlags.Set(sql.QFlagCount)
 	}
 
-	aggType := agg.Type()
-	if name == "avg" || name == "sum" {
-		aggType = types.Float64
-	}
+	aggType := agg.Type() // s2z patch: SUM and AVG have MySQL's (they were DOUBLE)
 
 	aggName := strings.ToLower(plan.AliasSubqueryString(agg))
 	if id, ok := gb.outScope.getExpr(aggName, true); ok {

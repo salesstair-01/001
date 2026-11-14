@@ -489,7 +489,7 @@ var (
 	ErrDuplicateColumn = errors.NewKind("duplicate column name: `%s`")
 
 	// ErrInvalidIdentifier is returned when an identifier is invalid
-	ErrInvalidIdentifier = errors.NewKind("invalid identifier: `%s`")
+	ErrInvalidIdentifier = errors.NewKind("Identifier name '%s' is too long") // s2z patch: MySQL's text (1059)
 
 	// ErrInvalidArgument is returned when an argument to a function is invalid.
 	ErrInvalidArgument = errors.NewKind("Invalid argument to %s")

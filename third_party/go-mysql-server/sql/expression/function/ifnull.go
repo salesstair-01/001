@@ -75,6 +75,9 @@ func (f *IfNull) Type() sql.Type {
 		}
 		return f.RightChild.Type()
 	}
+	if t, ok := types.S2zTemporalMerge(f.LeftChild.Type(), f.RightChild.Type()); ok {
+		return t // s2z patch
+	}
 	return f.LeftChild.Type()
 }
 

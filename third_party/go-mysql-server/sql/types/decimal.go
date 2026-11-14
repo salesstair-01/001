@@ -270,6 +270,20 @@ func (t DecimalType_) BoundsCheck(v decimal.Decimal) (decimal.Decimal, sql.Conve
 	return v, sql.InRange, nil
 }
 
+// S2zClamp is v converted to the type, past its range its largest value of
+// v's sign, as MySQL stores it outside strict mode. (s2z patch)
+func (t DecimalType_) S2zClamp(v interface{}) (decimal.Decimal, bool) {
+	d, err := t.ConvertNoBoundsCheck(v)
+	if err != nil {
+		return decimal.Decimal{}, false
+	}
+	max := t.exclusiveUpperBound.Sub(decimal.New(1, -int32(t.scale)))
+	if d.Sign() < 0 {
+		return max.Neg(), true
+	}
+	return max, true
+}
+
 // Equals implements the Type interface.
 func (t DecimalType_) Equals(otherType sql.Type) bool {
 	if ot, ok := otherType.(DecimalType_); ok {

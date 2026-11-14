@@ -525,6 +525,10 @@ func ConvertToCollatedString(ctx context.Context, val interface{}, typ sql.Type)
 			}
 			content = val.(string)
 		}
+	} else if ts, ok := TypedString(typ, val); ok {
+		// s2z patch: as MySQL shows the type (TIME(3): 10:00:00.500)
+		collation = sql.Collation_Default
+		content = ts
 	} else {
 		collation = sql.Collation_Default
 		val, _, err = LongText.Convert(ctx, val)
@@ -765,4 +769,14 @@ func AppendAndSliceBytes(buffer, addition []byte) (slice []byte) {
 	buffer = append(buffer, addition...)
 	slice = buffer[stop:]
 	return
+}
+
+// S2zText is v, a value of type t, as text, a number or temporal value as
+// MySQL shows its type (TIME(3): 10:00:00.500). (s2z patch)
+func S2zText(ctx context.Context, t sql.Type, v interface{}) (interface{}, error) {
+	if s, ok := TypedString(t, v); ok {
+		return s, nil
+	}
+	r, _, err := LongText.Convert(ctx, v)
+	return r, err
 }

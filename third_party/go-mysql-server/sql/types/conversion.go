@@ -16,6 +16,7 @@ package types
 
 import (
 	"fmt"
+	"github.com/dolthub/vitess/go/mysql"
 	"strconv"
 	"strings"
 	"time"
@@ -376,7 +377,7 @@ func ColumnTypeToType(ct *sqlparser.ColumnType) (sql.Type, error) {
 				return nil, err
 			}
 			if length < 0 || length > 6 {
-				return nil, fmt.Errorf("TIME only supports a length from 0 to 6")
+				return nil, S2zPrecisionError(length) // s2z patch: MySQL's 1426
 			}
 			return CreateTimeType(int(length)), nil
 		}
@@ -391,7 +392,7 @@ func ColumnTypeToType(ct *sqlparser.ColumnType) (sql.Type, error) {
 			}
 
 			if precision > 6 || precision < 0 {
-				return nil, fmt.Errorf("TIMESTAMP supports precision from 0 to 6")
+				return nil, S2zPrecisionError(precision) // s2z patch
 			}
 		}
 
@@ -406,7 +407,7 @@ func ColumnTypeToType(ct *sqlparser.ColumnType) (sql.Type, error) {
 			}
 
 			if precision > 6 || precision < 0 {
-				return nil, fmt.Errorf("DATETIME supports precision from 0 to 6")
+				return nil, S2zPrecisionError(precision) // s2z patch
 			}
 		}
 
@@ -577,4 +578,21 @@ func s2zFloatMD(ct *sqlparser.ColumnType) (int, int, bool) {
 		return 0, 0, false
 	}
 	return m, d, true
+}
+
+// S2zPrecisionError is a TIME, DATETIME or TIMESTAMP declared with more
+// than 6 fractional digits. (s2z patch)
+type S2zPrecisionError int64
+
+func (e S2zPrecisionError) Error() string {
+	return fmt.Sprintf("Too-big precision %d specified. Maximum is 6.", int64(e))
+}
+
+// S2zColumnPrecisionError is err as MySQL gives it for column name (1426),
+// else err.
+func S2zColumnPrecisionError(err error, name string) error {
+	if e, ok := err.(S2zPrecisionError); ok {
+		return mysql.NewSQLError(1426, "42000", "Too-big precision %d specified for '%s'. Maximum is 6.", int64(e), name)
+	}
+	return err
 }

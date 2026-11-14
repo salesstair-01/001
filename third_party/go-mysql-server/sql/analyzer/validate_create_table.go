@@ -15,6 +15,7 @@
 package analyzer
 
 import (
+	"github.com/dolthub/vitess/go/mysql"
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
@@ -815,6 +816,10 @@ func validateAutoIncrementModify(schema sql.Schema, keyedColumns map[string]bool
 	for _, col := range schema {
 		if col.AutoIncrement {
 			// keyedColumns == nil means they are trying to add auto_increment column
+			if col.Default != nil {
+				// s2z patch: MySQL checks the default first (1067)
+				return mysql.NewSQLError(1067, "42000", "Invalid default value for '%s'", col.Name)
+			}
 			if !col.PrimaryKey && !keyedColumns[col.Name] {
 				// AUTO_INCREMENT col must be a key
 				return sql.ErrInvalidAutoIncCols.New()
@@ -838,6 +843,10 @@ func validateAutoIncrementAdd(schema sql.Schema, keyColumns map[string]bool) err
 	for _, col := range schema {
 		if col.AutoIncrement {
 			{
+				if col.Default != nil {
+					// s2z patch: MySQL checks the default first (1067)
+					return mysql.NewSQLError(1067, "42000", "Invalid default value for '%s'", col.Name)
+				}
 				if !col.PrimaryKey && !keyColumns[col.Name] {
 					// AUTO_INCREMENT col must be a key
 					return sql.ErrInvalidAutoIncCols.New()

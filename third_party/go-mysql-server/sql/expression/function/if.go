@@ -89,6 +89,9 @@ func (f *If) Type() sql.Type {
 	// if either type is string type, this should be a string type, regardless need to promote
 	typ1 := f.ifTrue.Type()
 	typ2 := f.ifFalse.Type()
+	if t, ok := types.S2zTemporalMerge(typ1, typ2); ok {
+		return t // s2z patch
+	}
 	if types.IsText(typ1) || types.IsText(typ2) {
 		return types.Text
 	}

@@ -74,6 +74,10 @@ func (c *Coalesce) Type() sql.Type {
 		if argType == nil || argType == types.Null {
 			continue
 		}
+		if t, ok := types.S2zTemporalMerge(retType, argType); ok {
+			retType = t // s2z patch
+			continue
+		}
 		if retType.Equals(argType) {
 			continue
 		}

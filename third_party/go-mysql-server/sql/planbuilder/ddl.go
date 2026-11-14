@@ -1140,7 +1140,7 @@ func (b *Builder) buildAlterChangeColumnType(inScope *scope, ddl *ast.DDL, table
 			colCopy := *c
 			typ, err := types.ColumnTypeToType(&spec.Type)
 			if err != nil {
-				b.handleErr(err)
+				b.handleErr(types.S2zColumnPrecisionError(err, spec.Column.String())) // s2z patch
 				return
 			}
 			colCopy.Type = typ
@@ -1536,7 +1536,7 @@ func getPkOrdinals(ts *ast.TableSpec) []int {
 func (b *Builder) columnDefinitionToColumn(inScope *scope, cd *ast.ColumnDefinition, indexes []*ast.IndexDefinition) *sql.Column {
 	internalTyp, err := types.ColumnTypeToType(&cd.Type)
 	if err != nil {
-		b.handleErr(err)
+		b.handleErr(types.S2zColumnPrecisionError(err, cd.Name.String())) // s2z patch
 	}
 
 	// Primary key info can either be specified in the column's type info (for in-line declarations), or in a slice of
@@ -1840,6 +1840,9 @@ func (b *Builder) buildDBDDL(inScope *scope, c *ast.DBDDL) (outScope *scope) {
 			b.handleErr(err)
 		}
 
+		if len(c.DBName) > sql.MaxIdentifierLength {
+			b.handleErr(sql.ErrInvalidIdentifier.New(c.DBName)) // s2z patch: 1059
+		}
 		var node sql.Node
 		switch c.SchemaOrDatabase {
 		case "database":

@@ -269,6 +269,10 @@ func (c *Convert) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 
 	// Should always return nil, and a warning instead
 	casted, err := convertValue(ctx, val, c.castToType, c.Child.Type(), c.typeLength, c.typeScale)
+	if err == nil && casted == nil && c.castToType == ConvertToTime {
+		// s2z patch: no TIME, MySQL's warning
+		ctx.Warn(1292, "Truncated incorrect time value: '%v'", val)
+	}
 	if err == nil {
 		if clamped, ok := c.warnTruncation(ctx, val); ok { // s2z patch
 			casted = clamped
@@ -334,7 +338,8 @@ func convertValue(ctx *sql.Context, val interface{}, castTo string, originType s
 		_, isTime := val.(time.Time)
 		_, isString := val.(string)
 		_, isBinary := val.([]byte)
-		if !(isTime || isString || isBinary) {
+		_, isTimespan := val.(types.Timespan) // s2z patch: today's date and the TIME
+		if !(isTime || isString || isBinary || isTimespan) {
 			return nil, nil
 		}
 		d, _, err := types.Date.Convert(ctx, val)
@@ -346,7 +351,8 @@ func convertValue(ctx *sql.Context, val interface{}, castTo string, originType s
 		_, isTime := val.(time.Time)
 		_, isString := val.(string)
 		_, isBinary := val.([]byte)
-		if !(isTime || isString || isBinary) {
+		_, isTimespan := val.(types.Timespan) // s2z patch: today's date and the TIME
+		if !(isTime || isString || isBinary || isTimespan) {
 			return nil, nil
 		}
 		d, _, err := types.DatetimeMaxPrecision.Convert(ctx, val)

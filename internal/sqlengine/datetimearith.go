@@ -75,7 +75,8 @@ func (e *intervalArith) Eval(ctx *sql.Context, row sql.Row) (any, error) {
 			us = -us
 		}
 		us = clampTime(t.us + us)
-		return formatTime(us, resultScale(us, t)), nil
+		r, _, err := e.typ.Convert(ctx, types.Timespan(us))
+		return r, err
 	}
 	tv, _, err := types.DatetimeMaxPrecision.Convert(ctx, v)
 	if err != nil || tv == nil {
@@ -165,7 +166,18 @@ func retypeIntervalArith(a *expression.Arithmetic) sql.Expression {
 		p := typeScale(t)
 		return &intervalArith{arith: a, typ: types.MustCreateDatetimeType(sqltypes.Datetime, max(p, scale))}
 	case types.IsTimespan(t):
-		return &intervalArith{arith: a, typ: types.LongText, span: true}
+		// a TIME stays a TIME for units under a day; with days or more it
+		// is today's DATETIME
+		p := 0
+		if tt, ok := t.(types.TimespanType_); ok {
+			if n, fixed := tt.Precision(); fixed {
+				p = n
+			}
+		}
+		if dateUnits[unit] || strings.HasPrefix(unit, "DAY_") {
+			return &intervalArith{arith: a, typ: types.MustCreateDatetimeType(sqltypes.Datetime, max(p, scale))}
+		}
+		return &intervalArith{arith: a, typ: types.CreateTimeType(max(p, scale)), span: true}
 	case types.IsText(t):
 		date := dateUnits[unit]
 		if l, ok := other.(*expression.Literal); ok {

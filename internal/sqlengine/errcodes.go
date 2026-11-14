@@ -26,6 +26,7 @@ var errCodes = []struct {
 	state string
 }{
 	{regexp.MustCompile(`^syntax error at position`), 1064, "42000"},
+	{regexp.MustCompile(`^Identifier name '.*' is too long$`), 1059, "42000"},
 	{regexp.MustCompile(`could not be found in any table in scope`), 1054, "42S22"},
 	{regexp.MustCompile(`^table with name \S+ already exists`), 1050, "42S01"},
 	{regexp.MustCompile(`^no database selected`), 1046, "3D000"},

@@ -21,6 +21,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/plan"
 	"github.com/dolthub/go-mysql-server/sql/transform"
 	"github.com/dolthub/go-mysql-server/sql/types"
+	"github.com/dolthub/vitess/go/mysql"
 )
 
 // validateColumnDefaults ensures that newly created column defaults from a DDL statement are legal for the type of
@@ -272,6 +273,10 @@ func validateColumnDefault(ctx *sql.Context, col *sql.Column, colDefault *sql.Co
 
 	// validate type of default expression
 	if err = colDefault.CheckType(ctx); err != nil {
+		if sql.ErrIncompatibleDefaultType.Is(err) {
+			// s2z patch: MySQL's error
+			return mysql.NewSQLError(1067, "42000", "Invalid default value for '%s'", col.Name)
+		}
 		return err
 	}
 

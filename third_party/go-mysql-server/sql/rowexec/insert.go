@@ -386,6 +386,12 @@ func convertDataAndWarnRow(ctx *sql.Context, tableSchema sql.Schema, row sql.Row
 			text = string([]rune(text)[:maxLength])
 		}
 		row[columnIdx] = text // truncate string
+	} else if dt, ok := tableSchema[columnIdx].Type.(types.DecimalType_); ok && types.ErrConvertToDecimalLimit.Is(err) {
+		// s2z patch: a DECIMAL out of range is its bound, as MySQL
+		row[columnIdx] = tableSchema[columnIdx].Type.Zero()
+		if c, ok := dt.S2zClamp(orig); ok {
+			row[columnIdx] = c
+		}
 	} else {
 		row[columnIdx] = tableSchema[columnIdx].Type.Zero()
 	}

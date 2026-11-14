@@ -631,6 +631,9 @@ func (b *Builder) buildAlterEvent(inScope *scope, subQuery string, fullQuery str
 
 func (b *Builder) buildCreateView(inScope *scope, subQuery string, fullQuery string, c *ast.DDL) (outScope *scope) {
 	outScope = inScope.push()
+	if n := c.ViewSpec.ViewName.Name.String(); len(n) > sql.MaxIdentifierLength {
+		b.handleErr(sql.ErrInvalidIdentifier.New(n)) // s2z patch: 1059
+	}
 	selectStr := c.SubStatementStr
 	if selectStr == "" {
 		if c.SubStatementPositionEnd > len(fullQuery) {

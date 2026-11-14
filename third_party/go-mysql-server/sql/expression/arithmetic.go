@@ -136,6 +136,9 @@ func (a *Arithmetic) Type() sql.Type {
 
 	// applies for + and - ops
 	if isInterval(a.LeftChild) || isInterval(a.RightChild) {
+		if t := s2zIntervalType(a); t != nil {
+			return t // s2z patch
+		}
 		// TODO: need to use the precision stored in datetimeType; something like
 		//   return types.MustCreateDatetimeType(sqltypes.Datetime, 0)
 		return types.Datetime
@@ -285,6 +288,11 @@ func (a *Arithmetic) WithChildren(children ...sql.Expression) (sql.Expression, e
 
 // Eval implements the Expression interface.
 func (a *Arithmetic) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
+	v, err := a.evalS2z(ctx, row)
+	return s2zTimeScale(S2zTimeArithmeticType(a.Op, a.LeftChild.Type(), a.RightChild.Type()), v, err)
+}
+
+func (a *Arithmetic) evalS2z(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	lval, rval, err := a.evalLeftRight(ctx, row)
 	if err != nil {
 		return nil, err
@@ -698,6 +706,11 @@ func NewUnaryMinus(child sql.Expression) *UnaryMinus {
 
 // Eval implements the sql.Expression interface.
 func (e *UnaryMinus) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
+	v, err := e.evalS2z(ctx, row)
+	return s2zTimeScale(S2zTimeArithmeticType(sqlparser.MinusStr, types.Int64, e.Child.Type()), v, err)
+}
+
+func (e *UnaryMinus) evalS2z(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	child, err := e.Child.Eval(ctx, row)
 	if err != nil {
 		return nil, err
@@ -707,7 +720,13 @@ func (e *UnaryMinus) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	if !types.IsNumber(e.Child.Type()) {
+	// s2z patch: a TIME or DATETIME is its number (hhmmss.ffffff)
+	if t := S2zTimeArithmeticType(sqlparser.MinusStr, types.Int64, e.Child.Type()); t != nil {
+		child, _ = temporalNumber(e.Child.Type(), child, false)
+		if child, _, err = t.Convert(ctx, child); err != nil {
+			return nil, err
+		}
+	} else if !types.IsNumber(e.Child.Type()) {
 		child, err = decimal.NewFromString(fmt.Sprintf("%v", child))
 		if err != nil {
 			child = 0.0
@@ -774,6 +793,9 @@ func (e *UnaryMinus) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 // Type implements the sql.Expression interface.
 func (e *UnaryMinus) Type() sql.Type {
 	typ := e.Child.Type()
+	if t := S2zTimeArithmeticType(sqlparser.MinusStr, types.Int64, typ); t != nil {
+		return t // s2z patch
+	}
 	if !types.IsNumber(typ) {
 		return types.Float64
 	}
@@ -986,4 +1008,89 @@ func S2zTimeArithmeticType(op string, l, r sql.Type) sql.Type {
 		return types.Int64
 	}
 	return types.MustCreateDecimalType(uint8(min(intDigits+sc, 65)), uint8(min(sc, 30)))
+}
+
+// S2zTemporalDecimal is a DATE, DATETIME, TIMESTAMP or TIME value as the
+// number MySQL makes of it (YYYYMMDDhhmmss.f, hhmmss.f). (s2z patch)
+func S2zTemporalDecimal(t sql.Type, v interface{}) (decimal.Decimal, bool) {
+	switch x := v.(type) {
+	case types.Timespan:
+		return types.TimespanDecimal(x), true
+	case time.Time:
+		if s, ok := temporalNumber(t, x, true); !ok {
+			d, err := decimal.NewFromString(s.(string))
+			return d, err == nil
+		}
+	}
+	return decimal.Decimal{}, false
+}
+
+// s2zTimeScale is v, a TIME or DATETIME arithmetic result of type t, with
+// the type's fractional digits. (s2z patch)
+func s2zTimeScale(t sql.Type, v interface{}, err error) (interface{}, error) {
+	if err != nil || t == nil {
+		return v, err
+	}
+	if d, ok := v.(decimal.Decimal); ok {
+		if dt, ok := t.(sql.DecimalType); ok {
+			return d.Round(int32(dt.Scale())), nil
+		}
+	}
+	return v, err
+}
+
+// s2zIntervalType is MySQL's type of x + INTERVAL n unit (or -) for a
+// temporal x: a DATE stays a DATE for units of a day or more, a TIME stays
+// a TIME for units under a day, else a DATETIME; the fractional digits are
+// x's or the interval's. (s2z patch)
+func s2zIntervalType(a *Arithmetic) sql.Type {
+	iv, ok := a.RightChild.(*Interval)
+	other := a.LeftChild
+	if !ok {
+		if iv, ok = a.LeftChild.(*Interval); !ok {
+			return nil
+		}
+		other = a.RightChild
+	}
+	unit := strings.ToUpper(iv.Unit)
+	dayUnit := strings.HasPrefix(unit, "DAY") || unit == "YEAR" || unit == "QUARTER" || unit == "MONTH" || unit == "WEEK" || unit == "YEAR_MONTH"
+	scale := 0
+	if strings.HasSuffix(unit, "MICROSECOND") {
+		scale = 6
+	} else if l, ok := iv.Child.(*Literal); ok {
+		switch v := l.Value().(type) {
+		case decimal.Decimal:
+			scale = min(6, int(max(0, -v.Exponent())))
+		case string:
+			if strings.Contains(v, ".") {
+				scale = 6
+			}
+		}
+	}
+	t := other.Type()
+	switch {
+	case types.IsDateType(t):
+		if dayUnit && unit != "DAY_HOUR" && unit != "DAY_MINUTE" && unit != "DAY_SECOND" && unit != "DAY_MICROSECOND" {
+			return types.Date
+		}
+		return types.MustCreateDatetimeType(sqltypes.Datetime, scale)
+	case types.IsDatetimeType(t) || types.IsTimestampType(t):
+		p := 0
+		if dt, ok := t.(sql.DatetimeType); ok {
+			p = dt.Precision()
+		}
+		return types.MustCreateDatetimeType(sqltypes.Datetime, max(p, scale))
+	case types.IsTimespan(t):
+		p := 0
+		if tt, ok := t.(types.TimespanType_); ok {
+			if n, fixed := tt.Precision(); fixed {
+				p = n
+			}
+		}
+		if dayUnit {
+			return types.MustCreateDatetimeType(sqltypes.Datetime, max(p, scale))
+		}
+		return types.CreateTimeType(max(p, scale))
+	}
+	return nil
 }

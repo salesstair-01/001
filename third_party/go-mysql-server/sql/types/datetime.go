@@ -323,13 +323,13 @@ func (t datetimeType) ConvertWithoutRangeCheck(ctx context.Context, v interface{
 		}
 		return zeroTime, ErrConvertingToTime.New(v)
 	case Timespan:
-		// when receiving TIME, MySQL fills in date with today
-		nowTimeStr := sql.Now().Format("2006-01-02")
-		nowTime, err := time.Parse("2006-01-02", nowTimeStr)
-		if err != nil {
-			return zeroTime, ErrConvertingToTime.New(v)
+		// when receiving TIME, MySQL fills in date with today (s2z patch:
+		// the statement's, SET TIMESTAMP's; a DATE has no time)
+		now := sql.Now()
+		if sc, ok := ctx.(*sql.Context); ok && sc != nil {
+			now = sc.QueryTime()
 		}
-		return nowTime.Add(value.AsTimeDuration()), nil
+		res = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).Add(value.AsTimeDuration())
 	default:
 		return zeroTime, sql.ErrConvertToSQL.New(value, t)
 	}

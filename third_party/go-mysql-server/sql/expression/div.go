@@ -113,6 +113,11 @@ func (d *Div) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 
 // Eval implements the Expression interface.
 func (d *Div) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
+	v, err := d.evalS2z(ctx, row)
+	return s2zTimeScale(S2zTimeArithmeticType(sqlparser.DivStr, d.LeftChild.Type(), d.RightChild.Type()), v, err)
+}
+
+func (d *Div) evalS2z(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	lval, rval, err := d.evalLeftRight(ctx, row)
 	if err != nil {
 		return nil, err

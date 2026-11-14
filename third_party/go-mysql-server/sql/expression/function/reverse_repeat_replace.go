@@ -255,7 +255,7 @@ func (r *Replace) Eval(
 		return nil, err
 	}
 
-	str, _, err = types.LongText.Convert(ctx, str)
+	str, err = types.S2zText(ctx, r.str.Type(), str) // s2z patch
 	if err != nil {
 		return nil, err
 	}

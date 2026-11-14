@@ -100,6 +100,10 @@ func (td *Extract) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
+	if v, ok := s2zExtractTime(ctx, unit, right); ok {
+		return v, nil
+	}
+
 	right, err = types.DatetimeMaxPrecision.ConvertWithoutRangeCheck(ctx, right)
 	if err != nil {
 		ctx.Warn(1292, err.Error())
@@ -211,4 +215,56 @@ func (td *Extract) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	default:
 		return nil, fmt.Errorf("invalid time unit")
 	}
+}
+
+// s2zExtractTime is EXTRACT of a time unit from a TIME, or a string that is
+// a TIME and no DATETIME: its hours are not cut to a day, and its sign is
+// the parts'. (s2z patch)
+func s2zExtractTime(ctx *sql.Context, unit string, v interface{}) (interface{}, bool) {
+	var us int64
+	switch x := v.(type) {
+	case types.Timespan:
+		us = x.AsMicroseconds()
+	case string:
+		if _, _, err := types.DatetimeMaxPrecision.Convert(ctx, x); err == nil {
+			return nil, false
+		}
+		var st types.TimeStringStatus
+		if us, _, st = types.ParseTimeString(x); st != types.TimeStringOK {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	sign := int64(1)
+	if us < 0 {
+		sign, us = -1, -us
+	}
+	h, m, s, f := us/3600000000, us/60000000%60, us/1000000%60, us%1000000
+	var r int64
+	switch unit {
+	case "HOUR":
+		r = h
+	case "MINUTE":
+		r = m
+	case "SECOND":
+		r = s
+	case "MICROSECOND":
+		r = f
+	case "HOUR_MINUTE":
+		r = h*100 + m
+	case "HOUR_SECOND":
+		r = h*10000 + m*100 + s
+	case "MINUTE_SECOND":
+		r = m*100 + s
+	case "HOUR_MICROSECOND":
+		r = (h*10000+m*100+s)*1000000 + f
+	case "MINUTE_MICROSECOND":
+		r = (m*100+s)*1000000 + f
+	case "SECOND_MICROSECOND":
+		r = s*1000000 + f
+	default:
+		return nil, false
+	}
+	return sign * r, true
 }

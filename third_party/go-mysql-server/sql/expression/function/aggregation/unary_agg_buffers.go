@@ -56,10 +56,12 @@ type sumBuffer struct {
 	isnil bool
 	sum   interface{} // sum is either decimal.Decimal or float64
 	expr  sql.Expression
+	exact bool // s2z patch: an exact number, summed as a DECIMAL
 }
 
 func NewSumBuffer(child sql.Expression) *sumBuffer {
-	return &sumBuffer{true, float64(0), child}
+	_, _, exact := exactDigits(child)
+	return &sumBuffer{true, float64(0), child, exact}
 }
 
 // Update implements the AggregationBuffer interface.
@@ -86,6 +88,10 @@ func (m *sumBuffer) PerformSum(ctx *sql.Context, v interface{}) {
 		if err == nil {
 			v = val
 		}
+	}
+
+	if m.exact {
+		v = exactDecimal(ctx, m.expr.Type(), v) // s2z patch
 	}
 
 	switch n := v.(type) {
@@ -120,6 +126,10 @@ func (m *sumBuffer) PerformSum(ctx *sql.Context, v interface{}) {
 func (m *sumBuffer) Eval(ctx *sql.Context) (interface{}, error) {
 	if m.isnil {
 		return nil, nil
+	}
+	if d, ok := m.sum.(decimal.Decimal); ok && m.exact {
+		_, sc, _ := exactDigits(m.expr)
+		return d.Round(int32(min(sc, types.DecimalTypeMaxScale))), nil // s2z patch
 	}
 	return m.sum, nil
 }
@@ -226,6 +236,9 @@ func (a *avgBuffer) Eval(ctx *sql.Context) (interface{}, error) {
 			return decimal.NewFromInt(0), nil
 		}
 		scale := (s.Exponent() * -1) + 4
+		if _, sc, ok := exactDigits(a.expr); ok {
+			scale = int32(min(sc+4, types.DecimalTypeMaxScale)) // s2z patch
+		}
 		return s.DivRound(decimal.NewFromInt(a.rows), scale), nil
 	}
 	return nil, nil

@@ -129,7 +129,8 @@ func (f *factory) buildConvert(expr sql.Expression, castToType string, typeLengt
 	n := expression.NewConvertWithLengthAndScale(expr, castToType, typeLength, typeScale)
 	{
 		// deduplicate redundant convert
-		if expr.Type().Equals(n.Type()) {
+		// s2z patch: not a cast to another TIME precision
+		if expr.Type().Equals(n.Type()) && !s2zTimePrecisionDiffers(expr.Type(), n.Type()) {
 			f.log("eliminated convert")
 			return expr, nil
 		}
@@ -255,4 +256,17 @@ func (f *factory) buildSort(child sql.Node, exprs []sql.SortField, deps sql.ColS
 	}
 
 	return plan.NewSort(exprs, child), nil
+}
+
+// s2zTimePrecisionDiffers is whether two TIME types have different
+// fractional digits, which a CAST rounds to. (s2z patch)
+func s2zTimePrecisionDiffers(a, b sql.Type) bool {
+	ta, ok1 := a.(types.TimespanType_)
+	tb, ok2 := b.(types.TimespanType_)
+	if !ok1 || !ok2 {
+		return false
+	}
+	pa, _ := ta.Precision()
+	pb, _ := tb.Precision()
+	return pa != pb
 }

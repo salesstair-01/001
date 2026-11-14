@@ -163,3 +163,31 @@ func TestProcedureHandlerConditions(t *testing.T) {
 		}
 	}
 }
+
+// TestProcedureRecursionLimit pins max_sp_recursion_depth against MySQL
+// 8.0.46 (1456 past it), and that unbounded recursion fails instead of
+// overflowing the server's stack (a CONTINUE handler re-entering kept it
+// going until sqld died).
+func TestProcedureRecursionLimit(t *testing.T) {
+	c := startCluster(t)
+	conn, err := c.db(t).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, s := range []struct{ q, want string }{
+		{"CREATE PROCEDURE r(n int) BEGIN IF n > 0 THEN CALL r(n-1); END IF; SELECT n; END", "[]"},
+		{"CALL r(0)", "[0]"},
+		{"CALL r(1)", "ERR 1456"},
+		{"SET @@max_sp_recursion_depth = 3", "[]"},
+		{"CALL r(4)", "ERR 1456"},
+		{"SET @@max_sp_recursion_depth = 255", "[]"},
+		{"CREATE PROCEDURE p1(a int) BEGIN DECLARE CONTINUE HANDLER FOR 1436 SELECT 'exception'; CALL p1(a+1); END", "[]"},
+		{"CALL p1(1)", "ERR 1456"},
+		{"SELECT 1", "[1]"},
+	} {
+		if got := connRun(t, conn, s.q); got != s.want {
+			t.Errorf("%s: got %s, want %s", s.q, got, s.want)
+		}
+	}
+}

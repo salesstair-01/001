@@ -17,8 +17,11 @@ package rowexec
 import (
 	"errors"
 	"fmt"
+	"github.com/dolthub/go-mysql-server/sql/types"
+	"github.com/dolthub/vitess/go/mysql"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/expression"
@@ -249,6 +252,16 @@ func (b *BaseBuilder) buildCall(ctx *sql.Context, n *plan.Call, row sql.Row) (sq
 		}
 	}
 
+	// s2z patch: a routine calling itself is limited by
+	// max_sp_recursion_depth (1456), and all calls nest at most
+	// s2zMaxCallDepth deep (1436): unbounded recursion overflowed the Go
+	// stack, which killed the server.
+	release, err := s2zEnterCall(ctx, n.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	// Preserve existing transaction
 	oldTx := ctx.GetTransaction()
 	defer ctx.SetTransaction(oldTx)
@@ -452,4 +465,45 @@ func (b *BaseBuilder) buildIterate(ctx *sql.Context, n *plan.Iterate, row sql.Ro
 
 func (b *BaseBuilder) buildWhile(ctx *sql.Context, n *plan.While, row sql.Row) (sql.RowIter, error) {
 	return b.buildLoop(ctx, n.Loop, row)
+}
+
+// s2zMaxCallDepth bounds nested CALLs, as MySQL's thread stack does.
+const s2zMaxCallDepth = 512
+
+var s2zCallDepths sync.Map // session id -> *s2zCalls
+
+type s2zCalls struct {
+	mu    sync.Mutex
+	total int
+	per   map[string]int
+}
+
+// s2zEnterCall counts a CALL of the routine name in the session; release
+// ends it. (s2z patch)
+func s2zEnterCall(ctx *sql.Context, name string) (func(), error) {
+	v, _ := s2zCallDepths.LoadOrStore(ctx.Session.ID(), &s2zCalls{per: map[string]int{}})
+	c := v.(*s2zCalls)
+	name = strings.ToLower(name)
+	limit := int64(0)
+	if lv, err := ctx.GetSessionVariable(ctx, "max_sp_recursion_depth"); err == nil {
+		if l, _, err := types.Int64.Convert(ctx, lv); err == nil {
+			limit = l.(int64)
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if int64(c.per[name]) > limit {
+		return nil, mysql.NewSQLError(1456, "HY000", "Recursive limit %d (as set by the max_sp_recursion_depth variable) was exceeded for routine %s", limit, name)
+	}
+	if c.total >= s2zMaxCallDepth {
+		return nil, mysql.NewSQLError(1436, "HY000", "Thread stack overrun: stored routine calls nest more than %d deep", s2zMaxCallDepth)
+	}
+	c.per[name]++
+	c.total++
+	return func() {
+		c.mu.Lock()
+		c.per[name]--
+		c.total--
+		c.mu.Unlock()
+	}, nil
 }

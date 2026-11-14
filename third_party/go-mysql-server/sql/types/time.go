@@ -153,6 +153,17 @@ func (t TimespanType_) Convert(c context.Context, v interface{}) (interface{}, s
 	if d, ok := s2zNumberDecimal(v); ok {
 		return t.s2zNumberTimespan(d)
 	}
+	// s2z patch: a string as MySQL reads it (D HH:MM:SS.ffffff, trailing
+	// characters ignored here: INSERT warns or refuses them)
+	if str, ok := v.(string); ok {
+		if us, _, st := ParseTimeString(str); st != TimeStringInvalid {
+			ts := t.round(Timespan(us))
+			if st == TimeStringOutOfRange {
+				return ts, sql.OutOfRange, nil
+			}
+			return ts, sql.InRange, nil
+		}
+	}
 	ret, err := t.ConvertToTimespan(v)
 	if err == nil {
 		ret = t.round(ret)
@@ -725,7 +736,7 @@ func (t TimespanType_) s2zNumberTimespan(d decimal.Decimal) (interface{}, sql.Co
 		unit *= 10
 	}
 	base := (h*3600 + m*60 + sec) * 1000000
-	if base+frac.Shift(6).Ceil().IntPart() > maxUS {
+	if base+frac.Shift(6).Round(0).IntPart() > maxUS {
 		// out of range before rounding: 838:59:59.4 is not a TIME(0)
 		return t.sign(maxUS, neg), sql.OutOfRange, nil
 	}

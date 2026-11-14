@@ -16,6 +16,7 @@ package rowexec
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/dolthub/vitess/go/mysql"
 	"github.com/shopspring/decimal"
@@ -110,6 +111,12 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 			}
 			if cErr == nil {
 				noteDecimalRounding(ctx, col, row[idx], converted, i.rowNum) // s2z patch
+				if str, ok := row[idx].(string); ok && types.IsTimespan(col.Type) {
+					// s2z patch: a TIME string with more after it
+					if err := s2zTimeStringWarnings(ctx, col, str, i.rowNum, strictMode(ctx) && !i.ignore); err != nil {
+						return nil, sql.NewWrappedInsertError(origRow, err)
+					}
+				}
 			}
 			if cErr != nil {
 				// Ignore individual column errors when INSERT IGNORE, UPDATE IGNORE, etc. is specified.
@@ -499,4 +506,30 @@ func s2zNumberText(v interface{}) string {
 		return x.String()
 	}
 	return fmt.Sprint(v)
+}
+
+// s2zTimeStringWarnings gives MySQL's warnings for a string stored in a TIME
+// column: 4096 for a space around it, 1265 (1292 in strict mode) for
+// characters after it. (s2z patch)
+func s2zTimeStringWarnings(ctx *sql.Context, col *sql.Column, s string, row int, strict bool) error {
+	_, end, st := types.ParseTimeString(s)
+	if st == types.TimeStringInvalid {
+		return nil
+	}
+	if st == types.TimeStringTruncated && strict {
+		return mysql.NewSQLError(1292, "22007", "Incorrect time value: '%s' for column '%s' at row %d", s, col.Name, row)
+	}
+	delim := func(pos int) {
+		ctx.Session.Warn(&sql.Warning{Level: "Warning", Code: 4096, Message: fmt.Sprintf(
+			"Delimiter ' ' in position %d in datetime value '%s' at row %d is superfluous and is deprecated. Please remove.", pos, s, row)})
+	}
+	if len(s) > 0 && s[0] == ' ' {
+		delim(0)
+	} else if end < len(s) && s[end] == ' ' && strings.ContainsRune(s[:end], ':') {
+		delim(end)
+	}
+	if st == types.TimeStringTruncated {
+		ctx.Session.Warn(&sql.Warning{Level: "Warning", Code: 1265, Message: fmt.Sprintf("Data truncated for column '%s' at row %d", col.Name, row)})
+	}
+	return nil
 }

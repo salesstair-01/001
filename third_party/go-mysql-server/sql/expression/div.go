@@ -84,6 +84,10 @@ func (d *Div) IsNullable() bool {
 // However, if this is the outermost division expression in an expression tree, we must return the result as a
 // Decimal type in order to match MySQL's results exactly.
 func (d *Div) Type() sql.Type {
+	// s2z patch: a temporal value divided is its number, a DECIMAL
+	if t := S2zTimeArithmeticType(sqlparser.DivStr, d.LeftChild.Type(), d.RightChild.Type()); t != nil {
+		return t
+	}
 	return d.determineResultType(isOutermostDiv(d, 0, d.divOps))
 }
 

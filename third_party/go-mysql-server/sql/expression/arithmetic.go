@@ -149,7 +149,7 @@ func (a *Arithmetic) Type() sql.Type {
 		return types.Float64
 	}
 
-	if t := s2zTimeArithmeticType(a.Op, lTyp, rTyp); t != nil {
+	if t := S2zTimeArithmeticType(a.Op, lTyp, rTyp); t != nil {
 		return t
 	}
 
@@ -918,12 +918,24 @@ func s2zFloatDecimalsType(op string, l, r sql.Type) sql.Type {
 	return types.CreateFloatType(sqltypes.Float64, 22, d, false)
 }
 
-// s2zTimeArithmeticType is the type of a TIME and an integer or DECIMAL in
-// + - *: MySQL takes the TIME as its number hhmmss.ffffff, a DECIMAL with
-// the TIME's fractional digits (TIME(6)+0 is 101059.500000, created as
-// decimal(14,6): 8 digits before the point). nil otherwise. (s2z patch)
-func s2zTimeArithmeticType(op string, l, r sql.Type) sql.Type {
-	if !types.IsTimespan(l) && !types.IsTimespan(r) {
+// S2zTimeArithmeticType is the type MySQL gives a TIME, DATETIME or
+// TIMESTAMP and an integer or DECIMAL in + - * /: the temporal value is its
+// number (hhmmss.ffffff, yyyymmddhhmmss.ffffff); without fractional digits
+// + - * give an INT (TIME) or BIGINT, else a DECIMAL of 8 (TIME) or 15
+// digits before the point, and / a DECIMAL of 7 or 14 with 4 more decimals.
+// nil otherwise. (s2z patch)
+func S2zTimeArithmeticType(op string, l, r sql.Type) sql.Type {
+	kind := func(t sql.Type) int { // 1 TIME, 2 DATETIME or TIMESTAMP
+		switch {
+		case types.IsTimespan(t):
+			return 1
+		case types.IsDatetimeType(t) || types.IsTimestampType(t):
+			return 2
+		}
+		return 0
+	}
+	k := max(kind(l), kind(r))
+	if k == 0 || (kind(l) != 0 && kind(r) != 0) {
 		return nil
 	}
 	scale := func(t sql.Type) (int, bool) {
@@ -933,6 +945,11 @@ func s2zTimeArithmeticType(op string, l, r sql.Type) sql.Type {
 				if p, fixed := tt.Precision(); fixed {
 					return p, true
 				}
+			}
+			return 0, true
+		case types.IsDatetimeType(t) || types.IsTimestampType(t):
+			if dt, ok := t.(sql.DatetimeType); ok {
+				return dt.Precision(), true
 			}
 			return 0, true
 		case types.IsInteger(t):
@@ -947,14 +964,26 @@ func s2zTimeArithmeticType(op string, l, r sql.Type) sql.Type {
 	if !okL || !okR {
 		return nil
 	}
+	intDigits := 8
+	if k == 2 {
+		intDigits = 15
+	}
 	var sc int
 	switch op {
 	case sqlparser.PlusStr, sqlparser.MinusStr:
 		sc = max(sl, sr)
 	case sqlparser.MultStr:
 		sc = sl + sr
+	case sqlparser.DivStr:
+		sc, intDigits = sl+4, intDigits-1
 	default:
 		return nil
 	}
-	return types.MustCreateDecimalType(uint8(min(8+sc, 65)), uint8(min(sc, 30)))
+	if sc == 0 {
+		if k == 1 {
+			return types.Int32
+		}
+		return types.Int64
+	}
+	return types.MustCreateDecimalType(uint8(min(intDigits+sc, 65)), uint8(min(sc, 30)))
 }

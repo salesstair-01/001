@@ -550,6 +550,15 @@ type distinctIter struct {
 	childIter   sql.RowIter
 	seen        sql.KeyValueCache
 	DisposeFunc sql.DisposeFunc
+	sch         sql.Schema // s2z patch: strings compare by collation
+}
+
+// NewDistinctIterSchema is NewDistinctIter for rows of schema sch, whose
+// strings are equal as their collations hold them. (s2z patch)
+func NewDistinctIterSchema(ctx *sql.Context, child sql.RowIter, sch sql.Schema) *distinctIter {
+	it := NewDistinctIter(ctx, child)
+	it.sch = sch
+	return it
 }
 
 func NewDistinctIter(ctx *sql.Context, child sql.RowIter) *distinctIter {
@@ -571,7 +580,7 @@ func (di *distinctIter) Next(ctx *sql.Context) (sql.Row, error) {
 			return nil, err
 		}
 
-		hash, err := sql.HashOf(ctx, row)
+		hash, err := sql.HashOfSchema(ctx, di.sch, row)
 		if err != nil {
 			return nil, err
 		}

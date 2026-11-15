@@ -5,6 +5,7 @@ import (
 	"github.com/dolthub/vitess/go/mysql"
 	"math"
 	"reflect"
+	"strings"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/shopspring/decimal"
@@ -457,10 +458,23 @@ func (c *countDistinctBuffer) Update(ctx *sql.Context, row sql.Row) error {
 	}
 
 	var str string
-	for _, val := range value.(sql.Row) {
+	for i, val := range value.(sql.Row) {
 		// skip nil values
 		if val == nil {
 			return nil
+		}
+		// s2z patch: a string counts once per value its collation holds
+		// equal ('a', 'A')
+		if _, star := c.exprs[0].(*expression.Star); !star && i < len(c.exprs) {
+			if st, ok := c.exprs[i].Type().(sql.StringType); ok {
+				if sv, _, err := types.LongText.Convert(ctx, val); err == nil {
+					var b strings.Builder
+					if st.Collation().WriteWeightString(&b, fmt.Sprint(sv)) == nil {
+						str += b.String() + "\x00,"
+						continue
+					}
+				}
+			}
 		}
 		v, _, err := types.Text.Convert(ctx, val)
 		if err != nil {

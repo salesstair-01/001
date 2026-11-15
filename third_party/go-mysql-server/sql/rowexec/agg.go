@@ -18,11 +18,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 
 	"github.com/cespare/xxhash/v2"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/expression/function/aggregation"
+	"github.com/dolthub/go-mysql-server/sql/transform"
 	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
@@ -118,6 +121,7 @@ type groupByGroupingIter struct {
 	pos           int
 	child         sql.RowIter
 	dispose       sql.DisposeFunc
+	keyVals       map[uint64]sql.Row // s2z patch: each group's values, to sort by
 }
 
 func newGroupByGroupingIter(
@@ -188,6 +192,16 @@ func (i *groupByGroupingIter) compute(ctx *sql.Context) error {
 			}
 
 			i.keys = append(i.keys, key)
+			if i.keyVals == nil {
+				i.keyVals = map[uint64]sql.Row{}
+			}
+			kv := make(sql.Row, len(i.groupByExprs))
+			for j, e := range i.groupByExprs {
+				if kv[j], err = e.Eval(ctx, row); err != nil {
+					return err
+				}
+			}
+			i.keyVals[key] = kv
 		} else if err != nil {
 			return err
 		}
@@ -198,6 +212,32 @@ func (i *groupByGroupingIter) compute(ctx *sql.Context) error {
 		}
 	}
 
+	// s2z patch: when MySQL groups by sorting (for GROUP_CONCAT, JSON
+	// aggregates and DISTINCT aggregates), groups come in the order of their
+	// values, NULL first; otherwise in the order first seen
+	if !s2zGroupsBySorting(i.selectedExprs) {
+		return nil
+	}
+	sort.SliceStable(i.keys, func(a, b int) bool {
+		ka, kb := i.keyVals[i.keys[a]], i.keyVals[i.keys[b]]
+		for j, e := range i.groupByExprs {
+			x, y := ka[j], kb[j]
+			switch {
+			case x == nil && y == nil:
+				continue
+			case x == nil:
+				return true
+			case y == nil:
+				return false
+			}
+			c, err := e.Type().Compare(ctx, x, y)
+			if err != nil || c == 0 {
+				continue
+			}
+			return c < 0
+		}
+		return false
+	})
 	return nil
 }
 
@@ -314,4 +354,21 @@ func evalBuffers(
 	}
 
 	return row, nil
+}
+
+// s2zGroupsBySorting is whether MySQL would group these aggregates by
+// sorting. (s2z patch)
+func s2zGroupsBySorting(exprs []sql.Expression) bool {
+	found := false
+	for _, e := range exprs {
+		transform.InspectExpr(e, func(e sql.Expression) bool {
+			switch e.(type) {
+			case *aggregation.GroupConcat, *aggregation.JsonArray, *aggregation.JSONObjectAgg,
+				*aggregation.CountDistinct, *expression.DistinctExpression:
+				found = true
+			}
+			return found
+		})
+	}
+	return found
 }

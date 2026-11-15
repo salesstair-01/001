@@ -120,12 +120,23 @@ func parseDayOfMonth2DigitNumeric(result *datetime, chars string) (rest string, 
 }
 
 func parseMicrosecondsNumeric(result *datetime, chars string) (rest string, _ error) {
-	num, rest, err := takeNumber(chars)
-	if err != nil {
-		return "", err
+	// s2z patch: up to 6 digits, a fraction ("0012" is 1200 microseconds)
+	n := 0
+	for n < len(chars) && n < 6 && chars[n] >= '0' && chars[n] <= '9' {
+		n++
+	}
+	if n == 0 {
+		return "", fmt.Errorf("expected a fraction")
+	}
+	var num uint
+	for i := 0; i < 6; i++ {
+		num *= 10
+		if i < n {
+			num += uint(chars[i] - '0')
+		}
 	}
 	result.microseconds = &num
-	return rest, nil
+	return chars[n:], nil
 }
 
 func parse24HourNumeric(result *datetime, chars string) (rest string, _ error) {

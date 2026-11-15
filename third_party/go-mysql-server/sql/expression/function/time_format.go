@@ -16,6 +16,7 @@ package function
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/lestrrat-go/strftime"
@@ -114,7 +115,7 @@ func (f *TimeFormat) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	d, err := types.Time.ConvertToTimeDuration(left)
+	ts, err := types.Time.ConvertToTimespan(left)
 	if err != nil {
 		return nil, err
 	}
@@ -133,10 +134,71 @@ func (f *TimeFormat) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, sql.ErrInvalidArgumentDetails.New("time_format", "format must be a string")
 	}
 
-	return formatTime(
-		formatStr,
-		time.Date(1980, time.January, 1, int(d.Hours())%24, int(d.Minutes())%60, int(d.Seconds())%60, int(d.Nanoseconds())%1e9, time.UTC),
-	)
+	// s2z patch: MySQL's TIME_FORMAT: hours past 24 and a sign, and a date
+	// specifier is NULL
+	r, ok := s2zTimeFormat(ts.AsMicroseconds(), formatStr)
+	if !ok {
+		return nil, nil
+	}
+	return r, nil
+}
+
+func s2zTimeFormat(us int64, f string) (string, bool) {
+	var b strings.Builder
+	if us < 0 {
+		b.WriteByte('-')
+		us = -us
+	}
+	h, m, sec, frac := us/3600000000, us/60000000%60, us/1000000%60, us%1000000
+	h12 := h % 24 % 12
+	if h12 == 0 {
+		h12 = 12
+	}
+	ampm := "AM"
+	if h%24 >= 12 {
+		ampm = "PM"
+	}
+	for i := 0; i < len(f); i++ {
+		c := f[i]
+		if c != '%' || i+1 == len(f) {
+			b.WriteByte(c)
+			continue
+		}
+		i++
+		switch f[i] {
+		case 'H':
+			fmt.Fprintf(&b, "%02d", h)
+		case 'k':
+			fmt.Fprintf(&b, "%d", h)
+		case 'h', 'I':
+			fmt.Fprintf(&b, "%02d", h12)
+		case 'l':
+			fmt.Fprintf(&b, "%d", h12)
+		case 'i':
+			fmt.Fprintf(&b, "%02d", m)
+		case 's', 'S':
+			fmt.Fprintf(&b, "%02d", sec)
+		case 'f':
+			fmt.Fprintf(&b, "%06d", frac)
+		case 'p':
+			b.WriteString(ampm)
+		case 'r':
+			fmt.Fprintf(&b, "%02d:%02d:%02d %s", h12, m, sec, ampm)
+		case 'T':
+			fmt.Fprintf(&b, "%02d:%02d:%02d", h, m, sec)
+		case 'Y':
+			b.WriteString("0000")
+		case 'y', 'm', 'd':
+			b.WriteString("00")
+		case 'c', 'e':
+			b.WriteString("0")
+		case 'M', 'b', 'D', 'j', 'U', 'u', 'V', 'v', 'W', 'w', 'a', 'X', 'x':
+			return "", false
+		default:
+			b.WriteByte(f[i])
+		}
+	}
+	return b.String(), true
 }
 
 // Type implements the Expression interface.

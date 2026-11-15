@@ -51,11 +51,7 @@ func (c *Ceil) Description() string {
 
 // Type implements the Expression interface.
 func (c *Ceil) Type() sql.Type {
-	childType := c.Child.Type()
-	if types.IsInteger(childType) {
-		return childType
-	}
-	return types.Int32
+	return s2zCeilFloorType(c.Child.Type()) // s2z patch: MySQL's
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -77,6 +73,11 @@ func (c *Ceil) WithChildren(children ...sql.Expression) (sql.Expression, error) 
 
 // Eval implements the Expression interface.
 func (c *Ceil) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
+	v, err := c.evalS2z(ctx, row)
+	return s2zCeilFloorValue(ctx, c.Type(), v, err)
+}
+
+func (c *Ceil) evalS2z(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	child, err := c.Child.Eval(ctx, row)
 
 	if err != nil {
@@ -135,11 +136,7 @@ func (f *Floor) Description() string {
 
 // Type implements the Expression interface.
 func (f *Floor) Type() sql.Type {
-	childType := f.Child.Type()
-	if types.IsInteger(childType) {
-		return childType
-	}
-	return types.Int32
+	return s2zCeilFloorType(f.Child.Type()) // s2z patch: MySQL's
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -161,6 +158,11 @@ func (f *Floor) WithChildren(children ...sql.Expression) (sql.Expression, error)
 
 // Eval implements the Expression interface.
 func (f *Floor) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
+	v, err := f.evalS2z(ctx, row)
+	return s2zCeilFloorValue(ctx, f.Type(), v, err)
+}
+
+func (f *Floor) evalS2z(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	child, err := f.Child.Eval(ctx, row)
 
 	if err != nil {
@@ -291,8 +293,15 @@ func (r *Round) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	}
 
 	var res interface{}
-	tmp := val.(decimal.Decimal).Round(prec)
-	if types.IsSigned(r.LeftChild.Type()) {
+	tmp := val.(decimal.Decimal)
+	if -tmp.Exponent() > prec {
+		tmp = tmp.Round(prec) // s2z patch: more digits than it has add none
+	}
+	if types.IsSigned(r.LeftChild.Type()) && tmp.BigInt().IsInt64() {
+		res = tmp.BigInt().Int64() // s2z patch: exactly
+	} else if types.IsUnsigned(r.LeftChild.Type()) && tmp.BigInt().IsUint64() {
+		res = tmp.BigInt().Uint64()
+	} else if types.IsSigned(r.LeftChild.Type()) {
 		res, _, err = types.Int64.Convert(ctx, tmp)
 	} else if types.IsUnsigned(r.LeftChild.Type()) {
 		res, _, err = types.Uint64.Convert(ctx, tmp)
@@ -373,4 +382,38 @@ func (*Round) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID
 // WithChildren implements the Expression interface.
 func (r *Round) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	return NewRound(children...)
+}
+
+// s2zCeilFloorType is MySQL's type of CEILING / FLOOR: an integer's own, a
+// DECIMAL's integer digits (plus one with a fraction) as BIGINT up to 18,
+// else DECIMAL(n,0), and DOUBLE for anything else. (s2z patch)
+func s2zCeilFloorType(t sql.Type) sql.Type {
+	switch {
+	case types.IsUnsigned(t):
+		return types.Uint64
+	case types.IsInteger(t):
+		return types.Int64
+	case types.IsDecimal(t):
+		dt := t.(sql.DecimalType)
+		n := int(dt.Precision()) - int(dt.Scale())
+		if dt.Scale() > 0 {
+			n++
+		}
+		if n <= 18 {
+			return types.Int64
+		}
+		return types.MustCreateDecimalType(uint8(min(n, 65)), 0)
+	}
+	return types.Float64
+}
+
+func s2zCeilFloorValue(ctx *sql.Context, t sql.Type, v interface{}, err error) (interface{}, error) {
+	if err != nil || v == nil {
+		return v, err
+	}
+	r, _, cerr := t.Convert(ctx, v)
+	if cerr != nil {
+		return v, nil
+	}
+	return r, nil
 }

@@ -230,6 +230,29 @@ func (g *groupConcatBuffer) Update(ctx *sql.Context, originalRow sql.Row) error 
 		if len(vs) == 0 {
 			return nil
 		}
+	} else if len(g.gc.selectExprs) > 1 {
+		// s2z patch: GROUP_CONCAT(a, b) concatenates its expressions; a
+		// row with a NULL one is left out
+		var sb strings.Builder
+		for i, e := range g.gc.selectExprs {
+			if i >= len(evalRow) || evalRow[i] == nil {
+				return nil
+			}
+			if ts, ok := types.TypedString(e.Type(), evalRow[i]); ok {
+				sb.WriteString(ts)
+				continue
+			}
+			pv, _, err := types.LongText.Convert(ctx, evalRow[i])
+			if err != nil {
+				return err
+			}
+			ps, _, err := sql.Unwrap[string](ctx, pv)
+			if err != nil {
+				return err
+			}
+			sb.WriteString(ps)
+		}
+		vs = sb.String()
 	} else if ts, ok := types.TypedString(g.gc.selectExprs[0].Type(), evalRow[0]); ok && len(g.gc.selectExprs) == 1 { // s2z patch
 		vs = ts
 	} else {

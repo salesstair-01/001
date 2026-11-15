@@ -27,6 +27,8 @@ func init() {
 		"subtime":      fnN("subtime", 2, 2, addTimeType, false, typedTime(addTimeType, func(ctx *sql.Context, a []sql.Expression, v []any) (any, error) { return addTime(ctx, a, v, -1) })),
 		"timediff":     fnN("timediff", 2, 2, timeDiffType, false, typedTime(timeDiffType, evalTimeDiff)),
 		"time_to_sec":  fnN("time_to_sec", 1, 1, fixedType(types.Int64), false, evalTimeToSec),
+		"to_seconds":   fnN("to_seconds", 1, 1, fixedType(types.Int64), false, evalToSeconds),
+		"interval":     fnN("interval", 2, -1, fixedType(types.Int64), true, evalInterval),
 		"sec_to_time":  fnN("sec_to_time", 1, 1, lastArgTimeType, false, typedTime(lastArgTimeType, evalSecToTime)),
 		"maketime":     fnN("maketime", 3, 3, lastArgTimeType, false, typedTime(lastArgTimeType, evalMakeTime)),
 		"makedate":     fnN("makedate", 2, 2, fixedType(types.Date), false, evalMakeDate),
@@ -592,4 +594,54 @@ func evalUTCTime(ctx *sql.Context, _ []sql.Expression, v []any) (any, error) {
 	us := int64(h*3600+m*60+s)*usPerSec + int64(t.Nanosecond())/1000
 	p := int64(math.Pow10(6 - int(fsp)))
 	return formatTime(us/p*p, int(fsp)), nil
+}
+
+// evalToSeconds is TO_SECONDS: seconds since year 0, by MySQL's day number.
+func evalToSeconds(ctx *sql.Context, _ []sql.Expression, v []any) (any, error) {
+	t, _, err := types.DatetimeMaxPrecision.Convert(ctx, v[0])
+	if err != nil || t == nil {
+		ctx.Warn(1292, "Incorrect datetime value: '%v'", v[0])
+		return nil, nil
+	}
+	tm := t.(time.Time)
+	h, m, sec := tm.Clock()
+	return dayNumber(int64(tm.Year()), int64(tm.Month()), int64(tm.Day()))*86400 + int64(h*3600+m*60+sec), nil
+}
+
+// dayNumber is MySQL's calc_daynr: days since year 0.
+func dayNumber(year, month, day int64) int64 {
+	if year == 0 && month == 0 {
+		return 0
+	}
+	delsum := 365*year + 31*(month-1) + day
+	if month <= 2 {
+		year--
+	} else {
+		delsum -= (month*4 + 23) / 10
+	}
+	temp := ((year/100 + 1) * 3) / 4
+	return delsum + year/4 - temp
+}
+
+// evalInterval is INTERVAL(N, N1, N2, ...): -1 for a NULL N, else how many
+// of N1 <= N2 <= ... are at most N.
+func evalInterval(ctx *sql.Context, _ []sql.Expression, v []any) (any, error) {
+	if v[0] == nil {
+		return int64(-1), nil
+	}
+	n, _, err := types.InternalDecimalType.Convert(ctx, v[0])
+	if err != nil {
+		return int64(-1), nil
+	}
+	i := int64(0)
+	for _, x := range v[1:] {
+		if x != nil {
+			d, _, err := types.InternalDecimalType.Convert(ctx, x)
+			if err == nil && d.(decimal.Decimal).GreaterThan(n.(decimal.Decimal)) {
+				break
+			}
+		}
+		i++
+	}
+	return i, nil
 }

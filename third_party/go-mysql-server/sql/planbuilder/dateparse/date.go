@@ -120,6 +120,21 @@ func ParseDateWithFormat(date, format string) (interface{}, error) {
 	if dt.nanoseconds != nil {
 		nanoseconds = int(*dt.nanoseconds)
 	}
+	// s2z patch: an impossible date is no date (2001-02-30), nor one with a
+	// zero month or day (NO_ZERO_IN_DATE), as MySQL
+	if dt.year != nil || dt.month != nil || dt.day != nil {
+		if month > 12 || day > 31 || hours > 838 || minutes > 59 || seconds > 59 {
+			return nil, fmt.Errorf("invalid date")
+		}
+		if !(year == 0 && month == 0 && day == 0) {
+			if month == 0 || day == 0 {
+				return nil, fmt.Errorf("zero in date")
+			}
+			if time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC).Day() != day {
+				return nil, fmt.Errorf("invalid date")
+			}
+		}
+	}
 	// convert partial seconds to nanoseconds
 	nanosecondDuration := time.Microsecond*time.Duration(microseconds) +
 		time.Millisecond*time.Duration(milliseconds) +

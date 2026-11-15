@@ -9414,6 +9414,11 @@ value_expression:
     // will be non-trivial because of grammar conflicts.
     $$ = &IntervalExpr{Expr: tryCastExpr($2), Unit: $3.(ColIdent).String()}
   }
+| INTERVAL openb expression ',' argument_expression_list closeb
+  {
+    // s2z patch: INTERVAL(N, N1, N2, ...), the index of the last Ni <= N
+    $$ = &FuncExpr{Name: NewColIdent("interval"), Exprs: append(SelectExprs{&AliasedExpr{Expr: tryCastExpr($3).(Expr)}}, $5.(SelectExprs)...)}
+  }
 | INTERVAL value_expression compound_time_unit
   {
     // s2z patch: compound units (YEAR_MONTH, DAY_HOUR, ...) are keywords,

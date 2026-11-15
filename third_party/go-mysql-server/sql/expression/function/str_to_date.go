@@ -2,6 +2,8 @@ package function
 
 import (
 	"fmt"
+	"github.com/dolthub/vitess/go/sqltypes"
+	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/expression"
@@ -67,14 +69,19 @@ func (s *StrToDate) Type() sql.Type {
 	if err != nil {
 		return types.Datetime
 	}
+	// s2z patch: %f gives 6 digits, else none
+	fsp := 0
+	if strings.Contains(formatStr, "%f") {
+		fsp = 6
+	}
 	if hasDate && hasTime {
-		return types.Datetime
+		return types.MustCreateDatetimeType(sqltypes.Datetime, fsp)
 	}
 	if hasDate {
 		return types.Date
 	}
 	if hasTime {
-		return types.Time
+		return types.CreateTimeType(fsp)
 	}
 	return types.Datetime
 }

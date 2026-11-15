@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/dolthub/go-mysql-server/server"
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/expression"
 
@@ -59,6 +60,8 @@ var errCodes = []struct {
 // (routines.go).
 // reCheckDependency is go-mysql-server's error for dropping or renaming a
 // column a CHECK constraint uses (MySQL: 3959).
+var reTableNotFound = regexp.MustCompile(`^table not found: (\S+)$`)
+
 var reCheckDependency = regexp.MustCompile(`^can't alter column "(.*)" because it would invalidate check constraint "(.*)"`)
 
 var reMissingFunction = regexp.MustCompile(`^stored procedure "s2z_fn_(.*)" does not exist`)
@@ -70,7 +73,25 @@ var (
 
 // A stored routine's handler matches an error by its MySQL number and
 // SQLSTATE, which go-mysql-server's errors get here.
-func init() { expression.SQLErrorMapper = withMySQLCode }
+func init() {
+	expression.SQLErrorMapper = withMySQLCode
+	server.S2zMapError = func(err error, query, db string) error {
+		err = withQueryCode(err, query)
+		// MySQL names the table with its database
+		if se := sql.CastSQLError(err); se.Num == 1146 {
+			m := reTableNotFound.FindStringSubmatch(se.Message)
+			if m == nil {
+				return err
+			}
+			name := m[1]
+			if !strings.Contains(name, ".") {
+				name = db + "." + name
+			}
+			return mysql.NewSQLError(1146, "42S02", "Table '%s' doesn't exist", name)
+		}
+		return err
+	}
+}
 
 func withMySQLCode(err error) error {
 	var se *mysql.SQLError

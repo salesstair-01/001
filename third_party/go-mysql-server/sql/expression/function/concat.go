@@ -16,6 +16,8 @@ package function
 
 import (
 	"fmt"
+	"github.com/dolthub/go-mysql-server/sql/expression"
+	"github.com/dolthub/vitess/go/sqltypes"
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
@@ -50,7 +52,20 @@ func (c *Concat) Description() string {
 }
 
 // Type implements the Expression interface.
-func (c *Concat) Type() sql.Type { return types.LongText }
+func (c *Concat) Type() sql.Type {
+	// s2z patch: the collation of its string arguments (else the default
+	// connection collation), as MySQL derives it; it was utf8mb4_0900_bin
+	coll := sql.Collation_utf8mb4_0900_ai_ci
+	for _, a := range c.args {
+		if st, ok := a.Type().(sql.StringType); ok {
+			if _, isLit := a.(*expression.Literal); !isLit {
+				coll = st.Collation()
+				break
+			}
+		}
+	}
+	return types.MustCreateString(sqltypes.Text, types.LongTextBlobMax, coll)
+}
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
 func (c *Concat) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {

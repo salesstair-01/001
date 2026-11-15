@@ -15,6 +15,7 @@
 package aggregation
 
 import (
+	"github.com/shopspring/decimal"
 	"math"
 	"sort"
 	"strings"
@@ -99,7 +100,8 @@ type SumAgg struct {
 
 	// use prefix sums to quickly calculate arbitrary frame sum within partition
 	prefixSum []float64
-	nullCnt   []int // s2z patch: NULLs up to each row, for an all-NULL frame
+	nullCnt   []int             // s2z patch: NULLs up to each row, for an all-NULL frame
+	decSum    []decimal.Decimal // s2z patch: exact prefix sums of an exact number
 }
 
 func NewSumAgg(e sql.Expression) *SumAgg {
@@ -139,6 +141,7 @@ func (a *SumAgg) StartPartition(ctx *sql.Context, interval sql.WindowInterval, b
 	a.Dispose()
 	var err error
 	a.prefixSum, a.nullCnt, err = floatPrefixSum(ctx, interval, buf, a.expr)
+	a.decSum = decimalPrefixSum(ctx, interval, buf, a.expr)
 	return err
 }
 
@@ -160,7 +163,41 @@ func (a *SumAgg) Compute(ctx *sql.Context, interval sql.WindowInterval, buf sql.
 			return nil
 		}
 	}
+	if a.decSum != nil {
+		_, sc, _ := exactDigits(a.expr)
+		return decimalFrameSum(interval, a.partitionStart, a.decSum).Round(int32(min(sc, types.DecimalTypeMaxScale)))
+	}
 	return computePrefixSum(interval, a.partitionStart, a.prefixSum)
+}
+
+// decimalPrefixSum is the exact prefix sums of an exact number, nil for
+// any other type. (s2z patch)
+func decimalPrefixSum(ctx *sql.Context, interval sql.WindowInterval, buf sql.WindowBuffer, e sql.Expression) []decimal.Decimal {
+	if _, _, ok := exactDigits(e); !ok {
+		return nil
+	}
+	sums := make([]decimal.Decimal, interval.End-interval.Start)
+	last := decimal.Zero
+	for i := range sums {
+		if v, err := e.Eval(ctx, buf[interval.Start+i]); err == nil && v != nil {
+			last = last.Add(exactDecimal(ctx, e.Type(), v))
+		}
+		sums[i] = last
+	}
+	return sums
+}
+
+func decimalFrameSum(interval sql.WindowInterval, partitionStart int, sums []decimal.Decimal) decimal.Decimal {
+	startIdx := interval.Start - partitionStart - 1
+	endIdx := interval.End - partitionStart - 1
+	sum := decimal.Zero
+	if endIdx >= 0 {
+		sum = sums[endIdx]
+	}
+	if startIdx >= 0 {
+		sum = sum.Sub(sums[startIdx])
+	}
+	return sum
 }
 
 func floatPrefixSum(ctx *sql.Context, interval sql.WindowInterval, buf sql.WindowBuffer, e sql.Expression) ([]float64, []int, error) {
@@ -210,6 +247,7 @@ type AvgAgg struct {
 	prefixSum []float64
 	// exclude nulls in average denominator
 	nullCnt []int
+	decSum  []decimal.Decimal // s2z patch
 }
 
 func NewAvgAgg(e sql.Expression) *AvgAgg {
@@ -248,6 +286,7 @@ func (a *AvgAgg) StartPartition(ctx *sql.Context, interval sql.WindowInterval, b
 	a.partitionEnd = interval.End
 	var err error
 	a.prefixSum, a.nullCnt, err = floatPrefixSum(ctx, interval, buf, a.expr)
+	a.decSum = decimalPrefixSum(ctx, interval, buf, a.expr)
 	return err
 }
 
@@ -267,6 +306,13 @@ func (a *AvgAgg) Compute(ctx *sql.Context, interval sql.WindowInterval, buf sql.
 	if startIdx >= 0 {
 		nonNullCnt -= startIdx + 1
 		nonNullCnt += a.nullCnt[startIdx]
+	}
+	if a.decSum != nil {
+		if nonNullCnt == 0 {
+			return nil
+		}
+		_, sc, _ := exactDigits(a.expr)
+		return decimalFrameSum(interval, a.partitionStart, a.decSum).DivRound(decimal.NewFromInt(int64(nonNullCnt)), int32(min(sc+4, types.DecimalTypeMaxScale)))
 	}
 	return computePrefixSum(interval, a.partitionStart, a.prefixSum) / float64(nonNullCnt)
 }

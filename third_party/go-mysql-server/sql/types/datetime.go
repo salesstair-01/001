@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -236,6 +237,14 @@ func (t datetimeType) ConvertWithoutRangeCheck(ctx context.Context, v interface{
 	if bs, ok := v.([]byte); ok {
 		v = string(bs)
 	}
+	if n, ok := S2zNumberValue(v); ok {
+		// s2z patch: a number is a date as MySQL reads it (960201)
+		str, ok := S2zNumberDatetime(n)
+		if !ok {
+			return zeroTime, ErrConvertingToTime.New(v)
+		}
+		v = str
+	}
 	switch value := v.(type) {
 	case string:
 		// s2z patch: surrounding spaces, and a zero date with a zero
@@ -247,6 +256,14 @@ func (t datetimeType) ConvertWithoutRangeCheck(ctx context.Context, v interface{
 		// TODO: consider not using time.Parse if we want to match MySQL exactly ('2010-06-03 11:22.:.:.:.:' is a valid timestamp)
 		var parsed bool
 		res, parsed = parseDatetime(value)
+		if !parsed && s2zDigits.MatchString(value) {
+			// s2z patch: digits are a date as a number is ('960101')
+			if d, err := decimal.NewFromString(value); err == nil {
+				if str, ok := S2zNumberDatetime(d); ok && str != "0000-00-00 00:00:00" {
+					res, parsed = parseDatetime(str)
+				}
+			}
+		}
 		if !parsed {
 			return zeroTime, ErrConvertingToTime.New(v)
 		}
@@ -342,6 +359,8 @@ func (t datetimeType) ConvertWithoutRangeCheck(ctx context.Context, v interface{
 
 	return res, nil
 }
+
+var s2zDigits = regexp.MustCompile(`^\d{6,14}(\.\d+)?$`)
 
 func parseDatetime(value string) (time.Time, bool) {
 	for _, fmt := range TimestampDatetimeLayouts {

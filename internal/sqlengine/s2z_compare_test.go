@@ -92,6 +92,14 @@ func TestMySQLComparisons(t *testing.T) {
 		{"SELECT RAND(999999), RAND(-1), RAND(1.5), RAND('7'), RAND(NULL)", "[0.014231365187309091,0.9050373219931845,0.6555866465490187,0.9065021936842261,0.15522042769493574]"},
 		{"SELECT CAST(RAND(2) * 1000 AS UNSIGNED), CAST(RAND(a) * 1000 AS UNSIGNED) FROM g", "[656,405 122,405 645,656]"},
 		{"SELECT PI(), PI()*2, PI()/3, ROUND(PI(),2), CONCAT(PI()), -PI()", "[3.141593,6.283185,1.0471975512,3.14,3.141593,-3.141593]"},
+		// SHOW WARNINGS lists a failed statement's error, and only its own
+		{"SELECT 1/0", "[NULL]"},
+		{"INSERT INTO nosuch VALUES (1)", "ERR 1146"},
+		{"SHOW WARNINGS", "[Error,1146,Table 'app.nosuch' doesn't exist]"},
+		{"SELECT COUNT(*) FROM dt WHERE t > '2018-00-03 00:00:00'", "ERR 1525"},
+		{"SHOW WARNINGS", "[Warning,1292,Incorrect datetime value: '2018-00-03 00:00:00' for column 't' at row 1 Error,1525,Incorrect DATETIME value: '2018-00-03 00:00:00']"},
+		{"SELECT 1", "[1]"},
+		{"SHOW WARNINGS", "[]"},
 		// division by zero, and DECIMAL out of range, in strict mode
 		{"CREATE TABLE z (a decimal(4,2), b int)", "[]"},
 		{"INSERT INTO z VALUES (101.55, 1)", "ERR 1264"},

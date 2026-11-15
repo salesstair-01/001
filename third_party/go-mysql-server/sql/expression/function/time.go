@@ -1668,7 +1668,7 @@ func (t *Time) String() string {
 
 // Type implements the Expression interface.
 func (t *Time) Type() sql.Type {
-	return types.Time
+	return types.CreateTimeType(s2zFsp(t.Child)) // s2z patch: the argument's digits
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

@@ -52,6 +52,47 @@ func HashOf(ctx context.Context, v Row) (uint64, error) {
 	return hash.Sum64(), nil
 }
 
+// HashOfSchema is HashOf for a row of schema sch: a string of a column
+// with a collation hashes by its weights, so that values the collation
+// holds equal ('a', 'A', 'ä' in utf8mb4_0900_ai_ci) are one. (s2z patch)
+func HashOfSchema(ctx context.Context, sch Schema, v Row) (uint64, error) {
+	hash := digestPool.Get().(*xxhash.Digest)
+	hash.Reset()
+	defer digestPool.Put(hash)
+	for i, x := range v {
+		if i > 0 {
+			if _, err := hash.Write([]byte{0}); err != nil {
+				return 0, err
+			}
+		}
+		x, err := UnwrapAny(ctx, x)
+		if err != nil {
+			return 0, err
+		}
+		if i < len(sch) && x != nil {
+			if st, ok := sch[i].Type.(StringType); ok {
+				var str string
+				switch y := x.(type) {
+				case string:
+					str = y
+				case []byte:
+					str = string(y)
+				default:
+					str = fmt.Sprint(y)
+				}
+				if err := st.Collation().WriteWeightString(hash, str); err != nil {
+					return 0, err
+				}
+				continue
+			}
+		}
+		if _, err := fmt.Fprintf(hash, "%v,", x); err != nil {
+			return 0, err
+		}
+	}
+	return hash.Sum64(), nil
+}
+
 var digestPool = sync.Pool{
 	New: func() any {
 		return xxhash.New()

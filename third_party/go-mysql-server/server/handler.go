@@ -392,6 +392,12 @@ func (h *Handler) ComBinlogDumpGTID(c *mysql.Conn, logFile string, logPos uint64
 
 var queryLoggingRegex = regexp.MustCompile(`[\r\n\t ]+`)
 
+// S2zMapError, when set, is the integrator's MySQL error for a statement's
+// error, for the error SHOW WARNINGS lists. (s2z patch)
+var S2zMapError func(err error, query, db string) error
+
+var s2zShowDiagnostics = regexp.MustCompile(`(?is)^(\s+|/\*.*?\*/|(#|-- )[^\n]*\n)*(show\s+(warnings|errors|count)|get\s+(current\s+|stacked\s+)?diagnostics)\b`)
+
 func (h *Handler) doQuery(
 	ctx context.Context,
 	c *mysql.Conn,
@@ -416,6 +422,21 @@ func (h *Handler) doQuery(
 		return remainder, err
 	}
 	defer sqlCtx.ProcessList.EndQuery(sqlCtx)
+	if sqlCtx.Session != nil && !s2zShowDiagnostics.MatchString(query) {
+		sqlCtx.Session.ClearWarnings() // s2z patch: each statement's own, also one that fails while planned
+	}
+	defer func() {
+		// s2z patch: a statement's error is in its warnings, as MySQL's
+		// SHOW WARNINGS lists it
+		if err != nil && sqlCtx.Session != nil {
+			e := err
+			if S2zMapError != nil {
+				e = S2zMapError(err, query, sqlCtx.GetCurrentDatabase())
+			}
+			se := sql.CastSQLError(e)
+			sqlCtx.Session.Warn(&sql.Warning{Level: "Error", Code: se.Num, Message: se.Message})
+		}
+	}()
 	err = sql.SessionCommandBegin(sqlCtx.Session)
 	if err != nil {
 		return "", err

@@ -16,6 +16,7 @@ package function
 
 import (
 	"fmt"
+	"github.com/dolthub/vitess/go/sqltypes"
 
 	gmstime "github.com/dolthub/go-mysql-server/internal/time"
 	"github.com/dolthub/go-mysql-server/sql"
@@ -62,7 +63,7 @@ func (c *ConvertTz) String() string {
 
 // Type implements the sql.Expression interface.
 func (c *ConvertTz) Type() sql.Type {
-	return types.DatetimeMaxPrecision
+	return types.MustCreateDatetimeType(sqltypes.Datetime, s2zFsp(c.dt)) // s2z patch: the argument's digits
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

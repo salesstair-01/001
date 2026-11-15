@@ -1873,6 +1873,9 @@ func TypedString(t sql.Type, v interface{}) (string, bool) {
 	}
 	if IsDateType(t) {
 		if tm, ok := v.(time.Time); ok {
+			if tm.Equal(zeroTime) {
+				return "0000-00-00", true // the zero date
+			}
 			return tm.Format("2006-01-02"), true
 		}
 		return "", false
@@ -1880,6 +1883,9 @@ func TypedString(t sql.Type, v interface{}) (string, bool) {
 	if dt, ok := t.(sql.DatetimeType); ok && !IsDateType(t) {
 		if tm, ok := v.(time.Time); ok {
 			s := tm.Format("2006-01-02 15:04:05") // DATETIME(2): ....00.00
+			if tm.Equal(zeroTime) {
+				s = "0000-00-00 00:00:00"
+			}
 			if p := dt.Precision(); p > 0 {
 				s += fmt.Sprintf(".%06d", tm.Nanosecond()/1000)[:p+1]
 			}

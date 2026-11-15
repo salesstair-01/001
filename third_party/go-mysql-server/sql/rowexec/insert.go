@@ -16,6 +16,7 @@ package rowexec
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/dolthub/vitess/go/mysql"
@@ -392,6 +393,8 @@ func convertDataAndWarnRow(ctx *sql.Context, tableSchema sql.Schema, row sql.Row
 			text = string([]rune(text)[:maxLength])
 		}
 		row[columnIdx] = text // truncate string
+	} else if v, ok := s2zDatetimePrefix(ctx, tableSchema[columnIdx], orig, rowNum); ok {
+		row[columnIdx] = v // s2z patch: the date before the rest, as MySQL
 	} else if dt, ok := tableSchema[columnIdx].Type.(types.DecimalType_); ok && types.ErrConvertToDecimalLimit.Is(err) {
 		// s2z patch: a DECIMAL out of range is its bound, as MySQL
 		row[columnIdx] = tableSchema[columnIdx].Type.Zero()
@@ -544,4 +547,30 @@ func s2zTimeStringWarnings(ctx *sql.Context, col *sql.Column, s string, row int,
 		ctx.Session.Warn(&sql.Warning{Level: "Warning", Code: 1265, Message: fmt.Sprintf("Data truncated for column '%s' at row %d", col.Name, row)})
 	}
 	return nil
+}
+
+var s2zDatetimePrefixRe = regexp.MustCompile(`^\s*\d{4}-\d{1,2}-\d{1,2}(?:[ T]\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?)?`)
+
+// s2zDatetimePrefix is a DATE, DATETIME or TIMESTAMP column's value for a
+// string that starts with one and goes on ('1999-01-01 00:00:00 xxx'), as
+// MySQL stores it outside strict mode, with warning 4096 for a space after
+// a date and time. (s2z patch)
+func s2zDatetimePrefix(ctx *sql.Context, col *sql.Column, v interface{}, row int) (interface{}, bool) {
+	str, ok := v.(string)
+	if !ok || !types.IsTime(col.Type) {
+		return nil, false
+	}
+	p := s2zDatetimePrefixRe.FindString(str)
+	if p == "" || len(p) == len(str) {
+		return nil, false
+	}
+	t, _, err := col.Type.Convert(ctx, p)
+	if err != nil {
+		return nil, false
+	}
+	if str[len(p)] == ' ' && strings.Contains(p, ":") && ctx != nil && ctx.Session != nil {
+		ctx.Session.Warn(&sql.Warning{Level: "Warning", Code: 4096, Message: fmt.Sprintf(
+			"Delimiter ' ' in position %d in datetime value '%s' at row %d is superfluous and is deprecated. Please remove.", len(p), str, row)})
+	}
+	return t, true
 }

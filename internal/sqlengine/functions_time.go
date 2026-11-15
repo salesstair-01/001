@@ -43,7 +43,7 @@ func init() {
 	} {
 		overrides[name] = f
 	}
-	ts2 := fnN("timestamp", 2, 2, fixedType(types.LongText), false, evalTimestamp2)
+	ts2 := fnN("timestamp", 2, 2, timestamp2Type, false, typedTime(timestamp2Type, evalTimestamp2))
 	overrides["timestamp"] = sql.FunctionN{Name: "timestamp", Fn: func(args ...sql.Expression) (sql.Expression, error) {
 		if len(args) == 2 {
 			return ts2.NewInstance(args)

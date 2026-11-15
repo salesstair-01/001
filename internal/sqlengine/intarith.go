@@ -197,6 +197,17 @@ func (c *intCast) Eval(ctx *sql.Context, row sql.Row) (any, error) {
 	case string:
 		return stringToInt(ctx, x, c.signed), nil
 	case []byte:
+		if lit, ok := c.Child.(*expression.Literal); ok && lit.HexNumber && len(x) <= 8 {
+			// a hexadecimal literal is the number of its bytes
+			var n uint64
+			for _, b := range x {
+				n = n<<8 | uint64(b)
+			}
+			if c.signed {
+				return int64(n), nil
+			}
+			return n, nil
+		}
 		return stringToInt(ctx, string(x), c.signed), nil
 	}
 	return c.Convert.S2zEvalValue(ctx, v)

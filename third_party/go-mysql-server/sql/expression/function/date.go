@@ -538,6 +538,9 @@ func dateOffsetType(input sql.Expression, interval *expression.Interval) sql.Typ
 		return types.Null
 	}
 
+	if t := expression.S2zIntervalOperandType(input, interval); t != nil {
+		return t // s2z patch: MySQL's, with the operand's or the interval's digits
+	}
 	if types.IsDatetimeType(inputType) || types.IsTimestampType(inputType) {
 		return types.DatetimeMaxPrecision
 	}

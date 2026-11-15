@@ -1057,6 +1057,12 @@ func s2zIntervalType(a *Arithmetic) sql.Type {
 		}
 		other = a.RightChild
 	}
+	return S2zIntervalOperandType(other, iv)
+}
+
+// S2zIntervalOperandType is MySQL's type of other + iv (and DATE_ADD,
+// DATE_SUB), or nil when other is not temporal. (s2z patch)
+func S2zIntervalOperandType(other sql.Expression, iv *Interval) sql.Type {
 	unit := strings.ToUpper(iv.Unit)
 	dayUnit := strings.HasPrefix(unit, "DAY") || unit == "YEAR" || unit == "QUARTER" || unit == "MONTH" || unit == "WEEK" || unit == "YEAR_MONTH"
 	scale := 0

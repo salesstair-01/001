@@ -120,3 +120,9 @@ func typedTime(typ func([]sql.Expression) sql.Type, eval func(*sql.Context, []sq
 		return r, nil
 	}
 }
+
+// timestamp2Type is TIMESTAMP(expr, time)'s: a DATETIME with the arguments'
+// digits.
+func timestamp2Type(args []sql.Expression) sql.Type {
+	return types.MustCreateDatetimeType(sqltypes.Datetime, maxFsp(args))
+}

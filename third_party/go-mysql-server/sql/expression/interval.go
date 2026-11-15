@@ -16,6 +16,7 @@ package expression
 
 import (
 	"fmt"
+	"github.com/shopspring/decimal"
 	"regexp"
 	"strconv"
 	"strings"
@@ -138,6 +139,12 @@ func (i *Interval) EvalDelta(ctx *sql.Context, row sql.Row) (*TimeDelta, error) 
 			return nil, errInvalidIntervalUnit.New(i.Unit)
 		}
 	} else {
+		// s2z patch: n SECOND keeps a DECIMAL n's fraction, as MySQL
+		if d, ok := val.(decimal.Decimal); ok && i.Unit == "SECOND" && !d.IsInteger() {
+			us := d.Mul(decimal.NewFromInt(1000000)).Round(0).IntPart()
+			td.Seconds, td.Microseconds = us/1000000, us%1000000
+			return &td, nil
+		}
 		val, _, err = types.Int64.Convert(ctx, val)
 		if err != nil {
 			return nil, err

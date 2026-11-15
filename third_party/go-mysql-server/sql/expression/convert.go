@@ -362,7 +362,8 @@ func convertValue(ctx *sql.Context, val interface{}, castTo string, originType s
 		if !(isTime || isString || isBinary || isTimespan) {
 			return nil, nil
 		}
-		d, _, err := types.DatetimeMaxPrecision.Convert(ctx, val)
+		// s2z patch: rounded to DATETIME(n)'s digits, as MySQL
+		d, _, err := types.MustCreateDatetimeType(sqltypes.Datetime, min(max(typeLength, 0), 6)).Convert(ctx, val)
 		if err != nil {
 			return nil, err
 		}

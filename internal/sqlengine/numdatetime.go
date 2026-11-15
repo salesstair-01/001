@@ -54,7 +54,7 @@ func numDatetime(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan
 			c := e.(expression.Comparer)
 			l, r := c.Left(), c.Right()
 			if gf, ok := l.(*expression.GetField); ok && types.IsTime(l.Type()) {
-				if lit := datetimeLiteral(r); lit != nil {
+				if lit := datetimeCmpLiteral(r); lit != nil {
 					ne, err := e.WithChildren(l, lit)
 					return ne, transform.NewTree, err
 				}
@@ -71,7 +71,7 @@ func numDatetime(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan
 				}
 			}
 			if gf, ok := r.(*expression.GetField); ok && types.IsTime(r.Type()) {
-				if lit := datetimeLiteral(l); lit != nil {
+				if lit := datetimeCmpLiteral(l); lit != nil {
 					ne, err := e.WithChildren(lit, r)
 					return ne, transform.NewTree, err
 				}
@@ -89,7 +89,7 @@ func numDatetime(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan
 			}
 		case *expression.Between:
 			if _, ok := e.Val.(*expression.GetField); ok && types.IsTime(e.Val.Type()) {
-				lo, hi := datetimeLiteral(e.Lower), datetimeLiteral(e.Upper)
+				lo, hi := datetimeCmpLiteral(e.Lower), datetimeCmpLiteral(e.Upper)
 				if lo != nil || hi != nil {
 					if lo == nil {
 						lo = e.Lower
@@ -267,6 +267,18 @@ func insertColumns(ii *plan.InsertInto) []*sql.Column {
 // datetimeLiteral is the 'YYYY-MM-DD hh:mm:ss' literal for e when it is a
 // numeric or digit-string constant MySQL reads as a datetime; nil when it
 // isn't one.
+// datetimeCmpLiteral is datetimeLiteral for a comparison: a number that is
+// no DATETIME stays a number (MySQL compares it as one).
+func datetimeCmpLiteral(e sql.Expression) sql.Expression {
+	l := datetimeLiteral(e)
+	if lit, ok := l.(*expression.Literal); ok {
+		if s, ok := lit.Value().(string); ok && !strings.Contains(s, "-") {
+			return nil
+		}
+	}
+	return l
+}
+
 func datetimeLiteral(e sql.Expression) sql.Expression {
 	lit, ok := e.(*expression.Literal)
 	if !ok {
@@ -317,6 +329,11 @@ func datetimeLiteral(e sql.Expression) sql.Expression {
 	n, err := strconv.ParseInt(digits, 10, 64)
 	if err != nil {
 		return nil
+	}
+	if strings.Trim(frac, "0") != "" && n <= 99991231 {
+		// a date (no time) with a fraction is no DATETIME in MySQL
+		// (101.101, 990101.102): its text, which is refused
+		return expression.NewLiteral(digits+"."+frac, types.LongText)
 	}
 	n, ok = numberToDatetime(n)
 	if !ok {

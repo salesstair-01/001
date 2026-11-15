@@ -24,6 +24,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/plan"
 	"github.com/dolthub/go-mysql-server/sql/transform"
+	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
 func hasRecursiveCte(node sql.Node) bool {
@@ -174,10 +175,25 @@ func (b *Builder) mergeSetOpSchemas(u *plan.SetOp) sql.Node {
 
 		// try to get optimal type to convert both into
 		convertTo := expression.GetConvertToType(ls[i].Type, rs[i].Type)
+		length := 0
+		// s2z patch: temporal columns keep a temporal type, with the most
+		// digits (TIME with TIME(6) is TIME(6); it was text)
+		if t, ok := types.S2zTemporalMerge(ls[i].Type, rs[i].Type); ok && !types.IsTimestampType(t) {
+			switch {
+			case types.IsTimespan(t):
+				convertTo = expression.ConvertToTime
+				length, _ = t.(types.TimespanType_).Precision()
+			case types.IsDateType(t):
+				convertTo = expression.ConvertToDate
+			default:
+				convertTo = expression.ConvertToDatetime
+				length = t.(sql.DatetimeType).Precision()
+			}
+		}
 
 		// TODO: Principled type coercion...
-		les[i], err = b.f.buildConvert(les[i], convertTo, 0, 0)
-		res[i], err = b.f.buildConvert(res[i], convertTo, 0, 0)
+		les[i], err = b.f.buildConvert(les[i], convertTo, length, 0)
+		res[i], err = b.f.buildConvert(res[i], convertTo, length, 0)
 
 		// Preserve schema names across the conversion.
 		les[i] = expression.NewAlias(ls[i].Name, les[i])

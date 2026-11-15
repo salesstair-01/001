@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/plan"
 )
 
@@ -112,6 +113,12 @@ func applyUpdateExpressionsWithIgnoreRow(ctx *sql.Context, updateExprs []sql.Exp
 			var wtce sql.WrappedTypeConversionError
 			isTypeConversionError := errors.As(err, &wtce)
 			if !isTypeConversionError || !(ignore || !strictMode(ctx)) { // s2z patch: non-strict mode adjusts values too
+				if isTypeConversionError && wtce.OffendingIdx < len(tableSchema) {
+					col := tableSchema[wtce.OffendingIdx]
+					if mapped := expression.S2zStoreError(col.Name, col.Type, wtce.Err, rowNum); mapped != nil {
+						return nil, mapped // s2z patch: MySQL's error
+					}
+				}
 				return nil, err
 			}
 

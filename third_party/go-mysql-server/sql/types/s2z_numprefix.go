@@ -137,3 +137,8 @@ func toInt64Value(v interface{}) (int64, bool) {
 	}
 	return 0, false
 }
+
+// S2zHasNumberPrefix is whether s starts with a number (after spaces).
+func S2zHasNumberPrefix(s string) bool {
+	return numberPrefix.MatchString(s)
+}

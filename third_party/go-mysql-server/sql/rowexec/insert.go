@@ -117,6 +117,14 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 			}
 		}
 		if row[idx] != nil {
+			// s2z patch: MySQL's handling of a value the column must cut
+			if v, err := expression.S2zStoreValue(ctx, col.Name, col.Type, row[idx], strictMode(ctx) && !i.ignore, i.rowNum); err != nil {
+				return nil, sql.NewWrappedInsertError(origRow, err)
+			} else {
+				row[idx] = v
+			}
+		}
+		if row[idx] != nil {
 			converted, inRange, cErr := col.Type.Convert(ctx, row[idx])
 			if cErr == nil && !inRange {
 				cErr = sql.ErrValueOutOfRange.New(row[idx], col.Type)
@@ -151,6 +159,12 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 						if converted == nil {
 							converted = i.schema[idx].Type.Zero()
 						}
+						if types.IsUnsigned(col.Type) {
+							// s2z patch: a negative number is 0
+							if f, _, ferr := types.Float64.Convert(ctx, orig); ferr == nil && f.(float64) < 0 {
+								converted = col.Type.Zero()
+							}
+						}
 						row[idx] = converted
 						// Add a warning instead (s2z patch: MySQL's)
 						ctx.Session.Warn(ignoreWarning(col, orig, cErr, i.rowNum))
@@ -160,7 +174,9 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 					continue
 				} else {
 					// Fill in error with information
-					if types.ErrLengthBeyondLimit.Is(cErr) {
+					if mapped := expression.S2zStoreError(col.Name, col.Type, cErr, i.rowNum); mapped != nil {
+						cErr = mapped // s2z patch: MySQL's error
+					} else if types.ErrLengthBeyondLimit.Is(cErr) {
 						cErr = types.ErrLengthBeyondLimit.New(row[idx], col.Name)
 					} else if sql.ErrNotMatchingSRID.Is(cErr) {
 						cErr = sql.ErrNotMatchingSRIDWithColName.New(col.Name, cErr)

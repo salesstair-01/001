@@ -80,6 +80,16 @@ func (s *SetField) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		}
 	}
 	if val != nil {
+		// s2z patch: MySQL's handling of a value the column must cut
+		mode := sql.LoadSqlMode(ctx)
+		strict := (mode.ModeEnabled("STRICT_TRANS_TABLES") || mode.ModeEnabled("STRICT_ALL_TABLES")) && !s2zIgnoring(ctx.Query())
+		v, serr := S2zStoreValue(ctx, getField.Name(), getField.fieldType, val, strict, 1)
+		if serr != nil {
+			return nil, serr
+		}
+		val = v
+	}
+	if val != nil {
 		convertedVal, inRange, err := getField.fieldType.Convert(ctx, val)
 		if err == nil && inRange == sql.OutOfRange && types.IsNumber(getField.fieldType) {
 			// s2z patch: a number out of the column's range is MySQL's error

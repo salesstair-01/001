@@ -29,6 +29,22 @@ import (
 const numDatetimeID analyzer.RuleId = 10010
 
 func numDatetime(ctx *sql.Context, a *analyzer.Analyzer, n sql.Node, scope *plan.Scope, sel analyzer.RuleSelector, qf *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error) {
+	if s, ok := ctx.Session.(*Session); ok && scope.IsEmpty() {
+		// an INSERT ... VALUES reserves its rows' AUTO_INCREMENT values at once
+		transform.Inspect(n, func(n sql.Node) bool {
+			if ii, ok := n.(*plan.InsertInto); ok {
+				src := ii.Source
+				if p, ok := src.(*plan.Project); ok {
+					src = p.Child
+				}
+				if v, ok := src.(*plan.Values); ok {
+					s.noteValuesRows(len(v.ExpressionTuples))
+				}
+				return false
+			}
+			return true
+		})
+	}
 	n, same1, err := numDatetimeInserts(n)
 	if err != nil {
 		return nil, transform.SameTree, err

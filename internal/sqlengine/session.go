@@ -30,6 +30,10 @@ type Session struct {
 
 	autoMu sync.Mutex
 	auto   map[uint32]*autoBatch // AUTO_INCREMENT reservations of the current statement
+	// autoRows is the row count of the current statement's INSERT ... VALUES
+	// (statement autoRowsStmt): MySQL reserves exactly that many values for
+	// it, with no gap after it (only INSERT ... SELECT doubles).
+	autoRows, autoRowsStmt uint64
 
 	keyless rowKeyTables // keys of keyless rows read by the current statement
 
@@ -70,6 +74,9 @@ func (s *Session) nextAutoValue(table uint32, reserve func(count uint64) (uint64
 		b.size *= 2
 		if b.size == 0 {
 			b.size = 1
+			if s.autoRowsStmt == stmt && s.autoRows > 1 {
+				b.size = s.autoRows
+			}
 		}
 		if b.size > 1024 {
 			b.size = 1024
@@ -377,4 +384,12 @@ func sessionTxn(ctx *sql.Context, store *Store) (*Txn, func()) {
 	}
 	t := store.NewTxn(kv.ReadCommitted, true)
 	return t, func() { _ = t.Rollback(context.Background()) }
+}
+
+// noteValuesRows records that the current statement inserts n rows of
+// VALUES.
+func (s *Session) noteValuesRows(n int) {
+	s.autoMu.Lock()
+	s.autoRows, s.autoRowsStmt = uint64(n), s.Stmt()
+	s.autoMu.Unlock()
 }

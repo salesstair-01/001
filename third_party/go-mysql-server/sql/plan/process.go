@@ -15,6 +15,7 @@
 package plan
 
 import (
+	"strings"
 	"fmt"
 
 	"github.com/dolthub/go-mysql-server/sql/transform"
@@ -192,6 +193,15 @@ func GetQueryType(child sql.Node) queryType {
 	// TODO: behavior of CALL is not specified in the docs. Needs investigation
 	var queryType queryType = QueryTypeSelect
 	transform.Inspect(child, func(node sql.Node) bool {
+		// s2z patch: SHOW returns rows (ROW_COUNT() -1), SET none (0)
+		if strings.HasPrefix(fmt.Sprintf("%T", node), "*plan.Show") || strings.HasPrefix(fmt.Sprintf("%T", node), "plan.Show") {
+			queryType = QueryTypeSelect
+			return false
+		}
+		if _, ok := node.(*Set); ok {
+			queryType = QueryTypeDdl
+			return false
+		}
 		if IsNoRowNode(node) {
 			queryType = QueryTypeDdl
 			return false

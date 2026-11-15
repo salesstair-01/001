@@ -274,6 +274,30 @@ func (c *Convert) S2zEvalValue(ctx *sql.Context, val interface{}) (interface{}, 
 		return nil, nil
 	}
 
+	if c.castToType == ConvertToDecimal {
+		// s2z patch: a string's numeric prefix, and the type's bound past
+		// its range, with MySQL's warnings
+		if str, ok := val.(string); ok {
+			p, truncated := types.S2zNumberPrefix(str)
+			if truncated || strings.TrimSpace(str) == "" {
+				ctx.Warn(1292, "Truncated incorrect DECIMAL value: '%s'", str)
+			}
+			val = p
+		}
+		dt := createConvertedDecimalType(c.typeLength, c.typeScale, false)
+		if d, _, err := dt.Convert(ctx, val); err == nil {
+			return d, nil
+		} else if dd, ok := dt.(types.DecimalType_); ok && types.ErrConvertToDecimalLimit.Is(err) {
+			if cl, ok := dd.S2zClamp(val); ok {
+				name := "cast(" + c.Child.String() + " as decimal"
+				if c.typeLength > 0 {
+					name += fmt.Sprintf("(%d,%d)", c.typeLength, c.typeScale)
+				}
+				ctx.Warn(1264, "Out of range value for column '%s' at row 1", name+")")
+				return cl, nil
+			}
+		}
+	}
 	if c.castToType == ConvertToDate || c.castToType == ConvertToDatetime {
 		if n, ok := types.S2zNumberValue(val); ok {
 			if f, _, ferr := types.Float64.Convert(ctx, n); ferr == nil && f.(float64) == 0 {
@@ -513,7 +537,10 @@ func truncateConvertedValue(val interface{}, typeLength int) (interface{}, error
 // used in places where an error cannot be returned (e.g. Node.Type() implementations), hence why it logs an error
 // instead of returning one.
 func createConvertedDecimalType(length, scale int, logErrors bool) sql.DecimalType {
-	if length > 0 && scale > 0 {
+	if length <= 0 {
+		length, scale = 10, 0 // s2z patch: CAST(x AS DECIMAL) is DECIMAL(10,0), as MySQL
+	}
+	if length > 0 && scale >= 0 {
 		dt, err := types.CreateColumnDecimalType(uint8(length), uint8(scale))
 		if err != nil {
 			if logErrors {

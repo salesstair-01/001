@@ -1131,3 +1131,47 @@ var s2zIgnoreRe = regexp.MustCompile(`(?is)^(\s+|/\*.*?\*/|(#|-- )[^\n]*\n)*(ins
 
 // s2zIgnoring is whether the statement is INSERT / UPDATE / DELETE IGNORE.
 func s2zIgnoring(q string) bool { return s2zIgnoreRe.MatchString(q) }
+
+// S2zTemporalStoreNumber is v, a value of temporal type src, as MySQL stores
+// it in a number column of type dst: rounded to dst's fractional digits
+// (none for an integer), YYYYMMDDhhmmss[.f] (a DATE too) or hhmmss[.f].
+// (s2z patch)
+func S2zTemporalStoreNumber(src, dst sql.Type, v interface{}) (decimal.Decimal, bool) {
+	scale := 6
+	switch {
+	case types.IsInteger(dst):
+		scale = 0
+	case types.IsDecimal(dst):
+		scale = min(int(dst.(sql.DecimalType).Scale()), 6)
+	}
+	unit := int64(1)
+	for i := scale; i < 6; i++ {
+		unit *= 10
+	}
+	switch x := v.(type) {
+	case types.Timespan:
+		us := x.AsMicroseconds()
+		neg := us < 0
+		if neg {
+			us = -us
+		}
+		us = (us + unit/2) / unit * unit
+		sec := us / 1000000
+		d := decimal.NewFromInt(sec/3600*10000 + sec/60%60*100 + sec%60).Add(decimal.New(us%1000000, -6))
+		if neg {
+			d = d.Neg()
+		}
+		return d, true
+	case time.Time:
+		if !types.IsTime(src) {
+			return decimal.Decimal{}, false
+		}
+		t := x.Round(time.Duration(unit) * time.Microsecond).UTC()
+		d, err := decimal.NewFromString(t.Format("20060102150405"))
+		if err != nil {
+			return decimal.Decimal{}, false
+		}
+		return d.Add(decimal.New(int64(t.Nanosecond()/1000), -6)), true
+	}
+	return decimal.Decimal{}, false
+}

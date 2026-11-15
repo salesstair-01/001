@@ -274,6 +274,15 @@ func (c *Convert) S2zEvalValue(ctx *sql.Context, val interface{}) (interface{}, 
 		return nil, nil
 	}
 
+	if c.castToType == ConvertToDate || c.castToType == ConvertToDatetime {
+		if n, ok := types.S2zNumberValue(val); ok {
+			if f, _, ferr := types.Float64.Convert(ctx, n); ferr == nil && f.(float64) == 0 {
+				// s2z patch: CAST(0 AS DATE) is NULL, as MySQL
+				ctx.Warn(1292, "Incorrect datetime value: '%v'", val)
+				return nil, nil
+			}
+		}
+	}
 	// Should always return nil, and a warning instead
 	casted, err := convertValue(ctx, val, c.castToType, c.Child.Type(), c.typeLength, c.typeScale)
 	if err == nil && casted == nil && c.castToType == ConvertToTime {
@@ -346,6 +355,14 @@ func convertValue(ctx *sql.Context, val interface{}, castTo string, originType s
 		_, isString := val.(string)
 		_, isBinary := val.([]byte)
 		_, isTimespan := val.(types.Timespan) // s2z patch: today's date and the TIME
+		if _, isNumber := types.S2zNumberValue(val); isNumber {
+			// s2z patch: a number as MySQL reads it as a date
+			str, ok := types.S2zNumberDatetime(val)
+			if !ok {
+				return nil, types.ErrConvertingToTime.New(val)
+			}
+			val, isString = str, true
+		}
 		if !(isTime || isString || isBinary || isTimespan) {
 			return nil, nil
 		}
@@ -359,6 +376,14 @@ func convertValue(ctx *sql.Context, val interface{}, castTo string, originType s
 		_, isString := val.(string)
 		_, isBinary := val.([]byte)
 		_, isTimespan := val.(types.Timespan) // s2z patch: today's date and the TIME
+		if _, isNumber := types.S2zNumberValue(val); isNumber {
+			// s2z patch: a number as MySQL reads it as a date
+			str, ok := types.S2zNumberDatetime(val)
+			if !ok {
+				return nil, types.ErrConvertingToTime.New(val)
+			}
+			val, isString = str, true
+		}
 		if !(isTime || isString || isBinary || isTimespan) {
 			return nil, nil
 		}

@@ -934,6 +934,14 @@ func projectRowWithTypes(ctx *sql.Context, sch sql.Schema, projections []sql.Exp
 	}
 
 	for i := range newRow {
+		if i < len(projections) && newRow[i] != nil && types.IsNumber(sch[i].Type) && !types.IsYear(sch[i].Type) {
+			// s2z patch: a date or time into a number is its number
+			if pt := projections[i].Type(); types.IsTime(pt) || types.IsTimespan(pt) {
+				if d, ok := expression.S2zTemporalStoreNumber(pt, sch[i].Type, newRow[i]); ok {
+					newRow[i] = d
+				}
+			}
+		}
 		converted, inRange, err := sch[i].Type.Convert(ctx, newRow[i])
 		if err != nil {
 			if sql.ErrNotMatchingSRID.Is(err) {

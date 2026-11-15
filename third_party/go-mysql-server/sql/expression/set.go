@@ -15,6 +15,7 @@
 package expression
 
 import (
+	"github.com/dolthub/vitess/go/mysql"
 	"fmt"
 
 	"gopkg.in/src-d/go-errors.v1"
@@ -71,8 +72,29 @@ func (s *SetField) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+	if rt := s.RightChild.Type(); val != nil && types.IsNumber(getField.fieldType) && !types.IsYear(getField.fieldType) && (types.IsTime(rt) || types.IsTimespan(rt)) {
+		// s2z patch: a date or time stored in a number is its number
+		// (YYYYMMDDhhmmss.ffffff), not its Unix time
+		if d, ok := S2zTemporalStoreNumber(rt, getField.fieldType, val); ok {
+			val = d
+		}
+	}
 	if val != nil {
-		convertedVal, _, err := getField.fieldType.Convert(ctx, val)
+		convertedVal, inRange, err := getField.fieldType.Convert(ctx, val)
+		if err == nil && inRange == sql.OutOfRange && types.IsNumber(getField.fieldType) {
+			// s2z patch: a number out of the column's range is MySQL's error
+			// in strict mode (1264), else its bound with the warning
+			mode := sql.LoadSqlMode(ctx)
+			if (mode.ModeEnabled("STRICT_TRANS_TABLES") || mode.ModeEnabled("STRICT_ALL_TABLES")) && !s2zIgnoring(ctx.Query()) {
+				return nil, mysql.NewSQLError(1264, "22003", "Out of range value for column '%s' at row 1", getField.Name())
+			}
+			ctx.Warn(1264, "Out of range value for column '%s' at row 1", getField.Name())
+			if types.IsUnsigned(getField.fieldType) {
+				if f, _, ferr := types.Float64.Convert(ctx, val); ferr == nil && f.(float64) < 0 {
+					convertedVal = getField.fieldType.Zero() // a negative number is 0
+				}
+			}
+		}
 		if err != nil {
 			// Fill in error with information
 			if types.ErrLengthBeyondLimit.Is(err) {

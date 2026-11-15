@@ -399,19 +399,17 @@ func (t datetimeType) SQL(ctx *sql.Context, dest []byte, v interface{}) (sqltype
 		} else {
 			val = vt.AppendFormat(dest, sql.DateLayout)
 		}
-	case sqltypes.Datetime:
-		typ = sqltypes.Datetime
+	case sqltypes.Datetime, sqltypes.Timestamp:
+		// s2z patch: the type's digits, always (DATETIME(6) 10:10:10.100000;
+		// they were trimmed: 10:10:10.1)
+		typ = t.baseType
 		if vt.Equal(zeroTime) {
-			val = vt.AppendFormat(dest, ZeroTimestampDatetimeStr)
+			val = append(dest, "0000-00-00 00:00:00"...)
 		} else {
-			val = vt.AppendFormat(dest, sql.TimestampDatetimeLayout)
+			val = vt.AppendFormat(dest, "2006-01-02 15:04:05")
 		}
-	case sqltypes.Timestamp:
-		typ = sqltypes.Timestamp
-		if vt.Equal(zeroTime) {
-			val = vt.AppendFormat(dest, ZeroTimestampDatetimeStr)
-		} else {
-			val = vt.AppendFormat(dest, sql.TimestampDatetimeLayout)
+		if t.precision > 0 {
+			val = append(val, fmt.Sprintf(".%06d", vt.Nanosecond()/1000)[:t.precision+1]...)
 		}
 	default:
 		return sqltypes.Value{}, sql.ErrInvalidBaseType.New(t.baseType.String(), "datetime")

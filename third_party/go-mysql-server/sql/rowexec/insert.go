@@ -105,6 +105,17 @@ func (i *insertIter) Next(ctx *sql.Context) (returnRow sql.Row, returnErr error)
 
 	// Do any necessary type conversions to the target schema
 	for idx, col := range i.schema {
+		if row[idx] != nil && types.IsNumber(col.Type) && !types.IsYear(col.Type) {
+			// s2z patch: a date or time stored in a number is its number
+			// (YYYYMMDDhhmmss, a DATE too, or hhmmss), not its Unix time
+			src := sql.Type(types.DatetimeMaxPrecision)
+			if _, ok := row[idx].(types.Timespan); ok {
+				src = types.CreateTimeType(6)
+			}
+			if d, ok := expression.S2zTemporalStoreNumber(src, col.Type, row[idx]); ok {
+				row[idx] = d
+			}
+		}
 		if row[idx] != nil {
 			converted, inRange, cErr := col.Type.Convert(ctx, row[idx])
 			if cErr == nil && !inRange {
